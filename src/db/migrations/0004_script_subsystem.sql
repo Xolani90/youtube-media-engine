@@ -1,0 +1,25 @@
+-- 0004_script_subsystem.sql
+-- Additive schema change required by the Script Specification.
+--
+-- scripts already existed (0001_init.sql: id, content_brief_id, version,
+-- body, claim_links, created_at). Script is append-only per Brief (unlike
+-- Brief, which overwrites in place) — each regeneration inserts a new row
+-- with an incremented `version` rather than mutating the previous one.
+--
+-- This uniqueness constraint is the DB-enforced half of that guarantee:
+-- no two scripts rows may share the same (content_brief_id, version) pair,
+-- so a version-allocation race (two concurrent writers both computing the
+-- same "next" version) fails loudly at the database layer instead of
+-- silently persisting a duplicate. The application layer (src/script/
+-- pipeline.js) additionally computes the next version from inside the
+-- same storage.transaction() that performs the insert, so under this
+-- repository's single-connection SqliteStorageDriver the read-then-insert
+-- is already atomic; this index is the second, independent line of
+-- defense for any future multi-connection/multi-process deployment of the
+-- same database file.
+--
+-- No existing table is dropped or altered. No row currently exists in
+-- scripts in any environment (Script was never implemented before this
+-- migration), so adding this index cannot conflict with existing data.
+
+CREATE UNIQUE INDEX idx_scripts_content_brief_id_version ON scripts(content_brief_id, version);

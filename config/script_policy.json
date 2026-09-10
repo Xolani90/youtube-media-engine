@@ -1,0 +1,7 @@
+{
+  "version": "0.1",
+  "generation": {
+    "max_attempts": 3
+  },
+  "allow_call_to_action": false
+}

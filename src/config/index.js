@@ -72,6 +72,14 @@ function loadBriefPolicy() {
   throw new Error('config/brief_policy.json is required by the Brief Specification and was not found.');
 }
 
+function loadScriptPolicy() {
+  const p = path.join(REPO_ROOT, 'config', 'script_policy.json');
+  if (fs.existsSync(p)) {
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  }
+  throw new Error('config/script_policy.json is required by the Script Specification and was not found.');
+}
+
 export const config = {
   // Global autonomous-operation switch (spec §6, Owner Override).
   // If disabled, autonomous jobs must refuse to execute and record why.
@@ -105,6 +113,7 @@ export const config = {
   discoveryPolicy: loadDiscoveryPolicy(),
   researchPolicy: loadResearchPolicy(),
   briefPolicy: loadBriefPolicy(),
+  scriptPolicy: loadScriptPolicy(),
 
   // Top-K per run handed to Research (v0.6 §18). Config-driven, initial value 1-3.
   discoveryTopK: Number(process.env.DISCOVERY_TOP_K ?? 2),
