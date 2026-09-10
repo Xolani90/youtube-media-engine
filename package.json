@@ -1,0 +1,19 @@
+{
+  "name": "media-engine",
+  "version": "0.0.1",
+  "private": true,
+  "description": "[WORKING-NAME] - Autonomous Media Intelligence Engine (M0 foundation)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test tests/unit/*.test.js tests/integration/*.test.js",
+    "migrate": "node src/db/migrate.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

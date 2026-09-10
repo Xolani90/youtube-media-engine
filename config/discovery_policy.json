@@ -1,0 +1,54 @@
+{
+  "version": "0.1",
+  "thresholds": {
+    "dedup": {
+      "similarity": {
+        "candidate_threshold": 0.55,
+        "confident_duplicate_threshold": 0.85
+      }
+    },
+    "eligibility": {
+      "already_produced_similarity_threshold": 0.9
+    },
+    "freshness": {
+      "maximum_age_by_category": {
+        "breaking_hours": 48,
+        "trending_hours": 168,
+        "evergreen_hours": 8760
+      }
+    },
+    "risk": {
+      "policy": { "warning_threshold": 0.4, "critical_threshold": 0.75 },
+      "copyright": { "warning_threshold": 0.4, "critical_threshold": 0.75 },
+      "repetition": { "warning_threshold": 0.4, "critical_threshold": 0.75 }
+    }
+  },
+  "normalization": {
+    "scale_bounds_by_dimension": {
+      "novelty": { "min": 0, "max": 100 },
+      "competition": { "min": 0, "max": 100 },
+      "story_potential": { "min": 0, "max": 100 },
+      "evidence_availability": { "min": 0, "max": 100 },
+      "production_difficulty": { "min": 0, "max": 100 },
+      "audience_potential": { "min": 0, "max": 100 },
+      "commercial_intent": { "min": 0, "max": 100 },
+      "affiliate_potential": { "min": 0, "max": 100 },
+      "lead_generation_potential": { "min": 0, "max": 100 },
+      "product_adjacency": { "min": 0, "max": 100 },
+      "sponsorship_potential": { "min": 0, "max": 100 }
+    },
+    "inversion_map": {
+      "novelty": false,
+      "competition": true,
+      "story_potential": false,
+      "evidence_availability": false,
+      "production_difficulty": true,
+      "audience_potential": false,
+      "commercial_intent": false,
+      "affiliate_potential": false,
+      "lead_generation_potential": false,
+      "product_adjacency": false,
+      "sponsorship_potential": false
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "version": "0.1",
+  "weights": {
+    "novelty": 1.0,
+    "competition": 1.0,
+    "story_potential": 1.0,
+    "evidence_availability": 1.0,
+    "production_difficulty": 1.0,
+    "audience_potential": 1.0,
+    "commercial_intent": 1.0,
+    "affiliate_potential": 1.0,
+    "lead_generation_potential": 1.0,
+    "product_adjacency": 1.0,
+    "sponsorship_potential": 1.0
+  }
+}

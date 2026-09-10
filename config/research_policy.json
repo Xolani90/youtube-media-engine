@@ -1,0 +1,47 @@
+{
+  "version": "0.1",
+  "evidence": {
+    "independent_reporting_minimum": 2,
+    "source_roles": {
+      "primary_authoritative": {
+        "sufficient_alone": true
+      },
+      "independent_reporting": {
+        "sufficient_alone": false,
+        "counts_toward_corroboration": true
+      },
+      "syndicated": {
+        "sufficient_alone": false,
+        "counts_toward_corroboration": false
+      }
+    },
+    "source_quality": {
+      "minimum_quality_tier_for_corroboration": "MEDIUM"
+    },
+    "completeness_by_claim_type": {
+      "FACT": {
+        "load_bearing_requires": "VERIFIED"
+      },
+      "INFERENCE": {
+        "load_bearing_requires": "VERIFIED",
+        "policy_may_permit": "PARTIALLY_SUPPORTED"
+      },
+      "OPINION": {
+        "can_satisfy_factual_requirement": false
+      }
+    }
+  },
+  "staleness": {
+    "maximum_source_age_hours": 8760
+  },
+  "acquisition": {
+    "max_sources_per_research_project": 8,
+    "max_acquisition_attempts": 12
+  },
+  "retry": {
+    "max_retries_per_source": 2
+  },
+  "completeness": {
+    "overall_resolution_threshold": 0.7
+  }
+}
