@@ -12,15 +12,13 @@ described below were NOT actually re-applied to the file this session;
 only the source code, tests, and migration were placed and verified.
 
 ## Reported open items (Owner decisions)
-- **P1 (major, OPEN)**: if a Script passes Fact-Check (state -> `FACT_CHECK`)
-  and a later forced rerun on the same `script_id` produces `REJECT`,
-  `content_versions.state` stays at `FACT_CHECK`. Owner chose "must not
-  look like it cleared Fact-Check" (Option B) but did NOT pick a
-  destination state. Only `REJECTED` / `BLOCKED` / `NEEDS_REVIEW` /
-  `FAILED` are mechanically reachable without touching
-  `src/state/ContentStateMachine.js` (protected per spec §16), and none
-  has any precedent elsewhere in this repo's `transition()` call sites.
-  **Nothing should be implemented for P1 until a destination is chosen.**
+- **P1 (major, RESOLVED and OWNER-RATIFIED — see ADR-0002, decision D-A)**:
+  if a Script passes Fact-Check (state -> `FACT_CHECK`) and a later forced
+  rerun on the same `script_id` produces `REJECT`, `content_versions.state`
+  stays at `FACT_CHECK`. The Owner has accepted this as implemented; P1 is
+  closed with no `ContentStateMachine` change. See
+  `docs/DECISIONS/0002-governance-cost-and-prompt-trust-boundary.md` for the
+  authoritative record of this decision.
 - **P2 (moderate, RESOLVED and IMPLEMENTED)**: `parseClaimLinks()` no
   longer treats an absent or empty heading as a structural failure.
   `CLAIM_LINKS_MISSING_HEADING` has been removed; a present-but-non-string
