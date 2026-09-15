@@ -97,3 +97,11 @@ export const CAPTION_DEFAULTS = Object.freeze({
   BORDER_STYLE: 1,
   OUTLINE: 2
 });
+
+// Media Production v1.2 — deterministic visual sequencing. A visual is
+// never shown for less than this many seconds: below this, a cut reads
+// as an unusable flash rather than an intentional scene change. Purely
+// a local heuristic threshold, not derived from any external source.
+export const SEQUENCING_DEFAULTS = Object.freeze({
+  MIN_VISUAL_DURATION_SECONDS: 1.5
+});

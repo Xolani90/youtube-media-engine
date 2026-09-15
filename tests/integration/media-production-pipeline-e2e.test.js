@@ -149,6 +149,59 @@ test('end-to-end: production manifest -> narration -> render spec -> FFmpeg -> F
   cleanup(storage, dbPath, productionArtifactsDir, mediaArtifactsDir, assetsDir);
 });
 
+// --- Visual sequencing (Media Production v1.2) reaches the real renderer ------
+
+test('multiple visual assets + a longer script: sequencing is reflected in the persisted render spec and a valid multi-segment MP4 is produced', async () => {
+  const { storage, dbPath } = freshStorage();
+  const productionArtifactsDir = freshDir('media-e2e-production');
+  const mediaArtifactsDir = freshDir('media-e2e-media');
+  const assetsDir = freshDir('media-e2e-assets');
+  await storage.migrate();
+
+  const longerBody = 'This is the first sentence of a longer test script. Here is a second sentence with more content. '
+    + 'A third sentence continues the narration further still. Finally, a fourth sentence wraps up the script.';
+  const { contentBriefId, contentVersionId } = seedContentVersion(storage, { body: longerBody });
+  const imgA = makeFixtureImage(assetsDir, 'a.png', 'blue');
+  const imgB = makeFixtureImage(assetsDir, 'b.png', 'red');
+  const imgC = makeFixtureImage(assetsDir, 'c.png', 'green');
+  seedVisualAsset(storage, contentVersionId, imgA);
+  seedVisualAsset(storage, contentVersionId, imgB);
+  seedVisualAsset(storage, contentVersionId, imgC);
+
+  runProduction({ storage, contentBriefId, artifactsDir: productionArtifactsDir });
+  const mediaResult = runMediaProduction({ storage, contentBriefId, artifactsDir: mediaArtifactsDir });
+
+  assert.equal(mediaResult.outcome, 'RENDERED');
+  const artifact = mediaResult.mediaArtifact;
+
+  // The persisted render spec proves the sequenced (not flat equal-share)
+  // timeline reached buildRenderSpec: full coverage, no gaps/overlaps,
+  // and an exact end at the measured narration duration.
+  const renderSpec = JSON.parse(artifact.render_spec_json);
+  const visualTiming = renderSpec.visual_timing;
+  assert.ok(visualTiming.length >= 1);
+  assert.equal(visualTiming[0].start_seconds, 0);
+  for (let i = 1; i < visualTiming.length; i++) {
+    const prevEnd = Math.round((visualTiming[i - 1].start_seconds + visualTiming[i - 1].duration_seconds) * 1000) / 1000;
+    assert.equal(visualTiming[i].start_seconds, prevEnd);
+  }
+  const last = visualTiming[visualTiming.length - 1];
+  assert.ok(Math.abs((last.start_seconds + last.duration_seconds) - artifact.narration_duration_seconds) < 0.01);
+
+  // And it's a real, playable, correctly shaped video on disk.
+  const probeOut = execFileSync(
+    'ffprobe',
+    ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', artifact.artifact_path],
+    { stdio: ['ignore', 'pipe', 'pipe'] }
+  ).toString();
+  const probe = JSON.parse(probeOut);
+  assert.ok(probe.streams.find((s) => s.codec_type === 'video'));
+  assert.ok(probe.streams.find((s) => s.codec_type === 'audio'));
+  assert.ok(parseFloat(probe.format.duration) > 0);
+
+  cleanup(storage, dbPath, productionArtifactsDir, mediaArtifactsDir, assetsDir);
+});
+
 // --- Idempotency: repeated run does not duplicate ------
 
 test('repeated media production for the same content_version returns the existing record, no duplicate row', async () => {

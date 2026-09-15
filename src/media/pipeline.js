@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS } from './constants.js';
 import { resolveProductionForMedia } from './eligibility.js';
-import { selectVisualAssets, computeVisualTiming } from './visualTiming.js';
+import { selectVisualAssets } from './visualTiming.js';
+import { computeVisualSequencing } from './visualSequencing.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
 import { synthesizeNarration, probeDurationSeconds } from './narration.js';
@@ -155,13 +156,12 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     return { outcome: OUTCOME.NARRATION_FAILED, reason: err.message, mediaArtifact: null };
   }
 
-  // --- Visual timing ---
-  const visualTiming = computeVisualTiming(visualAssets, narrationDurationSeconds);
-
   // --- Captions (Media Production v1.1) ---
   // Caption text comes from script.body verbatim, deterministically
   // segmented — never an LLM, never a rewrite. No caption-worthy text
-  // simply renders with no subtitles, exactly as v1 did.
+  // simply renders with no subtitles, exactly as v1 did. Computed before
+  // visual sequencing (below) because v1.2's sequencing uses caption
+  // segment boundaries as its script-structure signal.
   const captionSegments = segmentCaptions(script.body, CAPTION_DEFAULTS.MAX_CAPTION_LENGTH);
   let captionTiming = [];
   if (captionSegments.length > 0) {
@@ -175,6 +175,13 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
       return { outcome: OUTCOME.RENDER_FAILED, reason: err.message, mediaArtifact: null };
     }
   }
+
+  // --- Visual sequencing (Media Production v1.2) ---
+  // Deterministic, script-aware timing: uses caption segment boundaries
+  // (computed just above) as scene-cut candidates instead of a flat
+  // equal-share division. Falls back to the plain equal-division
+  // timeline unchanged when there's no caption structure to key off of.
+  const visualTiming = computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds);
 
   // --- Render spec ---
   const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, visualTiming, captions: captionTiming });
