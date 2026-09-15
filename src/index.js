@@ -22,21 +22,22 @@ async function main() {
   console.log(`Started run ${runId} in ${mode} mode (autonomousEnabled=${config.autonomousEnabled})`);
 
   // Foundation smoke exercise: route a trivial completion through the
-  // local-stub provider (zero-cost, zero-network) and record it via the
-  // same cost-accounting path a real provider call would use.
-  const router = new LLMRouter({ priority: ['local-stub'] });
-  const { result, providerUsed } = await router.complete({ prompt: 'foundation smoke test' });
-
-  costs.record({
-    runId,
-    jobStage: 'foundation-smoke-test',
-    provider: providerUsed,
-    model: result.model,
-    inputTokens: result.inputTokens,
-    outputTokens: result.outputTokens,
-    estimatedCost: result.estimatedCost,
-    isPaid: result.isPaid
-  });
+  // local-stub provider (zero-cost, zero-network).
+  //
+  // D-B1 corrective fix (ADR-0002): the same `costs` CostTracker used for
+  // this run's accounting is now handed to the router itself, so the
+  // router's built-in pre-call enforcement boundary (see router.js) is
+  // actually live on this, the one real production execution path — not
+  // just exercised in isolation by unit tests. The router performs its
+  // own `costs.record()` call before invoking the provider; this is the
+  // sole recording of this call (no separate post-call `costs.record()`
+  // here anymore, which would have double-counted the same call against
+  // daily/monthly spend).
+  const router = new LLMRouter({ priority: ['local-stub'], costTracker: costs });
+  const { providerUsed } = await router.complete(
+    { prompt: 'foundation smoke test' },
+    { runId, jobStage: 'foundation-smoke-test' }
+  );
 
   runs.logDecision(runId, {
     subjectType: 'system',
