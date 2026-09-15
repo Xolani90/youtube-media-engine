@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 import { CAPTION_DEFAULTS } from './constants.js';
 
 /**
@@ -35,9 +36,22 @@ export function renderSilentVideo({ visualTiming, width, height, fps, videoEncod
   // scale/pad/fps/format chain is kept intact, not replaced. A render
   // with no caption-worthy text passes no subtitlesPath and renders
   // exactly as v1 did.
+  //
+  // Windows-specific fix (superseding an earlier quoting-only attempt):
+  // FFmpeg's filtergraph parser splits the subtitles filter's path
+  // argument on ANY colon it encounters, even inside single quotes
+  // (observed: quoting alone did not stop "C:/Users/..." from being
+  // split into filename "C" + a bogus "original_size" argument). Rather
+  // than continue fighting that parser's escaping rules, the path is
+  // kept colon-free entirely: FFmpeg is invoked with its working
+  // directory (`cwd`) set to the subtitle file's own directory, and the
+  // subtitles filter is given only the bare filename, which never
+  // contains a drive letter or any other colon.
   let vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=${fps},format=yuv420p`;
+  let ffmpegCwd;
   if (subtitlesPath) {
-    const escapedSubtitlesPath = escapeFilterPath(subtitlesPath);
+    ffmpegCwd = path.dirname(subtitlesPath);
+    const subtitlesBasename = escapeFilterPath(path.basename(subtitlesPath));
     const forceStyle = [
       `FontName=${CAPTION_DEFAULTS.FONT_NAME}`,
       `FontSize=${CAPTION_DEFAULTS.FONT_SIZE}`,
@@ -48,30 +62,44 @@ export function renderSilentVideo({ visualTiming, width, height, fps, videoEncod
       `Alignment=${CAPTION_DEFAULTS.ALIGNMENT}`,
       `MarginV=${CAPTION_DEFAULTS.MARGIN_V}`
     ].join(',');
-    vf += `,subtitles=${escapedSubtitlesPath}:force_style='${forceStyle}'`;
+    vf += `,subtitles='${subtitlesBasename}':force_style='${forceStyle}'`;
   }
 
+  // listPath/outputPath are passed on the command line as `-safe 0`
+  // concat-demuxer/output arguments (not embedded inside a filtergraph
+  // option string), so they are unaffected by the colon-splitting issue
+  // above and do not need to be relative to ffmpegCwd. Resolve them to
+  // absolute paths explicitly, though, since execFileSync's `cwd` option
+  // changes what a relative path on this process would mean.
+  const args = [
+    '-y',
+    '-f', 'concat', '-safe', '0', '-i', path.resolve(listPath),
+    '-vf', vf,
+    '-c:v', videoEncoder,
+    '-pix_fmt', 'yuv420p',
+    path.resolve(outputPath)
+  ];
+
   try {
-    execFileSync(
-      'ffmpeg',
-      [
-        '-y',
-        '-f', 'concat', '-safe', '0', '-i', listPath,
-        '-vf', vf,
-        '-c:v', videoEncoder,
-        '-pix_fmt', 'yuv420p',
-        outputPath
-      ],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
+    execFileSync('ffmpeg', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(ffmpegCwd ? { cwd: ffmpegCwd } : {})
+    });
   } finally {
     fs.rmSync(listPath, { force: true });
   }
 }
 
-/** Escapes a path for safe use as an FFmpeg filtergraph option value — backslash and colon are both special inside a filter's option string. */
+/**
+ * Escapes a filename for safe use inside an FFmpeg filtergraph option
+ * value (single-quote and backslash are both special there). Only ever
+ * applied to a bare filename now (see renderSilentVideo above) — no
+ * colon-handling is needed here because the directory component,
+ * where a Windows drive-letter colon would appear, is never part of
+ * the string passed to this function.
+ */
 function escapeFilterPath(p) {
-  return p.replace(/\\/g, '\\\\').replace(/:/g, '\\:');
+  return p.replace(/\\/g, '/').replace(/'/g, "'\\''");
 }
 
 function formatSrtTimestamp(totalSeconds) {
