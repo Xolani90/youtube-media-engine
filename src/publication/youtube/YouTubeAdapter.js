@@ -1,0 +1,299 @@
+import fs from 'node:fs';
+import { PublicationProvider } from '../PublicationProvider.js';
+import { PUBLICATION_RESULT_STATUS } from '../constants.js';
+
+/**
+ * YouTube Data API v3 first concrete publication provider adapter.
+ * Every YouTube-specific concept (endpoints, resumable-upload protocol,
+ * OAuth, snippet/status field mapping, privacy defaults) lives in this
+ * file only — the publication core (../pipeline.js) never imports
+ * anything from this module except the class itself, and knows nothing
+ * about any of the constants below.
+ *
+ * Verified against the current YouTube Data API v3 documentation
+ * (developers.google.com/youtube/v3/docs/videos/insert) at
+ * implementation time:
+ *   - Upload endpoint: POST https://www.googleapis.com/upload/youtube/v3/videos
+ *     with uploadType=resumable, part=snippet,status.
+ *   - Required OAuth 2.0 scope: https://www.googleapis.com/auth/youtube.upload
+ *     (https://www.googleapis.com/auth/youtube or .../youtubepartner also work).
+ *   - Resumable upload protocol: an initial POST with the JSON metadata
+ *     body and X-Upload-Content-Type/-Length headers returns a session
+ *     URL in the `Location` response header; the file bytes are then
+ *     PUT to that session URL.
+ *   - Videos uploaded via unverified API projects are restricted to
+ *     private viewing until the project passes an audit — this adapter
+ *     therefore never assumes a caller-requested "public"/"unlisted"
+ *     privacyStatus is actually honored by YouTube; it reports back
+ *     exactly what the provider returns.
+ *
+ * CREDENTIALS: this adapter never performs interactive OAuth itself
+ * (Publication v1 spec §7 — that is an Owner setup operation, not
+ * something the engine can do autonomously). It expects a long-lived
+ * refresh token to already exist in runtime configuration/environment,
+ * and exchanges it for a short-lived access token itself on every
+ * publish() call (tokens are not cached across calls — mirrors D-C2's
+ * own "never assume a prior check/credential persists" discipline).
+ * No secret is ever logged: catch blocks below log only structured
+ * error classifications, never raw response bodies or headers, which
+ * could otherwise carry tokens.
+ */
+export class YouTubeAdapter extends PublicationProvider {
+  /**
+   * @param {object} [opts]
+   * @param {typeof fetch} [opts.fetchImpl] - injectable for tests; defaults to global fetch.
+   * @param {() => {clientId: string, clientSecret: string, refreshToken: string}} [opts.credentialsProvider]
+   *   Defaults to reading YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET /
+   *   YOUTUBE_REFRESH_TOKEN from process.env. Injectable so tests never
+   *   need real credentials or environment mutation.
+   * @param {string} [opts.defaultPrivacyStatus] - one of 'private' | 'unlisted' | 'public'; defaults to 'private' (the safe default — see class docstring).
+   */
+  constructor({
+    fetchImpl = fetch,
+    credentialsProvider = defaultCredentialsProvider,
+    defaultPrivacyStatus = 'private'
+  } = {}) {
+    super();
+    this._fetch = fetchImpl;
+    this._credentialsProvider = credentialsProvider;
+    this._defaultPrivacyStatus = defaultPrivacyStatus;
+  }
+
+  get id() {
+    return 'youtube';
+  }
+
+  async publish(request) {
+    let accessToken;
+    try {
+      accessToken = await this._getAccessToken();
+    } catch (err) {
+      // No live network call was made with content -- this is a
+      // confirmed, local, explicit failure: no external side effect
+      // occurred.
+      return {
+        status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE,
+        provider: this.id,
+        errorClass: 'CREDENTIALS_UNAVAILABLE',
+        retryable: false
+      };
+    }
+
+    if (!fs.existsSync(request.mediaFilePath)) {
+      return {
+        status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE,
+        provider: this.id,
+        errorClass: 'MEDIA_FILE_MISSING',
+        retryable: false
+      };
+    }
+
+    const metadata = this._buildMetadata(request);
+    const fileStat = fs.statSync(request.mediaFilePath);
+
+    let sessionUrl;
+    try {
+      sessionUrl = await this._initiateResumableUpload({
+        accessToken,
+        metadata,
+        contentLength: fileStat.size
+      });
+    } catch (err) {
+      return this._classifyNetworkError(err, { phase: 'INITIATE_SESSION' });
+    }
+
+    if (!sessionUrl) {
+      // The provider accepted the initiate request but did not return a
+      // session URL to upload to -- we cannot know whether it intends
+      // to accept the upload. Treat as ambiguous rather than assuming
+      // either outcome.
+      return {
+        status: PUBLICATION_RESULT_STATUS.AMBIGUOUS,
+        provider: this.id,
+        reconciliationInfo: { phase: 'INITIATE_SESSION', note: 'no_session_url_returned' }
+      };
+    }
+
+    let uploadResult;
+    try {
+      uploadResult = await this._putFile({ sessionUrl, filePath: request.mediaFilePath, fileSize: fileStat.size });
+    } catch (err) {
+      return this._classifyNetworkError(err, { phase: 'UPLOAD_BODY', sessionUrl });
+    }
+
+    return this._interpretUploadResult(uploadResult, { sessionUrl });
+  }
+
+  // --- Internal helpers (all YouTube-specific; never referenced outside this file) ---
+
+  async _getAccessToken() {
+    const { clientId, clientSecret, refreshToken } = this._credentialsProvider();
+    if (!clientId || !clientSecret || !refreshToken) {
+      throw new Error('YouTube credentials are not configured.');
+    }
+    const res = await this._fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token'
+      }).toString()
+    });
+    if (!res.ok) {
+      throw new Error(`token_refresh_failed_${res.status}`);
+    }
+    const body = await res.json();
+    if (!body.access_token) {
+      throw new Error('token_refresh_missing_access_token');
+    }
+    return body.access_token;
+  }
+
+  _buildMetadata(request) {
+    return {
+      snippet: {
+        title: request.title,
+        description: request.description
+      },
+      status: {
+        privacyStatus: this._defaultPrivacyStatus,
+        // Scheduling (Publication v1 spec §15): YouTube only honors
+        // `publishAt` when privacyStatus is 'private' at upload time.
+        // The adapter passes the core's requestedPublishAt through
+        // verbatim if present; it does not invent or default one.
+        ...(request.requestedPublishAt ? { publishAt: request.requestedPublishAt } : {})
+      }
+    };
+  }
+
+  async _initiateResumableUpload({ accessToken, metadata, contentLength }) {
+    const res = await this._fetch(
+      'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json; charset=UTF-8',
+          'X-Upload-Content-Type': 'video/mp4',
+          'X-Upload-Content-Length': String(contentLength)
+        },
+        body: JSON.stringify(metadata)
+      }
+    );
+
+    if (res.status >= 500) {
+      throw new ProviderNetworkError(`initiate_upload_server_error_${res.status}`);
+    }
+    if (!res.ok) {
+      // 4xx here is a confirmed, explicit rejection of the request
+      // itself (bad metadata, invalid auth, quota, etc.) -- surfaced by
+      // the caller as EXPLICIT_FAILURE via the thrown error's shape.
+      let errorBody = null;
+      try {
+        errorBody = await res.json();
+      } catch {
+        // ignore unparseable error body
+      }
+      throw new ProviderExplicitError(`initiate_upload_rejected_${res.status}`, {
+        httpStatus: res.status,
+        errorBody
+      });
+    }
+    return res.headers.get('location');
+  }
+
+  async _putFile({ sessionUrl, filePath, fileSize }) {
+    const body = fs.readFileSync(filePath);
+    const res = await this._fetch(sessionUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'video/mp4',
+        'Content-Length': String(fileSize)
+      },
+      body
+    });
+
+    if (res.status >= 500) {
+      throw new ProviderNetworkError(`upload_server_error_${res.status}`);
+    }
+    if (!res.ok) {
+      let errorBody = null;
+      try {
+        errorBody = await res.json();
+      } catch {
+        // ignore unparseable error body
+      }
+      throw new ProviderExplicitError(`upload_rejected_${res.status}`, { httpStatus: res.status, errorBody });
+    }
+
+    let json = null;
+    try {
+      json = await res.json();
+    } catch {
+      // A 2xx with an unparseable body is itself ambiguous -- handled
+      // by _interpretUploadResult below via the null id check.
+    }
+    return json;
+  }
+
+  _interpretUploadResult(uploadResult, { sessionUrl }) {
+    const videoId = uploadResult?.id;
+    if (!videoId) {
+      // A 2xx response with no video id is not evidence of confirmed
+      // publication -- never fabricate an id or a URL.
+      return {
+        status: PUBLICATION_RESULT_STATUS.AMBIGUOUS,
+        provider: this.id,
+        reconciliationInfo: { phase: 'UPLOAD_BODY', sessionUrl, note: 'no_video_id_in_response' }
+      };
+    }
+    return {
+      status: PUBLICATION_RESULT_STATUS.SUCCESS,
+      provider: this.id,
+      providerItemId: videoId,
+      providerUrl: `https://youtu.be/${videoId}`,
+      raw: { privacyStatus: uploadResult?.status?.privacyStatus ?? null }
+    };
+  }
+
+  _classifyNetworkError(err, context) {
+    if (err instanceof ProviderExplicitError) {
+      return {
+        status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE,
+        provider: this.id,
+        errorClass: err.message,
+        retryable: false
+      };
+    }
+    // ProviderNetworkError (5xx), a thrown fetch/timeout error, or any
+    // other unexpected failure while talking to the provider: we do not
+    // know whether YouTube received/processed the request, so this is
+    // ambiguous, never a blind failure or a blind success.
+    return {
+      status: PUBLICATION_RESULT_STATUS.AMBIGUOUS,
+      provider: this.id,
+      reconciliationInfo: { ...context, note: err?.message ?? 'network_error' }
+    };
+  }
+}
+
+function defaultCredentialsProvider() {
+  return {
+    clientId: process.env.YOUTUBE_CLIENT_ID,
+    clientSecret: process.env.YOUTUBE_CLIENT_SECRET,
+    refreshToken: process.env.YOUTUBE_REFRESH_TOKEN
+  };
+}
+
+class ProviderExplicitError extends Error {
+  constructor(message, details) {
+    super(message);
+    this.details = details;
+  }
+}
+
+class ProviderNetworkError extends Error {}
+
+export default YouTubeAdapter;
