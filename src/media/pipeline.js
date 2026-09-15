@@ -1,0 +1,262 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS } from './constants.js';
+import { resolveProductionForMedia } from './eligibility.js';
+import { selectVisualAssets, computeVisualTiming } from './visualTiming.js';
+import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
+import { synthesizeNarration, probeDurationSeconds } from './narration.js';
+import { renderSilentVideo, muxNarration } from './render.js';
+import { validateMediaArtifact } from './validate.js';
+import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
+import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
+import { config } from '../config/index.js';
+
+/** Same shape/discipline as every other stage's local logDecision helper. Media Production never transitions content_versions.state, so resultingState is always null here. */
+function logDecision(storage, { runId = null, subjectType, subjectId, decision, reason }, nowISO = () => new Date().toISOString()) {
+  const id = crypto.randomUUID();
+  storage.run(
+    `INSERT INTO decision_log
+      (id, run_id, subject_type, subject_id, decision, reason, provider, config_snapshot, confidence, risk_level, resulting_state, created_at, stage)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)`,
+    [id, runId, subjectType, subjectId, decision, reason, nowISO(), MEDIA_STAGE]
+  );
+  return id;
+}
+
+/** D-G2 assets currently attached to this content_version, with usage_context merged in. Read-only. Identical helper to src/production/pipeline.js's own (deliberately re-implemented, per the existing per-stage decoupling convention). */
+function fetchAssetsWithUsageContext(storage, contentVersionId) {
+  const repo = new AssetProvenanceRepository(storage);
+  const assets = repo.getAssetsForContent(contentVersionId);
+  const usageRows = storage.all(
+    'SELECT asset_id, usage_context FROM asset_usages WHERE content_version_id = ?',
+    [contentVersionId]
+  );
+  const usageByAssetId = new Map(usageRows.map((u) => [u.asset_id, u.usage_context]));
+  return assets.map((a) => ({ ...a, usage_context: usageByAssetId.get(a.id) ?? null }));
+}
+
+/**
+ * Runs Real Media Production v1 for the current Script of a content
+ * item that Production MVP has already produced (Owner brief). Standalone,
+ * explicitly-invoked stage — no orchestrator calls this automatically,
+ * mirroring every prior stage's manual-trigger-surface convention.
+ *
+ * Entry precondition: content_version.state === 'PRODUCED' and a
+ * `productions` row exists for it (Production MVP already ran). This
+ * stage never transitions content_versions.state itself — see
+ * constants.js's module docstring for why.
+ *
+ * @param {object} deps
+ * @param {import('../storage/StorageDriver.js').StorageDriver} deps.storage
+ * @param {string} deps.contentBriefId
+ * @param {string} [deps.artifactsDir] - defaults to config.mediaArtifactsDir
+ * @param {string} [deps.runId]
+ */
+export function runMediaProduction({ storage, contentBriefId, artifactsDir = config.mediaArtifactsDir, runId = null }) {
+  const nowISO = () => new Date().toISOString();
+
+  const eligibility = resolveProductionForMedia(storage, contentBriefId);
+  if (!eligibility.eligible) {
+    const decision = eligibility.reason === 'NO_PRODUCTION_RECORD'
+      ? DECISION_LOG_DECISION.NOT_YET_PRODUCED
+      : DECISION_LOG_DECISION.STRUCTURAL_FAILURE;
+    logDecision(storage, {
+      runId, subjectType: 'content_brief', subjectId: contentBriefId,
+      decision, reason: eligibility.reason
+    }, nowISO);
+    const outcome = eligibility.reason === 'NO_PRODUCTION_RECORD' ? OUTCOME.NOT_YET_PRODUCED : OUTCOME.STRUCTURAL_FAILURE;
+    return { outcome, reason: eligibility.reason, mediaArtifact: null };
+  }
+  const { contentVersion, script, production } = eligibility;
+
+  if (contentVersion.state !== 'PRODUCED') {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.NOT_YET_PRODUCED, reason: `content_version_state_${contentVersion.state}`
+    }, nowISO);
+    return { outcome: OUTCOME.NOT_YET_PRODUCED, reason: contentVersion.state, mediaArtifact: null };
+  }
+
+  // Idempotency: one media_artifacts row per content_version (UNIQUE
+  // index, mirrors productions' own precedent). Already-rendered ->
+  // return the existing record unchanged, never re-render.
+  const existingArtifact = storage.get('SELECT * FROM media_artifacts WHERE content_version_id = ?', [contentVersion.id]);
+  if (existingArtifact) {
+    return { outcome: OUTCOME.ALREADY_RENDERED, mediaArtifact: existingArtifact };
+  }
+
+  // Re-check D-G2 asset rights at render time (assets may have changed
+  // since Production MVP ran) — identical discipline to Production MVP's
+  // own re-check. usage_restrictions free text is never parsed.
+  const assets = fetchAssetsWithUsageContext(storage, contentVersion.id);
+  const unsafeAsset = assets.find((a) => a.verification_status === 'DISPUTED' || a.verification_status === 'UNVERIFIED');
+  if (unsafeAsset) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.ASSET_RIGHTS_BLOCKED,
+      reason: `asset_${unsafeAsset.id}_verification_status_${unsafeAsset.verification_status}`
+    }, nowISO);
+    return { outcome: OUTCOME.ASSET_RIGHTS_BLOCKED, reason: unsafeAsset.verification_status, mediaArtifact: null };
+  }
+
+  // Checksum verification where applicable (Owner brief §15): only for
+  // assets that both declare a checksum AND whose file is present on
+  // disk right now — a missing file is handled explicitly below, as a
+  // render precondition, not silently treated as a rights problem.
+  for (const asset of assets) {
+    if (asset.checksum && fs.existsSync(asset.location)) {
+      const actual = sha256File(asset.location);
+      if (actual !== asset.checksum) {
+        logDecision(storage, {
+          runId, subjectType: 'content_version', subjectId: contentVersion.id,
+          decision: DECISION_LOG_DECISION.ASSET_CHECKSUM_MISMATCH,
+          reason: `asset_${asset.id}_checksum_mismatch`
+        }, nowISO);
+        return { outcome: OUTCOME.ASSET_CHECKSUM_MISMATCH, reason: `asset_${asset.id}`, mediaArtifact: null };
+      }
+    }
+  }
+
+  const visualAssets = selectVisualAssets(assets);
+  if (visualAssets.length === 0) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.NO_VISUAL_ASSETS, reason: 'no_usable_visual_assets_attached'
+    }, nowISO);
+    return { outcome: OUTCOME.NO_VISUAL_ASSETS, mediaArtifact: null };
+  }
+  const missingAsset = visualAssets.find((a) => !fs.existsSync(a.location));
+  if (missingAsset) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.RENDER_FAILED, reason: `missing_asset_file_${missingAsset.id}`
+    }, nowISO);
+    return { outcome: OUTCOME.RENDER_FAILED, reason: `missing_asset_file_${missingAsset.id}`, mediaArtifact: null };
+  }
+
+  const dir = mediaDir(artifactsDir, contentVersion.id);
+
+  // --- Narration ---
+  const narrationPath = path.join(dir, 'narration.wav');
+  const narrationTmpPath = path.join(dir, `.narration.wav.tmp-${process.pid}-${Date.now()}`);
+  let narrationDurationSeconds;
+  try {
+    synthesizeNarration(script.body, narrationTmpPath);
+    fs.renameSync(narrationTmpPath, narrationPath);
+    narrationDurationSeconds = probeDurationSeconds(narrationPath);
+  } catch (err) {
+    fs.rmSync(narrationTmpPath, { force: true });
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.NARRATION_FAILED, reason: `narration_failed_${err.message}`
+    }, nowISO);
+    return { outcome: OUTCOME.NARRATION_FAILED, reason: err.message, mediaArtifact: null };
+  }
+
+  // --- Visual timing + render spec ---
+  const visualTiming = computeVisualTiming(visualAssets, narrationDurationSeconds);
+  const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, visualTiming });
+  const { json: renderSpecJson, checksum: renderSpecChecksumValue } = renderSpecChecksum(renderSpec);
+
+  // --- Render (temporary paths; only promoted to final paths after validation) ---
+  const silentVideoTmpPath = path.join(dir, `.silent.tmp-${process.pid}-${Date.now()}.mp4`);
+  const concatListTmpPath = path.join(dir, `.concat.tmp-${process.pid}-${Date.now()}.txt`);
+  const finalVideoTmpPath = path.join(dir, `.video.tmp-${process.pid}-${Date.now()}.mp4`);
+  const finalVideoPath = path.join(dir, 'video.mp4');
+
+  try {
+    renderSilentVideo({
+      visualTiming,
+      width: RENDER_DEFAULTS.WIDTH,
+      height: RENDER_DEFAULTS.HEIGHT,
+      fps: RENDER_DEFAULTS.FPS,
+      videoEncoder: RENDER_DEFAULTS.VIDEO_ENCODER,
+      listPath: concatListTmpPath,
+      outputPath: silentVideoTmpPath
+    });
+    muxNarration({
+      silentVideoPath: silentVideoTmpPath,
+      narrationPath,
+      audioEncoder: RENDER_DEFAULTS.AUDIO_ENCODER,
+      outputPath: finalVideoTmpPath
+    });
+  } catch (err) {
+    fs.rmSync(silentVideoTmpPath, { force: true });
+    fs.rmSync(finalVideoTmpPath, { force: true });
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.RENDER_FAILED, reason: `render_failed_${err.message}`
+    }, nowISO);
+    return { outcome: OUTCOME.RENDER_FAILED, reason: err.message, mediaArtifact: null };
+  } finally {
+    fs.rmSync(silentVideoTmpPath, { force: true });
+  }
+
+  // --- Validate BEFORE persisting anything or promoting the tmp path ---
+  const validation = validateMediaArtifact(finalVideoTmpPath, {
+    width: RENDER_DEFAULTS.WIDTH,
+    height: RENDER_DEFAULTS.HEIGHT,
+    videoCodecName: RENDER_DEFAULTS.VIDEO_CODEC_NAME,
+    audioCodecName: RENDER_DEFAULTS.AUDIO_CODEC_NAME
+  });
+  if (!validation.valid) {
+    fs.rmSync(finalVideoTmpPath, { force: true });
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.VALIDATION_FAILED, reason: `validation_failed_${validation.reason}`
+    }, nowISO);
+    return { outcome: OUTCOME.VALIDATION_FAILED, reason: validation.reason, mediaArtifact: null };
+  }
+
+  // Validated -> promote to the final deterministic path (atomic rename).
+  finalizeArtifact(finalVideoTmpPath, finalVideoPath);
+  const artifactChecksum = sha256File(finalVideoPath);
+
+  const outcome = storage.transaction(() => {
+    // Re-check for a race: a concurrent run may have already inserted a
+    // media_artifacts row for this content_version while this run was
+    // rendering. If so, this run's file is an inconsequential duplicate
+    // of what a concurrent successful run would also have produced
+    // (same deterministic render spec/visual timing; narration audio
+    // bytes are genuinely deterministic too, per constants.js's
+    // documented espeak-ng finding) — no second DB row is inserted.
+    const raceExisting = storage.get('SELECT * FROM media_artifacts WHERE content_version_id = ?', [contentVersion.id]);
+    if (raceExisting) {
+      return { raced: true };
+    }
+    const stillProduction = storage.get('SELECT * FROM productions WHERE id = ?', [production.id]);
+    if (!stillProduction) {
+      throw new Error(`productions row ${production.id} no longer exists; refusing to persist Media Production result.`);
+    }
+
+    const mediaArtifactId = crypto.randomUUID();
+    storage.run(
+      `INSERT INTO media_artifacts
+        (id, production_id, content_version_id, render_spec_json, render_spec_checksum,
+         narration_path, narration_duration_seconds, artifact_path, artifact_checksum,
+         duration_seconds, width, height, video_codec, audio_codec, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        mediaArtifactId, production.id, contentVersion.id, renderSpecJson, renderSpecChecksumValue,
+        narrationPath, narrationDurationSeconds, finalVideoPath, artifactChecksum,
+        validation.duration, validation.width, validation.height, validation.videoCodec, validation.audioCodec,
+        nowISO()
+      ]
+    );
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.RENDERED, reason: `media_artifact_persisted_${mediaArtifactId}`
+    }, nowISO);
+
+    return { mediaArtifactId };
+  });
+
+  if (outcome.raced) {
+    const existing = storage.get('SELECT * FROM media_artifacts WHERE content_version_id = ?', [contentVersion.id]);
+    return { outcome: OUTCOME.ALREADY_RENDERED, mediaArtifact: existing ?? null };
+  }
+
+  const mediaArtifact = storage.get('SELECT * FROM media_artifacts WHERE id = ?', [outcome.mediaArtifactId]);
+  return { outcome: OUTCOME.RENDERED, mediaArtifact };
+}

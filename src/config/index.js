@@ -106,6 +106,22 @@ export const config = {
   storageDriver: process.env.STORAGE_DRIVER || 'sqlite',
   sqlitePath: process.env.SQLITE_PATH || path.join(REPO_ROOT, 'data', 'media-engine.db'),
 
+  // Production MVP (0008_production.sql): local filesystem location for
+  // deterministic production manifests (src/production/). Referenced by
+  // src/production/pipeline.js's default parameter but never actually
+  // defined here — every existing caller (all current tests) passes
+  // artifactsDir explicitly, so the gap never surfaced. Added now, as a
+  // pure addition, because Real Media Production (src/media/) needs the
+  // same config-driven-default pattern and this is the same missing
+  // piece. No existing Production MVP behavior changes: this only fills
+  // in the default a caller gets when it omits artifactsDir.
+  productionArtifactsDir: process.env.PRODUCTION_ARTIFACTS_DIR || path.join(REPO_ROOT, 'data', 'artifacts'),
+
+  // Real Media Production v1 (src/media/): local filesystem location for
+  // narration audio + rendered .mp4 artifacts. Local only, mirrors
+  // productionArtifactsDir exactly — no cloud/object storage.
+  mediaArtifactsDir: process.env.MEDIA_ARTIFACTS_DIR || path.join(REPO_ROOT, 'data', 'media_artifacts'),
+
   schedulerDriver: process.env.SCHEDULER_DRIVER || 'github-actions',
 
   costLimits: {
