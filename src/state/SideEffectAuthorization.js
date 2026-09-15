@@ -44,11 +44,22 @@ import { config } from '../config/index.js';
  * only from the Owner-controlled file (ADR-0008 §3.2, "the calling
  * code may identify or name the action ... it must never be able to
  * declare that action authorized itself").
+ *
+ * SECURITY FIX (post-implementation verification defect): the public
+ * functions below previously also accepted a caller-suppliable
+ * `filePath` override, which let a caller substitute an authorization
+ * source of its own choosing — functionally equivalent to
+ * self-authorization, since it displaced the Owner-controlled file
+ * entirely. Neither function accepts any path-related parameter now;
+ * both always read `config.authorizedExternalActionsPath` and nothing
+ * else. There is no parameter, option, or code path in this module by
+ * which a caller can name a different authorization source.
  */
 
 export class SideEffectDeniedError extends Error {}
 
-function readAuthorizedActions(filePath) {
+function readAuthorizedActions() {
+  const filePath = config.authorizedExternalActionsPath;
   if (!fs.existsSync(filePath)) return [];
   let parsed;
   try {
@@ -66,10 +77,12 @@ function readAuthorizedActions(filePath) {
 
 /**
  * Returns whether `action` currently appears in the Owner-controlled
- * authorization file. Reads fresh every call — never cached.
+ * authorization file at config.authorizedExternalActionsPath. Reads
+ * fresh every call — never cached. Takes no path/source parameter of
+ * any kind; the authorization source is not caller-selectable.
  */
-export function isActionAuthorized(action, { filePath = config.authorizedExternalActionsPath } = {}) {
-  return readAuthorizedActions(filePath).includes(action);
+export function isActionAuthorized(action) {
+  return readAuthorizedActions().includes(action);
 }
 
 /**
@@ -82,13 +95,19 @@ export function isActionAuthorized(action, { filePath = config.authorizedExterna
  *
  * mode/autonomousEnabled default to the live config so ordinary
  * callers need only pass `action`; tests may override either to
- * exercise specific cases without mutating global config.
+ * exercise specific cases without mutating global config. There is no
+ * equivalent override for the authorization source itself — it is
+ * always config.authorizedExternalActionsPath (see isActionAuthorized
+ * above). Tests that need a temporary authorization file do so by
+ * pointing config.authorizedExternalActionsPath itself at a fixture
+ * for the duration of the test and restoring it afterward — the same
+ * config object every caller reads, not a parallel path only tests
+ * can reach.
  */
 export function assertExternalActionAllowed({
   action,
   mode = config.runMode,
-  autonomousEnabled = config.autonomousEnabled,
-  filePath = config.authorizedExternalActionsPath
+  autonomousEnabled = config.autonomousEnabled
 } = {}) {
   if (typeof action !== 'string' || action.length === 0) {
     throw new Error('assertExternalActionAllowed requires a non-empty string `action`.');
@@ -108,9 +127,9 @@ export function assertExternalActionAllowed({
     );
   }
 
-  if (!isActionAuthorized(action, { filePath })) {
+  if (!isActionAuthorized(action)) {
     throw new SideEffectDeniedError(
-      `External side effect "${action}" denied: not present in Owner-controlled ${filePath}.`
+      `External side effect "${action}" denied: not present in Owner-controlled ${config.authorizedExternalActionsPath}.`
     );
   }
 }
