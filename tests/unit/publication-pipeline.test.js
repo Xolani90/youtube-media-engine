@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import Database from 'better-sqlite3';
 import { SqliteStorageDriver } from '../../src/storage/SqliteStorageDriver.js';
 import { runPublication } from '../../src/publication/pipeline.js';
 import { PublicationProvider } from '../../src/publication/PublicationProvider.js';
@@ -276,4 +277,311 @@ test('ARTIFACT_MISSING when the rendered file no longer exists on disk', async (
   assert.equal(result.outcome, 'ARTIFACT_MISSING');
 
   cleanup(storage, dbPath);
+});
+
+/**
+ * ---------------------------------------------------------------------
+ * SQLITE_BUSY_SNAPSHOT regression coverage.
+ *
+ * The claim transaction's `raceExisting` SELECT establishes connection
+ * A's deferred-transaction read snapshot. If a second, independent
+ * connection commits a conflicting write to the same database file
+ * after that SELECT returns but before A's own INSERT, A's write hits
+ * a real, unmocked SQLITE_BUSY_SNAPSHOT the moment SQLite tries to
+ * upgrade A's now-stale snapshot -- exactly the production race
+ * described in the confirmed defect. `BusySnapshotStorage` reproduces
+ * this deterministically (no sleeps/timing) by wrapping the real
+ * `SqliteStorageDriver` and, immediately after the real `raceExisting`
+ * read returns from inside the claim transaction, opening a second raw
+ * better-sqlite3 connection to the same file and committing the
+ * conflicting write itself.
+ * ---------------------------------------------------------------------
+ */
+
+const RACE_EXISTING_SQL = 'SELECT * FROM publications WHERE content_version_id = ? AND provider = ?';
+
+class BusySnapshotStorage {
+  constructor(inner, dbPath, { triggers = 1, conflictingWrite }) {
+    this.inner = inner;
+    this.dbPath = dbPath;
+    this._inTransaction = false;
+    this._triggersRemaining = triggers;
+    this._conflictingWrite = conflictingWrite;
+    this.triggerCount = 0;
+  }
+  run(sql, params) {
+    return this.inner.run(sql, params);
+  }
+  all(sql, params) {
+    return this.inner.all(sql, params);
+  }
+  get(sql, params) {
+    const result = this.inner.get(sql, params);
+    // Only the raceExisting re-check made from *inside* the claim
+    // transaction establishes the snapshot we want to make stale --
+    // the identical-looking idempotency SELECT at step 3 runs in
+    // autocommit mode, outside any transaction, and must not trigger.
+    if (this._inTransaction && this._triggersRemaining > 0 && sql === RACE_EXISTING_SQL) {
+      this._triggersRemaining -= 1;
+      this.triggerCount += 1;
+      this._conflictingWrite(this.dbPath);
+    }
+    return result;
+  }
+  transaction(fn) {
+    this._inTransaction = true;
+    try {
+      return this.inner.transaction(fn);
+    } finally {
+      this._inTransaction = false;
+    }
+  }
+  close() {
+    return this.inner.close();
+  }
+}
+
+/** A second, independent connection commits a competing publication row. */
+function conflictingPublicationInsert(status, contentVersionId, mediaArtifactId, provider) {
+  return (dbPath) => {
+    const raw = new Database(dbPath);
+    try {
+      const id = crypto.randomUUID();
+      const now = nowISO();
+      raw.prepare(
+        `INSERT INTO publications
+          (id, content_version_id, media_artifact_id, provider, status, request_json, attempt_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, '{}', 1, ?, ?)`
+      ).run(id, contentVersionId, mediaArtifactId, provider, status, now, now);
+    } finally {
+      raw.close();
+    }
+  };
+}
+
+/** A second, independent connection commits an unrelated write -- no competing publication row. */
+function conflictingUnrelatedWrite() {
+  return (dbPath) => {
+    const raw = new Database(dbPath);
+    try {
+      raw.prepare(
+        `INSERT INTO decision_log (id, run_id, subject_type, subject_id, decision, reason, created_at)
+         VALUES (?, NULL, 'test', 'busy-snapshot-regression', 'TEST_WRITE', 'unrelated_writer_conflict', ?)`
+      ).run(crypto.randomUUID(), nowISO());
+    } finally {
+      raw.close();
+    }
+  };
+}
+
+test('BUSY_SNAPSHOT + competing PENDING row: AMBIGUOUS/concurrent_attempt_in_progress, no provider call', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId, mediaArtifactId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  const wrapped = new BusySnapshotStorage(storage, dbPath, {
+    triggers: 1,
+    conflictingWrite: conflictingPublicationInsert('PENDING', contentVersionId, mediaArtifactId, 'mock')
+  });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'x', providerUrl: 'y' });
+    const result = await runPublication({ storage: wrapped, contentBriefId, provider: 'mock', adapter });
+    assert.equal(result.outcome, 'AMBIGUOUS');
+    assert.equal(result.reason, 'concurrent_attempt_in_progress');
+    assert.equal(adapter.calls.length, 0);
+  });
+  assert.equal(wrapped.triggerCount, 1, 'the reproduction hook must actually have fired');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('BUSY_SNAPSHOT + competing PUBLISHED row: ALREADY_PUBLISHED, no provider call', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId, mediaArtifactId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  const wrapped = new BusySnapshotStorage(storage, dbPath, {
+    triggers: 1,
+    conflictingWrite: conflictingPublicationInsert('PUBLISHED', contentVersionId, mediaArtifactId, 'mock')
+  });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'x', providerUrl: 'y' });
+    const result = await runPublication({ storage: wrapped, contentBriefId, provider: 'mock', adapter });
+    assert.equal(result.outcome, 'ALREADY_PUBLISHED');
+    assert.equal(adapter.calls.length, 0);
+  });
+  assert.equal(wrapped.triggerCount, 1);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('BUSY_SNAPSHOT + competing FAILED row: current AMBIGUOUS/concurrent_attempt_in_progress semantics preserved, no provider call', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId, mediaArtifactId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  const wrapped = new BusySnapshotStorage(storage, dbPath, {
+    triggers: 1,
+    conflictingWrite: conflictingPublicationInsert('FAILED', contentVersionId, mediaArtifactId, 'mock')
+  });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'x', providerUrl: 'y' });
+    const result = await runPublication({ storage: wrapped, contentBriefId, provider: 'mock', adapter });
+    assert.equal(result.outcome, 'AMBIGUOUS');
+    assert.equal(result.reason, 'concurrent_attempt_in_progress');
+    assert.equal(adapter.calls.length, 0);
+  });
+  assert.equal(wrapped.triggerCount, 1);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('BUSY_SNAPSHOT + competing AMBIGUOUS row: AMBIGUOUS/concurrent_attempt_in_progress, no provider call', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId, mediaArtifactId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  const wrapped = new BusySnapshotStorage(storage, dbPath, {
+    triggers: 1,
+    conflictingWrite: conflictingPublicationInsert('AMBIGUOUS', contentVersionId, mediaArtifactId, 'mock')
+  });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'x', providerUrl: 'y' });
+    const result = await runPublication({ storage: wrapped, contentBriefId, provider: 'mock', adapter });
+    assert.equal(result.outcome, 'AMBIGUOUS');
+    assert.equal(result.reason, 'concurrent_attempt_in_progress');
+    assert.equal(adapter.calls.length, 0);
+  });
+  assert.equal(wrapped.triggerCount, 1);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('BUSY_SNAPSHOT with no competing publication row: exactly one bounded retry succeeds, provider called exactly once', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  // Only ONE trigger: the retry attempt must run against an
+  // uncontested, fresh snapshot and succeed.
+  const wrapped = new BusySnapshotStorage(storage, dbPath, {
+    triggers: 1,
+    conflictingWrite: conflictingUnrelatedWrite()
+  });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vid999', providerUrl: 'https://youtu.be/vid999' });
+    const result = await runPublication({ storage: wrapped, contentBriefId, provider: 'mock', adapter });
+
+    assert.equal(result.outcome, 'PUBLISHED');
+    assert.equal(result.publication.status, 'PUBLISHED');
+    assert.equal(result.publication.provider_item_id, 'vid999');
+    assert.equal(adapter.calls.length, 1, 'provider must be called exactly once, not duplicated by the retry');
+  });
+  assert.equal(wrapped.triggerCount, 1, 'exactly one fresh retry must have been provoked');
+
+  const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(rows.length, 1, 'no duplicate publication row from the retry');
+
+  const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
+  assert.equal(cv.state, 'PUBLISHED');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('BUSY_SNAPSHOT bounded retry: a second conflict on the retry itself is not retried again, no provider call, defined AMBIGUOUS result', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  // Two triggers: the original attempt AND the one bounded retry both
+  // hit a stale-snapshot conflict from another writer.
+  const wrapped = new BusySnapshotStorage(storage, dbPath, {
+    triggers: 2,
+    conflictingWrite: conflictingUnrelatedWrite()
+  });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'x', providerUrl: 'y' });
+    const result = await runPublication({ storage: wrapped, contentBriefId, provider: 'mock', adapter });
+
+    assert.equal(result.outcome, 'AMBIGUOUS');
+    assert.ok(result.reason, 'a defined diagnostic reason must be present');
+    assert.equal(adapter.calls.length, 0, 'no provider call once bounded recovery is exhausted');
+  });
+  assert.equal(wrapped.triggerCount, 2, 'exactly the original attempt + one retry must have been provoked, no more');
+
+  const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(rows.length, 0, 'no publication row should have been left behind by the exhausted retry');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+/** Delegates every call to a real storage driver except that its `transaction` throws a supplied error exactly once. */
+class ThrowOnceStorage {
+  constructor(inner, err) {
+    this.inner = inner;
+    this.err = err;
+    this.thrown = false;
+  }
+  run(sql, params) {
+    return this.inner.run(sql, params);
+  }
+  all(sql, params) {
+    return this.inner.all(sql, params);
+  }
+  get(sql, params) {
+    return this.inner.get(sql, params);
+  }
+  transaction(fn) {
+    if (!this.thrown) {
+      this.thrown = true;
+      throw this.err;
+    }
+    return this.inner.transaction(fn);
+  }
+  close() {
+    return this.inner.close();
+  }
+}
+
+test('an ordinary non-SQLITE_BUSY_SNAPSHOT exception from the claim transaction propagates unchanged, never converted to AMBIGUOUS', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  // A fresh eligible content_version has no pre-existing PENDING row,
+  // so the claim transaction (step 6) is the first storage.transaction
+  // call runPublication makes -- the only call this wrapper intercepts.
+  const simulatedErr = Object.assign(new Error('simulated ordinary SQLite busy, not a snapshot conflict'), { code: 'SQLITE_BUSY' });
+  const wrapped = new ThrowOnceStorage(storage, simulatedErr);
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'x', providerUrl: 'y' });
+    await assert.rejects(
+      () => runPublication({ storage: wrapped, contentBriefId, provider: 'mock', adapter }),
+      (thrown) => thrown === simulatedErr
+    );
+    assert.equal(adapter.calls.length, 0);
+  });
+
+  cleanup(storage, dbPath, videoFile);
 });

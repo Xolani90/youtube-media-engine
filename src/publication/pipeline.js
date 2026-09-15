@@ -156,7 +156,12 @@ export async function runPublication({
   const request = buildPublicationRequest({ contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt });
   const requestJson = JSON.stringify(request);
 
-  const claim = storage.transaction(() => {
+  // Performs the claim attempt (race re-check + INSERT) inside a single
+  // transaction, obtaining a fresh SQLite snapshot each time it is
+  // invoked. Factored out only so the SQLITE_BUSY_SNAPSHOT recovery
+  // path below can perform its one bounded retry as a brand-new
+  // transaction without duplicating this body.
+  const attemptClaim = () => storage.transaction(() => {
     // Re-check for a race: a concurrent run may have already claimed or
     // completed this (content_version, provider) while this run was
     // getting here.
@@ -176,6 +181,58 @@ export async function runPublication({
     );
     return { publicationId };
   });
+
+  let claim;
+  try {
+    claim = attemptClaim();
+  } catch (err) {
+    // A stale-snapshot conflict on the claim transaction: this
+    // connection's deferred-transaction read snapshot (established by
+    // the raceExisting SELECT above) predates a commit made elsewhere
+    // in the database, so SQLite refuses the subsequent write. This is
+    // a storage-level condition, not a normal claim.raced outcome, so
+    // it is caught narrowly by exact SQLite error code -- every other
+    // exception (including plain SQLITE_BUSY) propagates unchanged.
+    if (err.code !== 'SQLITE_BUSY_SNAPSHOT') {
+      throw err;
+    }
+
+    // Let the failed transaction unwind completely (it already has,
+    // since storage.transaction() has returned via throw), then take a
+    // fresh autocommit read -- never from inside a transaction -- to
+    // see whether the conflict was actually a competing Publication
+    // claimant for this exact (content_version, provider) pair.
+    const freshRow = storage.get(
+      'SELECT * FROM publications WHERE content_version_id = ? AND provider = ?',
+      [contentVersion.id, provider]
+    );
+
+    if (freshRow) {
+      // A competing claimant is responsible for the conflict. Map its
+      // status exactly the same way the ordinary claim.raced path
+      // below does.
+      if (freshRow.status === PUBLICATION_STATUS.PUBLISHED) {
+        return { outcome: OUTCOME.ALREADY_PUBLISHED, publication: freshRow };
+      }
+      return { outcome: OUTCOME.AMBIGUOUS, reason: 'concurrent_attempt_in_progress', publication: freshRow };
+    }
+
+    // No competing Publication row: the conflict must have come from
+    // some other writer elsewhere in the shared SQLite database. Give
+    // this attempt exactly one more try, as a brand-new transaction
+    // (and therefore a fresh snapshot) -- never a general retry loop.
+    try {
+      claim = attemptClaim();
+    } catch (retryErr) {
+      if (retryErr.code !== 'SQLITE_BUSY_SNAPSHOT') {
+        throw retryErr;
+      }
+      // The single bounded retry itself hit another stale-snapshot
+      // conflict. Do not retry again and do not call the provider;
+      // report a defined, reconcilable outcome instead.
+      return { outcome: OUTCOME.AMBIGUOUS, reason: 'busy_snapshot_retry_exhausted', publication: null };
+    }
+  }
 
   if (claim.raced) {
     // Another run already owns this attempt. Do not call the provider
