@@ -106,7 +106,12 @@ export const config = {
   costLimits: {
     maxDailySpend: Number(process.env.MAX_DAILY_SPEND ?? 0),
     maxMonthlySpend: Number(process.env.MAX_MONTHLY_SPEND ?? 0),
-    maxCostPerContent: Number(process.env.MAX_COST_PER_CONTENT ?? 0)
+    maxCostPerContent: Number(process.env.MAX_COST_PER_CONTENT ?? 0),
+    // D-B2 (ADR pending closure): lifetime cumulative ceiling for a single
+    // content_id, spanning all job_stages. Additive to maxCostPerContent
+    // (the existing D-B1 per-call ceiling) — neither replaces the other.
+    // Same "0 = no budget allocated" convention as the limits above.
+    maxCumulativeCostPerContent: Number(process.env.MAX_CUMULATIVE_COST_PER_CONTENT ?? 0)
   },
 
   scoringWeights: loadScoringWeights(),
