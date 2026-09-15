@@ -98,6 +98,11 @@ export const config = {
 
   opportunityProviderPriority: envList('OPPORTUNITY_PROVIDER_PRIORITY', ['rss']),
 
+  // D-C2 (ADR-0002 / ADR-0008): path to the Owner-controlled external
+  // side-effect authorization file. Deliberately NOT loaded/cached here —
+  // src/state/SideEffectAuthorization.js reads it fresh on every check.
+  authorizedExternalActionsPath: path.join(REPO_ROOT, 'config', 'authorized_external_actions.json'),
+
   storageDriver: process.env.STORAGE_DRIVER || 'sqlite',
   sqlitePath: process.env.SQLITE_PATH || path.join(REPO_ROOT, 'data', 'media-engine.db'),
 
