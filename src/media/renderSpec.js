@@ -30,6 +30,7 @@ export function buildRenderSpec({
   narrationPath,
   narrationDurationSeconds,
   visualTiming,
+  captions = [],
   width = RENDER_DEFAULTS.WIDTH,
   height = RENDER_DEFAULTS.HEIGHT,
   fps = RENDER_DEFAULTS.FPS,
@@ -45,6 +46,10 @@ export function buildRenderSpec({
       duration_seconds: narrationDurationSeconds
     },
     visual_timing: visualTiming,
+    // Media Production v1.1: deterministic burned-in captions, derived
+    // from script.body. Additive to the render_spec_type shape — an
+    // empty array for any render with no caption-worthy text.
+    captions,
     output: {
       format: outputFormat,
       width,

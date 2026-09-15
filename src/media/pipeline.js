@@ -1,12 +1,13 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS } from './constants.js';
+import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS } from './constants.js';
 import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets, computeVisualTiming } from './visualTiming.js';
+import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
 import { synthesizeNarration, probeDurationSeconds } from './narration.js';
-import { renderSilentVideo, muxNarration } from './render.js';
+import { renderSilentVideo, muxNarration, writeSrtFile } from './render.js';
 import { validateMediaArtifact } from './validate.js';
 import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
@@ -154,9 +155,29 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     return { outcome: OUTCOME.NARRATION_FAILED, reason: err.message, mediaArtifact: null };
   }
 
-  // --- Visual timing + render spec ---
+  // --- Visual timing ---
   const visualTiming = computeVisualTiming(visualAssets, narrationDurationSeconds);
-  const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, visualTiming });
+
+  // --- Captions (Media Production v1.1) ---
+  // Caption text comes from script.body verbatim, deterministically
+  // segmented — never an LLM, never a rewrite. No caption-worthy text
+  // simply renders with no subtitles, exactly as v1 did.
+  const captionSegments = segmentCaptions(script.body, CAPTION_DEFAULTS.MAX_CAPTION_LENGTH);
+  let captionTiming = [];
+  if (captionSegments.length > 0) {
+    try {
+      captionTiming = computeCaptionTiming(captionSegments, narrationDurationSeconds);
+    } catch (err) {
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersion.id,
+        decision: DECISION_LOG_DECISION.RENDER_FAILED, reason: `caption_timing_failed_${err.message}`
+      }, nowISO);
+      return { outcome: OUTCOME.RENDER_FAILED, reason: err.message, mediaArtifact: null };
+    }
+  }
+
+  // --- Render spec ---
+  const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, visualTiming, captions: captionTiming });
   const { json: renderSpecJson, checksum: renderSpecChecksumValue } = renderSpecChecksum(renderSpec);
 
   // --- Render (temporary paths; only promoted to final paths after validation) ---
@@ -164,8 +185,15 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   const concatListTmpPath = path.join(dir, `.concat.tmp-${process.pid}-${Date.now()}.txt`);
   const finalVideoTmpPath = path.join(dir, `.video.tmp-${process.pid}-${Date.now()}.mp4`);
   const finalVideoPath = path.join(dir, 'video.mp4');
+  // Only written when there are captions to burn in.
+  const captionsSrtTmpPath = captionTiming.length > 0
+    ? path.join(dir, `.captions.tmp-${process.pid}-${Date.now()}.srt`)
+    : null;
 
   try {
+    if (captionsSrtTmpPath) {
+      writeSrtFile(captionTiming, captionsSrtTmpPath);
+    }
     renderSilentVideo({
       visualTiming,
       width: RENDER_DEFAULTS.WIDTH,
@@ -173,7 +201,8 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
       fps: RENDER_DEFAULTS.FPS,
       videoEncoder: RENDER_DEFAULTS.VIDEO_ENCODER,
       listPath: concatListTmpPath,
-      outputPath: silentVideoTmpPath
+      outputPath: silentVideoTmpPath,
+      subtitlesPath: captionsSrtTmpPath
     });
     muxNarration({
       silentVideoPath: silentVideoTmpPath,
@@ -191,6 +220,7 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     return { outcome: OUTCOME.RENDER_FAILED, reason: err.message, mediaArtifact: null };
   } finally {
     fs.rmSync(silentVideoTmpPath, { force: true });
+    if (captionsSrtTmpPath) fs.rmSync(captionsSrtTmpPath, { force: true });
   }
 
   // --- Validate BEFORE persisting anything or promoting the tmp path ---

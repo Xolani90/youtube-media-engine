@@ -81,3 +81,19 @@ export const RENDER_DEFAULTS = Object.freeze({
 // engine, not assumed of TTS in general — a future neural engine would
 // NOT get this same claim without separately verifying it.
 export const NARRATION_ENGINE = 'espeak-ng';
+
+// Caption/subtitle defaults for deterministic burned-in captions (Media
+// Production v1.1). A small, fixed styling configuration — not a theme
+// system — consumed by FFmpeg's `subtitles` filter via its `force_style`
+// option (libass ASS style syntax).
+export const CAPTION_DEFAULTS = Object.freeze({
+  MAX_CAPTION_LENGTH: 80,
+  FONT_NAME: 'DejaVu Sans',
+  FONT_SIZE: 18,
+  ALIGNMENT: 2,
+  MARGIN_V: 30,
+  PRIMARY_COLOUR: '&H00FFFFFF',
+  OUTLINE_COLOUR: '&H00000000',
+  BORDER_STYLE: 1,
+  OUTLINE: 2
+});
