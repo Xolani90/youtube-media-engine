@@ -201,7 +201,7 @@ export async function runResearchProject({
   for (const source of successfulSources) {
     const full = persistedSources.find((s) => s.id === source.id);
     const sourceRow = storage.get('SELECT * FROM sources WHERE id = ?', [source.id]);
-    const extraction = await extractClaims({ sourceText: sourceRow.content, coreQuestion }, llmRouter);
+    const extraction = await extractClaims({ sourceText: sourceRow.content, coreQuestion, sourceRole: sourceRow.role, sourceUrl: sourceRow.url }, llmRouter);
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
       decision: 'EXTRACTED', reason: `${extraction.claims.length}_claims_proposed`, provider: extraction.providerUsed,
