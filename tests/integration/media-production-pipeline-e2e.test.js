@@ -270,3 +270,112 @@ test('visual asset file missing from disk at render time -> RENDER_FAILED, no ar
 
   cleanup(storage, dbPath, productionArtifactsDir, mediaArtifactsDir, assetsDir);
 });
+
+// --- Crash recovery -----
+//
+// Two distinct crash points are worth proving safe, since they are the
+// only two places a prior run could have left the on-disk directory in
+// a state a fresh run must tolerate:
+//
+//   1. A process killed mid-render leaves orphaned `.tmp-<pid>-<ts>`
+//      files (narration/concat-list/silent-video/final-video) sitting
+//      in the content_version's directory. Every tmp filename is
+//      pid+timestamp-scoped, so a fresh run never collides with them —
+//      it should simply proceed and succeed, leaving the stale tmp
+//      files behind (harmless, not cleaned up by the new run, but never
+//      mistaken for real output).
+//
+//   2. A process killed AFTER finalizeArtifact's atomic rename (so a
+//      real, validated `video.mp4` already exists on disk at the
+//      deterministic path) but BEFORE the DB transaction committed the
+//      media_artifacts row. Because persistence only ever happens after
+//      promotion, and finalizeArtifact's rename is happy to overwrite
+//      an existing path, a fresh run must re-render, overwrite that
+//      leftover file with a freshly validated one, and end up with
+//      exactly one DB row — never silently trusting the pre-existing
+//      file as if it were already validated and persisted.
+
+test('crash recovery: orphaned tmp files from a killed prior run do not block or corrupt a fresh render', async () => {
+  const { storage, dbPath } = freshStorage();
+  const productionArtifactsDir = freshDir('media-e2e-production');
+  const mediaArtifactsDir = freshDir('media-e2e-media');
+  const assetsDir = freshDir('media-e2e-assets');
+  await storage.migrate();
+
+  const { contentBriefId, contentVersionId } = seedContentVersion(storage);
+  const img = makeFixtureImage(assetsDir, 'a.png', 'cyan');
+  seedVisualAsset(storage, contentVersionId, img);
+  runProduction({ storage, contentBriefId, artifactsDir: productionArtifactsDir });
+
+  // Simulate a previously killed run: pre-create the content_version's
+  // directory with leftover tmp artifacts from a different (fake) pid,
+  // as `fs.mkdtempSync`-style crashes would leave behind.
+  const dir = path.join(mediaArtifactsDir, contentVersionId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '.narration.wav.tmp-99999-1000'), 'partial narration bytes');
+  fs.writeFileSync(path.join(dir, '.silent.tmp-99999-1000.mp4'), 'partial silent video bytes');
+  fs.writeFileSync(path.join(dir, '.video.tmp-99999-1000.mp4'), 'partial final video bytes');
+  fs.writeFileSync(path.join(dir, '.concat.tmp-99999-1000.txt'), "file 'stale'\n");
+
+  const result = runMediaProduction({ storage, contentBriefId, artifactsDir: mediaArtifactsDir });
+
+  assert.equal(result.outcome, 'RENDERED');
+  assert.ok(fs.existsSync(result.mediaArtifact.artifact_path));
+  const probe = JSON.parse(execFileSync(
+    'ffprobe',
+    ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', result.mediaArtifact.artifact_path],
+    { stdio: ['ignore', 'pipe', 'pipe'] }
+  ).toString());
+  assert.ok(probe.streams.find((s) => s.codec_type === 'video'));
+  assert.ok(probe.streams.find((s) => s.codec_type === 'audio'));
+  // The orphaned tmp files from the "prior" run are untouched garbage,
+  // not mistaken for this run's output.
+  assert.ok(fs.existsSync(path.join(dir, '.narration.wav.tmp-99999-1000')));
+  const rows = storage.all('SELECT * FROM media_artifacts WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(rows.length, 1);
+
+  cleanup(storage, dbPath, productionArtifactsDir, mediaArtifactsDir, assetsDir);
+});
+
+test('crash recovery: a validated video.mp4 left on disk from a run killed before DB commit is safely re-rendered and persisted exactly once', async () => {
+  const { storage, dbPath } = freshStorage();
+  const productionArtifactsDir = freshDir('media-e2e-production');
+  const mediaArtifactsDir = freshDir('media-e2e-media');
+  const assetsDir = freshDir('media-e2e-assets');
+  await storage.migrate();
+
+  const { contentBriefId, contentVersionId } = seedContentVersion(storage);
+  const img = makeFixtureImage(assetsDir, 'a.png', 'magenta');
+  seedVisualAsset(storage, contentVersionId, img);
+  runProduction({ storage, contentBriefId, artifactsDir: productionArtifactsDir });
+
+  // Simulate the file having been promoted to its final deterministic
+  // path by a run that then crashed before its DB transaction committed:
+  // a `video.mp4` already sits at the exact path a real render would
+  // use, but no media_artifacts row exists yet for it.
+  const dir = path.join(mediaArtifactsDir, contentVersionId);
+  fs.mkdirSync(dir, { recursive: true });
+  const leftoverVideoPath = path.join(dir, 'video.mp4');
+  fs.writeFileSync(leftoverVideoPath, 'not a real video: leftover from a crashed run');
+  const leftoverChecksum = crypto.createHash('sha256').update(fs.readFileSync(leftoverVideoPath)).digest('hex');
+
+  const result = runMediaProduction({ storage, contentBriefId, artifactsDir: mediaArtifactsDir });
+
+  assert.equal(result.outcome, 'RENDERED');
+  // The leftover garbage was overwritten by a freshly rendered, validated file.
+  assert.notEqual(result.mediaArtifact.artifact_checksum, leftoverChecksum);
+  const probe = JSON.parse(execFileSync(
+    'ffprobe',
+    ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', result.mediaArtifact.artifact_path],
+    { stdio: ['ignore', 'pipe', 'pipe'] }
+  ).toString());
+  assert.ok(probe.streams.find((s) => s.codec_type === 'video'));
+  assert.ok(probe.streams.find((s) => s.codec_type === 'audio'));
+  const actualChecksum = crypto.createHash('sha256').update(fs.readFileSync(result.mediaArtifact.artifact_path)).digest('hex');
+  assert.equal(result.mediaArtifact.artifact_checksum, actualChecksum);
+
+  const rows = storage.all('SELECT * FROM media_artifacts WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(rows.length, 1);
+
+  cleanup(storage, dbPath, productionArtifactsDir, mediaArtifactsDir, assetsDir);
+});
