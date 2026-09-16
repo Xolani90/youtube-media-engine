@@ -214,3 +214,9 @@ This decision does not alter the historical fact that the file was outside the e
 This ADR is the permanent governance record for the specific F3 `workSelection.js` scope discrepancy.
 
 No source-code change is implied by this document.
+
+## 15. Push Authorization Provenance
+
+The Owner separately authorized the push of `be9f99831d6fcab5dbd53ea19d6fafa1e5fe3009` outside Git. No contemporaneous repository artifact recorded that authorization at the time it was given. This authorization is recorded retrospectively in accordance with the established convention documented in ADR-0007 §6 and ADR-0009 §5.
+
+This retrospective record does not alter, backdate, or reinterpret repository history. ADR-0013's original statement that push authorization had not yet been given remains historically accurate for the point when ADR-0013 was written. The subsequent push of `be9f99831d6fcab5dbd53ea19d6fafa1e5fe3009` is therefore recorded as a later Owner-authorized action.
