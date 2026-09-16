@@ -9,6 +9,7 @@
 // them now via the LocalStubProvider below.
 
 import { LLMProvider } from './LLMProvider.js';
+import { GroqProvider } from './GroqProvider.js';
 
 class UnconfiguredProvider extends LLMProvider {
   constructor(id, { isPaid = false } = {}) {
@@ -41,7 +42,7 @@ class UnconfiguredProvider extends LLMProvider {
 }
 
 export const GeminiFreeProvider = () => new UnconfiguredProvider('gemini-free', { isPaid: false });
-export const GroqFreeProvider = () => new UnconfiguredProvider('groq-free', { isPaid: false });
+export const GroqFreeProvider = () => new GroqProvider();
 export const OpenRouterFreeProvider = () => new UnconfiguredProvider('openrouter-free', { isPaid: false });
 export const DeepSeekPaidProvider = () => new UnconfiguredProvider('deepseek-paid', { isPaid: true });
 
