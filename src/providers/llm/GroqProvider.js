@@ -27,7 +27,7 @@ export class GroqProvider extends LLMProvider {
   constructor({
     fetchImpl = fetch,
     apiKeyProvider = () => process.env.GROQ_FREE_API_KEY,
-    model = 'llama-3.1-8b-instant'
+    model = 'openai/gpt-oss-20b'
   } = {}) {
     super();
     this._fetch = fetchImpl;
