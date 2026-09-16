@@ -7,6 +7,7 @@ import { runOriginalityCheck } from '../originality/pipeline.js';
 import { runQualityGate } from '../quality-gate/pipeline.js';
 import { runProduction } from '../production/pipeline.js';
 import { runAssetProvisioning } from '../asset-provisioning/pipeline.js';
+import { runRightsVerification } from '../rights-verification/pipeline.js';
 import { runMediaProduction } from '../media/pipeline.js';
 import { runPublication } from '../publication/pipeline.js';
 import {
@@ -18,6 +19,7 @@ import {
   selectEligibleQualityGates,
   selectEligibleProductions,
   selectEligibleAssetProvisioning,
+  selectEligibleRightsVerification,
   selectEligibleMediaProductions,
   selectEligiblePublications
 } from './workSelection.js';
@@ -48,10 +50,14 @@ import {
  * external side effect.
  */
 // Stage order: research -> brief -> script -> fact-check -> originality
-// -> quality-gate -> production -> asset-provisioning -> media-production
-// -> publication (checkpoint §9/§14, extended for Milestone D's Asset
-// Provisioning stage, inserted between Production and Media Production
-// per its own frozen contract -- see src/asset-provisioning/pipeline.js).
+// -> quality-gate -> production -> asset-provisioning -> rights-verification
+// -> media-production -> publication (checkpoint §9/§14, extended for
+// Milestone D's Asset Provisioning stage, inserted between Production and
+// Media Production per its own frozen contract -- see
+// src/asset-provisioning/pipeline.js -- and further extended per ADR-0013
+// for Rights Verification, inserted between Asset Provisioning and Media
+// Production per its own frozen contract -- see
+// src/rights-verification/pipeline.js).
 function buildStages(deps, startedMode) {
   const fn = deps.stageFns ?? {};
   return [
@@ -133,6 +139,16 @@ function buildStages(deps, startedMode) {
           storage: deps.storage,
           contentBriefId: item.contentBriefId,
           provider: deps.assetProvisioning?.provider,
+          runId
+        })
+    },
+    {
+      name: 'rights-verification',
+      select: selectEligibleRightsVerification,
+      run: (item, runId) =>
+        (fn['rights-verification'] ?? runRightsVerification)({
+          storage: deps.storage,
+          contentBriefId: item.contentBriefId,
           runId
         })
     },
@@ -226,7 +242,7 @@ function eligibilitySignature(sweepEligible) {
  * @param {string} [deps.mode] - 'SIMULATION' | 'LIVE', forwarded to SystemRunRecorder.start(); defaults to config.runMode there
  * @param {SystemRunRecorder} [deps.systemRunRecorder] - injectable for tests; defaults to `new SystemRunRecorder(deps.storage)`
  * @param {(stageName: string, item: object, error: Error) => void} [deps.onStageError] - if provided, a thrown stage error is reported here and swallowed so the sweep continues with the next item; without it, a thrown error aborts the whole run (the system_runs record is marked FAILED) and is rethrown to the caller
- * @param {object} [deps.stageFns] - test-only per-stage function substitutes, keyed by stage name ('research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production', 'asset-provisioning', 'media-production', 'publication'). Never used in normal operation.
+ * @param {object} [deps.stageFns] - test-only per-stage function substitutes, keyed by stage name ('research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production', 'asset-provisioning', 'rights-verification', 'media-production', 'publication'). Never used in normal operation.
  * @returns {Promise<{ runId: string, mode: string, sweeps: number, processed: Array<{ stage: string, count: number }>, stopReason: 'no_work' | 'no_progress' }>}
  */
 export async function runAutonomousOperation(deps) {

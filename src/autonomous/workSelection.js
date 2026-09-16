@@ -94,6 +94,23 @@ export function selectEligibleAssetProvisioning(storage) {
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
+// Same structural precondition as selectEligibleAssetProvisioning /
+// selectEligibleMediaProductions (content_version.state === 'PRODUCED')
+// -- Rights Verification sits between the two in stage order but does
+// not transition content_versions.state, so it shares their same
+// selection query rather than a state of its own. Rights Verification's
+// own eligibility check (src/rights-verification/eligibility.js,
+// resolveProducedContentForRightsVerification + selectEligibleAssets)
+// additionally requires a `productions` row and per-asset lazy
+// re-verification gating; that remains the sole authority and is never
+// bypassed, duplicated, or second-guessed here -- this is a pure
+// efficiency pre-filter, matching every other selector in this file.
+export function selectEligibleRightsVerification(storage) {
+  return storage
+    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'PRODUCED'`)
+    .map((row) => ({ contentBriefId: row.content_brief_id }));
+}
+
 export function selectEligiblePublications(storage) {
   // Publication's own structural eligibility (src/publication/eligibility.js,
   // resolveMediaForPublication) additionally requires an existing
