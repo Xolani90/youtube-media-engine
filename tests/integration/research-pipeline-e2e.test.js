@@ -275,6 +275,46 @@ test('REAL HANDOFF: an opportunity selected by the actual Discovery pipeline is 
   cleanup(storage, dbPath);
 });
 
+// Real-Groq compatibility fix regression: a stub router returning the
+// exact Markdown-fenced JSON shape observed from a real groq-free/
+// openai-gpt-oss-20b response (see scripts/diagnose-real-research-claims.js
+// live evidence) must still reach RESEARCH_COMPLETE with the claim
+// persisted, not INSUFFICIENT_EVIDENCE/NO_LOAD_BEARING_CLAIMS.
+test('FACTUAL: a claim array wrapped in a single ```json Markdown fence (real Groq shape) still reaches RESEARCH_COMPLETE', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const opportunityId = seedHandedOffOpportunity(storage, { coreQuestionType: 'FACTUAL' });
+
+  const url = 'https://acme.com/press-release';
+  const provider = new SingleSourceProvider([url]);
+  const fencedClaimsText = '```json\n' + JSON.stringify([
+    { claim: 'Acme reported one billion dollars in Q3 revenue following the product launch.', claim_type: 'FACT', is_load_bearing: true }
+  ]) + '\n\n```';
+  const registry = {
+    'fenced-research-stub': () => ({
+      id: 'fenced-research-stub', isPaid: false,
+      async healthCheck() { return true; },
+      async complete() {
+        return { text: fencedClaimsText, model: 'fenced-research-stub', requestId: null, inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false };
+      }
+    })
+  };
+  const llmRouter = new LLMRouter({ priority: ['fenced-research-stub'], allowPaidProviders: false, registry });
+
+  const result = await runResearchProject({
+    storage, opportunityId, sourceProvider: provider, llmRouter, policy: researchPolicy,
+    classification: { authoritativeDomains: ['acme.com'] },
+    fetchImpl: fakeFetch({ [url]: '<html><body>Acme reported one billion dollars in Q3 revenue.</body></html>' })
+  });
+
+  assert.equal(result.project.status, 'RESEARCH_COMPLETE');
+  assert.equal(result.claims.length, 1);
+  assert.equal(result.claims[0].claim, 'Acme reported one billion dollars in Q3 revenue following the product launch.');
+  assert.equal(result.claims[0].evidence_status, 'VERIFIED');
+
+  cleanup(storage, dbPath);
+});
+
 test('decision_log records the Research-specific audit stages', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();

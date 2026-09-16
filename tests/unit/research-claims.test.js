@@ -78,3 +78,83 @@ test('a non-array LLM output is treated as no claims, not an error', async () =>
   const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
   assert.deepEqual(claims, []);
 });
+
+// --- Markdown-fenced JSON (real Groq/openai-gpt-oss-20b observed shape) ---
+
+const SAMPLE_CLAIM_ARRAY = JSON.stringify([
+  { claim: 'Acme reported one billion dollars in Q3 revenue following the product launch.', claim_type: 'FACT', is_load_bearing: true }
+]);
+
+test('bare JSON (no fence) still parses exactly as before', async () => {
+  const router = stubRouter(SAMPLE_CLAIM_ARRAY);
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].claim, 'Acme reported one billion dollars in Q3 revenue following the product launch.');
+});
+
+test('a claim array wrapped in exactly one ```json fence parses', async () => {
+  const router = stubRouter('```json\n' + SAMPLE_CLAIM_ARRAY + '\n```');
+  const { claims, rawOutput } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].claim_type, 'FACT');
+  assert.equal(claims[0].is_load_bearing, true);
+  // rawOutput must still be the exact, unmodified model output.
+  assert.equal(rawOutput, '```json\n' + SAMPLE_CLAIM_ARRAY + '\n```');
+});
+
+test('a claim array wrapped in exactly one ```JSON (uppercase tag) fence parses', async () => {
+  const router = stubRouter('```JSON\n' + SAMPLE_CLAIM_ARRAY + '\n```');
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.equal(claims.length, 1);
+});
+
+test('a claim array wrapped in a bare ``` fence (no language tag) parses', async () => {
+  const router = stubRouter('```\n' + SAMPLE_CLAIM_ARRAY + '\n```');
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.equal(claims.length, 1);
+});
+
+test('leading/trailing whitespace around a complete fenced response is tolerated', async () => {
+  const router = stubRouter('  \n```json\n' + SAMPLE_CLAIM_ARRAY + '\n```\n  ');
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.equal(claims.length, 1);
+});
+
+test('the exact live Groq shape (trailing blank line before the closing fence) parses', async () => {
+  // Mirrors the literal shape observed from the real groq-free/openai-gpt-oss-20b
+  // response: a blank line between the JSON payload and the closing fence.
+  const router = stubRouter('```json\n' + SAMPLE_CLAIM_ARRAY + '\n\n```');
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].claim, 'Acme reported one billion dollars in Q3 revenue following the product launch.');
+});
+
+test('prose before a fenced JSON block is rejected (no substring extraction)', async () => {
+  const router = stubRouter('Here is the JSON:\n```json\n' + SAMPLE_CLAIM_ARRAY + '\n```');
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.deepEqual(claims, []);
+});
+
+test('prose after a fenced JSON block is rejected (no substring extraction)', async () => {
+  const router = stubRouter('```json\n' + SAMPLE_CLAIM_ARRAY + '\n```\nHope that helps!');
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.deepEqual(claims, []);
+});
+
+test('an unclosed fence is rejected', async () => {
+  const router = stubRouter('```json\n' + SAMPLE_CLAIM_ARRAY);
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.deepEqual(claims, []);
+});
+
+test('fenced malformed JSON is rejected', async () => {
+  const router = stubRouter('```json\n{not valid json at all\n```');
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.deepEqual(claims, []);
+});
+
+test('fenced JSON with a non-array root is rejected, same as the unfenced case', async () => {
+  const router = stubRouter('```json\n' + JSON.stringify({ claim: 'not an array' }) + '\n```');
+  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
+  assert.deepEqual(claims, []);
+});

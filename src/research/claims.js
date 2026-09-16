@@ -3,6 +3,23 @@ import { untrustedSourceBlock } from '../providers/llm/promptTrust.js';
 
 const CLAIM_TYPES = Object.values(CLAIM_TYPE);
 
+// Recognizes a response that is EXACTLY one Markdown code fence wrapping
+// the whole payload and nothing else: optional ```json / ```JSON / bare
+// ``` opening, the fenced content, and a closing ``` — anchored to the
+// full (trimmed) string so nothing else may precede or follow it. This is
+// intentionally narrow: it is not a search for JSON somewhere in prose,
+// it only unwraps a payload that is otherwise already a complete,
+// self-contained fenced block. Real observed cause (live Groq run,
+// 2026-09): `openai/gpt-oss-20b` via groq-free sometimes wraps an
+// otherwise well-formed JSON array response in a single ```json fence.
+const FENCED_PAYLOAD = /^```(?:json|JSON)?\r?\n([\s\S]*?)\r?\n```$/;
+
+function unwrapRecognizedFence(text) {
+  const trimmed = (text || '').trim();
+  const match = trimmed.match(FENCED_PAYLOAD);
+  return match ? match[1] : text;
+}
+
 /**
  * Claim extraction (Generation, LLM-assisted) — mirrors proposition.js's
  * generate/validate split: the LLM proposes claim_type and is_load_bearing
@@ -40,7 +57,7 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
 
   let parsed;
   try {
-    parsed = JSON.parse(result.text);
+    parsed = JSON.parse(unwrapRecognizedFence(result.text));
   } catch {
     parsed = [];
   }
