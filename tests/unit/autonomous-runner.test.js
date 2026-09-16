@@ -15,12 +15,14 @@ import {
   selectEligibleOriginalityChecks,
   selectEligibleQualityGates,
   selectEligibleProductions,
+  selectEligibleAssetProvisioning,
   selectEligibleMediaProductions,
   selectEligiblePublications
 } from '../../src/autonomous/workSelection.js';
 import { runPublication } from '../../src/publication/pipeline.js';
 import { PublicationProvider } from '../../src/publication/PublicationProvider.js';
 import { PUBLICATION_RESULT_STATUS } from '../../src/publication/constants.js';
+import { AssetSourceProvider } from '../../src/providers/asset/AssetSourceProvider.js';
 
 function freshStorage() {
   const dbPath = path.join(os.tmpdir(), `autonomous-runner-${Date.now()}-${Math.random()}.db`);
@@ -384,6 +386,202 @@ test('a stage error is swallowed and reported via onStageError, and the run comp
   // No progress was possible on that item (state never advanced), so the
   // no_progress guard still applies rather than looping.
   assert.equal(result.stopReason, 'no_progress');
+
+  cleanup(storage, dbPath);
+});
+
+// ---------------------------------------------------------------------
+// 3b. Asset Provisioning runner integration (E2)
+// ---------------------------------------------------------------------
+
+class StubAssetProvider extends AssetSourceProvider {
+  constructor({ location, verificationStatus = 'VERIFIED' } = {}) {
+    super();
+    this._location = location;
+    this._verificationStatus = verificationStatus;
+    this.calls = 0;
+  }
+  get id() {
+    return 'stub';
+  }
+  async healthCheck() {
+    return true;
+  }
+  async acquireVisualAsset() {
+    this.calls += 1;
+    if (!this._location) return null;
+    return {
+      assetType: 'image',
+      location: this._location,
+      origin: 'stub-provider',
+      license: 'Test License',
+      verificationStatus: this._verificationStatus
+    };
+  }
+}
+
+test('selectEligibleAssetProvisioning: only content_versions.state = PRODUCED, same shape as buildStages() expects', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  const eligible = seedChainAtState(storage, 'PRODUCED');
+  seedChainAtState(storage, 'PRODUCTION_READY');
+  seedChainAtState(storage, 'PUBLISHED');
+
+  const result = selectEligibleAssetProvisioning(storage).map((r) => r.contentBriefId);
+  assert.deepEqual(result, [eligible.contentBriefId]);
+
+  cleanup(storage, dbPath);
+});
+
+test('runner stage order: production runs before asset-provisioning, which runs before media-production', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  seedChainAtState(storage, 'PRODUCTION_READY');
+  const calls = [];
+
+  await runAutonomousOperation({
+    storage,
+    stageFns: {
+      production: async ({ contentBriefId }) => {
+        calls.push('production');
+        storage.run(`UPDATE content_versions SET state = 'PRODUCED' WHERE content_brief_id = ?`, [contentBriefId]);
+        return {};
+      },
+      'asset-provisioning': async () => {
+        calls.push('asset-provisioning');
+        return {};
+      },
+      'media-production': async () => {
+        calls.push('media-production');
+        return {};
+      }
+    }
+  });
+
+  const order = calls.filter((c) => ['production', 'asset-provisioning', 'media-production'].includes(c));
+  assert.deepEqual(order, ['production', 'asset-provisioning', 'media-production']);
+
+  cleanup(storage, dbPath);
+});
+
+test('asset-provisioning stage receives the configured provider through the runner dependency object', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  seedChainAtState(storage, 'PRODUCED');
+  const provider = new StubAssetProvider({ location: null });
+
+  let receivedProvider = null;
+  await runAutonomousOperation({
+    storage,
+    assetProvisioning: { provider },
+    stageFns: {
+      'asset-provisioning': async (callArgs) => {
+        receivedProvider = callArgs.provider;
+        return {};
+      }
+    }
+  });
+
+  assert.equal(receivedProvider, provider);
+
+  cleanup(storage, dbPath);
+});
+
+test('same-sweep integration: a PRODUCED item is provisioned by Asset Provisioning before Media Production runs, and Media Production sees the persisted asset', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  const assetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autonomous-asset-provisioning-'));
+  const assetPath = path.join(assetDir, 'forest.jpg');
+  fs.writeFileSync(assetPath, 'real-local-visual-file-bytes');
+
+  const seeded = seedChainAtState(storage, 'PRODUCED');
+  // Give the content_brief usable visual context so Asset Provisioning's
+  // own deriveVisualQuery() does not short-circuit with NO_VISUAL_CONTEXT.
+  storage.run(`UPDATE content_briefs SET visual_ideas = 'A quiet forest path' WHERE id = ?`, [seeded.contentBriefId]);
+  const productionId = crypto.randomUUID();
+  storage.run(
+    `INSERT INTO productions (id, content_version_id, script_id, artifact_type, artifact_path, artifact_checksum, manifest_json, created_at)
+     VALUES (?, ?, ?, 'production_manifest_v1', '/tmp/manifest.json', 'deadbeef', '{}', ?)`,
+    [productionId, seeded.contentVersionId, seeded.scriptId, nowISO()]
+  );
+
+  const provider = new StubAssetProvider({ location: assetPath });
+  let mediaProductionSawAsset = false;
+
+  const result = await runAutonomousOperation({
+    storage,
+    assetProvisioning: { provider },
+    stageFns: {
+      // Media Production's real render path depends on FFmpeg/espeak,
+      // which are not deterministically available in this test
+      // environment (see the 7 documented pre-existing Media/FFmpeg
+      // failures) -- this stub substitutes only the render step, while
+      // still asserting the actual cross-stage integration: that by the
+      // time media-production is dispatched, the asset Asset
+      // Provisioning persisted is already visible via real storage
+      // reads, not a fake handed to it in-memory.
+      'media-production': async ({ storage: s, contentBriefId }) => {
+        const cv = s.get('SELECT * FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+        const assetUsage = s.get('SELECT * FROM asset_usages WHERE content_version_id = ?', [cv.id]);
+        mediaProductionSawAsset = Boolean(assetUsage);
+        return {};
+      }
+    }
+  });
+
+  assert.equal(provider.calls, 1, 'the injected provider was actually invoked by the real Asset Provisioning stage');
+  assert.ok(mediaProductionSawAsset, 'media-production must see the asset persisted by asset-provisioning in the same sweep');
+
+  const assetUsageRow = storage.get('SELECT * FROM asset_usages WHERE content_version_id = ?', [seeded.contentVersionId]);
+  assert.ok(assetUsageRow);
+  const assetRow = storage.get('SELECT * FROM assets WHERE id = ?', [assetUsageRow.asset_id]);
+  assert.equal(assetRow.location, assetPath);
+
+  const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [seeded.contentVersionId]);
+  assert.equal(cv.state, 'PRODUCED', 'asset-provisioning must never transition content_versions.state');
+  assert.equal(result.processed.find((p) => p.stage === 'asset-provisioning').count, 1);
+
+  cleanup(storage, dbPath);
+  fs.rmSync(assetDir, { recursive: true, force: true });
+});
+
+test('provisioning failure: no exception, structured outcome only, and existing no-progress protection still terminates the run', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  const seeded = seedChainAtState(storage, 'PRODUCED');
+  storage.run(`UPDATE content_briefs SET visual_ideas = 'A quiet forest path' WHERE id = ?`, [seeded.contentBriefId]);
+  const productionId = crypto.randomUUID();
+  storage.run(
+    `INSERT INTO productions (id, content_version_id, script_id, artifact_type, artifact_path, artifact_checksum, manifest_json, created_at)
+     VALUES (?, ?, ?, 'production_manifest_v1', '/tmp/manifest.json', 'deadbeef', '{}', ?)`,
+    [productionId, seeded.contentVersionId, seeded.scriptId, nowISO()]
+  );
+
+  // Provider returns null -> Asset Provisioning's own NO_ASSET_ACQUIRED
+  // structured outcome (never an exception).
+  const provider = new StubAssetProvider({ location: null });
+
+  const result = await runAutonomousOperation({
+    storage,
+    assetProvisioning: { provider }
+  });
+
+  assert.equal(result.stopReason, 'no_progress');
+  assert.ok(result.sweeps <= 3, 'runner must not loop indefinitely on a provisioning failure');
+  // asset-provisioning does not transition state, so it remains
+  // eligible for both asset-provisioning and media-production every
+  // sweep -- the no-progress guard (not a runner code change) is what
+  // stops the loop, exactly as for any other stuck no-op stage.
+  assert.equal(provider.calls, 1);
+  const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [seeded.contentVersionId]);
+  assert.equal(cv.state, 'PRODUCED');
+  const assetUsageRow = storage.get('SELECT * FROM asset_usages WHERE content_version_id = ?', [seeded.contentVersionId]);
+  assert.equal(assetUsageRow, undefined, 'no asset row is persisted on a failed acquisition');
 
   cleanup(storage, dbPath);
 });

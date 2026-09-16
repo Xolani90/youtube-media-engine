@@ -78,6 +78,22 @@ export function selectEligibleMediaProductions(storage) {
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
+// Same structural precondition as selectEligibleMediaProductions
+// (content_version.state === 'PRODUCED') -- Asset Provisioning's own
+// eligibility.js (resolveProducedContentForProvisioning) additionally
+// requires a `productions` row, which is a structural guarantee of
+// state === 'PRODUCED' itself, so no extra filter is needed here. This
+// is a pure efficiency pre-filter, matching the discipline used by every
+// other selector in this file; Asset Provisioning's own eligibility
+// check (and its own idempotency guard against re-provisioning) remains
+// the sole authority and is never bypassed, duplicated, or
+// second-guessed here.
+export function selectEligibleAssetProvisioning(storage) {
+  return storage
+    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'PRODUCED'`)
+    .map((row) => ({ contentBriefId: row.content_brief_id }));
+}
+
 export function selectEligiblePublications(storage) {
   // Publication's own structural eligibility (src/publication/eligibility.js,
   // resolveMediaForPublication) additionally requires an existing
