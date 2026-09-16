@@ -170,6 +170,33 @@ export async function runPublication({
       [contentVersion.id, provider]
     );
     if (raceExisting) {
+      if (raceExisting.status === PUBLICATION_STATUS.FAILED) {
+        // FAILED is documented (0010_publication.sql, PublicationProvider.js)
+        // as safe to retry -- no external side effect occurred. Reuse
+        // this exact row (the UNIQUE(content_version_id, provider)
+        // index forbids a second one anyway) and atomically transition
+        // it back to PENDING, but ONLY if it is still FAILED at the
+        // moment of this UPDATE, in this same transaction/snapshot as
+        // the read above. A second, concurrent reclaim attempt loses
+        // this race the identical way any other claim race already
+        // does: its stale snapshot throws SQLITE_BUSY_SNAPSHOT on this
+        // same UPDATE, which the existing recovery path below already
+        // handles by re-reading and mapping non-PUBLISHED -> AMBIGUOUS.
+        const reclaim = storage.run(
+          `UPDATE publications
+             SET status = 'PENDING', request_json = ?, attempt_count = attempt_count + 1, updated_at = ?
+           WHERE id = ? AND status = 'FAILED'`,
+          [requestJson, nowISO(), raceExisting.id]
+        );
+        if (reclaim.changes === 1) {
+          return { publicationId: raceExisting.id };
+        }
+        // Defensive fallback only: under SQLite's single-writer
+        // serialization this WHERE guard should never actually miss
+        // inside a transaction that just read the same row, but if it
+        // ever does, treat it like any other claim race rather than
+        // silently proceeding.
+      }
       return { raced: true, existing: raceExisting };
     }
     const publicationId = crypto.randomUUID();

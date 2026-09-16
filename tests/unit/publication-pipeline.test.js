@@ -585,3 +585,277 @@ test('an ordinary non-SQLITE_BUSY_SNAPSHOT exception from the claim transaction 
 
   cleanup(storage, dbPath, videoFile);
 });
+
+/**
+ * ---------------------------------------------------------------------
+ * FAILED-retry regression coverage.
+ *
+ * FAILED is documented (0010_publication.sql, PublicationProvider.js)
+ * as safe to retry -- no external side effect occurred. These tests
+ * prove that a legitimate sequential runPublication() call after a
+ * FAILED result reclaims the existing row (never inserting a second
+ * one) rather than being misreported as a concurrent race.
+ * ---------------------------------------------------------------------
+ */
+
+test('FAILED can be retried successfully: same row is reused, provider called exactly once, ends PUBLISHED', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const failingAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, provider: 'mock', errorClass: 'REJECTED_METADATA', retryable: false });
+    const first = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: failingAdapter });
+    assert.equal(first.publication.status, 'FAILED');
+    const failedPublicationId = first.publication.id;
+
+    const succeedingAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vid-retry-ok', providerUrl: 'https://youtu.be/vid-retry-ok' });
+    const second = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: succeedingAdapter });
+
+    assert.equal(second.outcome, 'PUBLISHED');
+    assert.equal(second.publication.status, 'PUBLISHED');
+    assert.equal(second.publication.id, failedPublicationId, 'the retry must reuse the same publication row, not create a new one');
+    assert.equal(second.publication.provider_item_id, 'vid-retry-ok');
+    assert.equal(succeedingAdapter.calls.length, 1, 'the provider must be called exactly once during the retry attempt');
+    assert.equal(failingAdapter.calls.length, 1, 'the first attempt still only called the provider once');
+  });
+
+  const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(rows.length, 1, 'no duplicate publication row for this (content_version, provider)');
+  assert.equal(rows[0].status, 'PUBLISHED');
+  assert.equal(rows[0].attempt_count, 2, 'attempt_count must reflect the second attempt');
+
+  const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
+  assert.equal(cv.state, 'PUBLISHED');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('FAILED retry can fail again: status remains FAILED, content_version remains PRODUCED, no duplicate row', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const firstAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, provider: 'mock', errorClass: 'REJECTED_METADATA', retryable: false });
+    const first = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: firstAdapter });
+    assert.equal(first.publication.status, 'FAILED');
+    const firstPublicationId = first.publication.id;
+
+    const secondAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, provider: 'mock', errorClass: 'REJECTED_METADATA', retryable: false });
+    const second = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: secondAdapter });
+
+    assert.equal(second.outcome, 'PROVIDER_FAILURE');
+    assert.equal(second.publication.status, 'FAILED');
+    assert.equal(second.publication.id, firstPublicationId, 'still the same row, not a new one');
+    assert.equal(secondAdapter.calls.length, 1);
+  });
+
+  const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(rows.length, 1, 'no duplicate publication row exists');
+  assert.equal(rows[0].status, 'FAILED');
+  assert.equal(rows[0].attempt_count, 2);
+
+  const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
+  assert.equal(cv.state, 'PRODUCED');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('FAILED retry can become ambiguous: status becomes AMBIGUOUS, content_version remains PRODUCED, no automatic third attempt', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const firstAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, provider: 'mock', errorClass: 'REJECTED_METADATA', retryable: false });
+    const first = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: firstAdapter });
+    assert.equal(first.publication.status, 'FAILED');
+    const firstPublicationId = first.publication.id;
+
+    const ambiguousAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.AMBIGUOUS, provider: 'mock', reason: 'network_timeout_during_upload' });
+    const second = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: ambiguousAdapter });
+
+    assert.equal(second.outcome, 'AMBIGUOUS');
+    assert.equal(second.publication.status, 'AMBIGUOUS');
+    assert.equal(second.publication.id, firstPublicationId);
+    assert.equal(ambiguousAdapter.calls.length, 1);
+
+    // A subsequent call must NOT auto-retry -- this exercises the
+    // existing, unmodified AMBIGUOUS idempotency branch (step 3).
+    const thirdAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'z', providerUrl: 'y' });
+    const third = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: thirdAdapter });
+    assert.equal(third.outcome, 'AMBIGUOUS');
+    assert.equal(third.reason, 'previously_ambiguous_not_auto_retried');
+    assert.equal(thirdAdapter.calls.length, 0, 'no automatic further attempt occurs');
+  });
+
+  const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(rows.length, 1, 'still just the one, reused row');
+  assert.equal(rows[0].status, 'AMBIGUOUS');
+
+  const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
+  assert.equal(cv.state, 'PRODUCED');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('FAILED-retry change does not alter existing PUBLISHED/PENDING/AMBIGUOUS idempotency semantics', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  // PUBLISHED -> ALREADY_PUBLISHED, adapter never called again.
+  {
+    const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+    fs.writeFileSync(videoFile, 'fake mp4 bytes');
+    const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+    await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+      const okAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'a', providerUrl: 'b' });
+      await runPublication({ storage, contentBriefId, provider: 'mock', adapter: okAdapter });
+      const againAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'c', providerUrl: 'd' });
+      const result = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: againAdapter });
+      assert.equal(result.outcome, 'ALREADY_PUBLISHED');
+      assert.equal(againAdapter.calls.length, 0);
+    });
+    fs.rmSync(videoFile, { force: true });
+  }
+
+  // PENDING (interrupted attempt) -> AMBIGUOUS/interrupted_prior_attempt, unchanged.
+  {
+    const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+    fs.writeFileSync(videoFile, 'fake mp4 bytes');
+    const { contentVersionId, mediaArtifactId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+    const contentBriefId2 = storage.get('SELECT content_brief_id FROM content_versions WHERE id = ?', [contentVersionId]).content_brief_id;
+    const pendingId = crypto.randomUUID();
+    storage.run(
+      `INSERT INTO publications
+        (id, content_version_id, media_artifact_id, provider, status, request_json, attempt_count, created_at, updated_at)
+       VALUES (?, ?, ?, 'mock', 'PENDING', '{}', 1, ?, ?)`,
+      [pendingId, contentVersionId, mediaArtifactId, nowISO(), nowISO()]
+    );
+    await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+      const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'e', providerUrl: 'f' });
+      const result = await runPublication({ storage, contentBriefId: contentBriefId2, provider: 'mock', adapter });
+      assert.equal(result.outcome, 'AMBIGUOUS');
+      assert.equal(result.reason, 'interrupted_prior_attempt');
+      assert.equal(adapter.calls.length, 0);
+    });
+    fs.rmSync(videoFile, { force: true });
+  }
+
+  // AMBIGUOUS -> AMBIGUOUS/previously_ambiguous_not_auto_retried, unchanged.
+  {
+    const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+    fs.writeFileSync(videoFile, 'fake mp4 bytes');
+    const { contentVersionId, mediaArtifactId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+    const contentBriefId3 = storage.get('SELECT content_brief_id FROM content_versions WHERE id = ?', [contentVersionId]).content_brief_id;
+    const ambiguousId = crypto.randomUUID();
+    storage.run(
+      `INSERT INTO publications
+        (id, content_version_id, media_artifact_id, provider, status, request_json, attempt_count, created_at, updated_at)
+       VALUES (?, ?, ?, 'mock', 'AMBIGUOUS', '{}', 1, ?, ?)`,
+      [ambiguousId, contentVersionId, mediaArtifactId, nowISO(), nowISO()]
+    );
+    await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+      const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'g', providerUrl: 'h' });
+      const result = await runPublication({ storage, contentBriefId: contentBriefId3, provider: 'mock', adapter });
+      assert.equal(result.outcome, 'AMBIGUOUS');
+      assert.equal(result.reason, 'previously_ambiguous_not_auto_retried');
+      assert.equal(adapter.calls.length, 0);
+    });
+    fs.rmSync(videoFile, { force: true });
+  }
+
+  cleanup(storage, dbPath);
+});
+
+/** A second, independent connection reclaims the same FAILED row concurrently. */
+function conflictingReclaim(contentVersionId, provider) {
+  return (dbPath) => {
+    const raw = new Database(dbPath);
+    try {
+      raw.prepare(
+        `UPDATE publications SET status = 'PENDING', attempt_count = attempt_count + 1, updated_at = ?
+         WHERE content_version_id = ? AND provider = ? AND status = 'FAILED'`
+      ).run(nowISO(), contentVersionId, provider);
+    } finally {
+      raw.close();
+    }
+  };
+}
+
+test('concurrency safety: two simultaneous reclaim attempts on the same FAILED row cannot both invoke the provider', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const firstAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, provider: 'mock', errorClass: 'REJECTED_METADATA', retryable: false });
+    await runPublication({ storage, contentBriefId, provider: 'mock', adapter: firstAdapter });
+
+    // A second, independent connection reclaims (FAILED -> PENDING) the
+    // exact same row at the moment this run's own reclaim transaction
+    // has already read it -- a genuine cross-connection race on the
+    // reclaim itself, not merely on the initial SELECT.
+    const wrapped = new BusySnapshotStorage(storage, dbPath, {
+      triggers: 1,
+      conflictingWrite: conflictingReclaim(contentVersionId, 'mock')
+    });
+    const loserAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'loser', providerUrl: 'x' });
+    const result = await runPublication({ storage: wrapped, contentBriefId, provider: 'mock', adapter: loserAdapter });
+
+    assert.equal(result.outcome, 'AMBIGUOUS');
+    assert.equal(result.reason, 'concurrent_attempt_in_progress');
+    assert.equal(loserAdapter.calls.length, 0, 'the losing concurrent reclaim attempt must never call the provider');
+    assert.equal(wrapped.triggerCount, 1, 'the reproduction hook must actually have fired');
+  });
+
+  const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(rows.length, 1, 'still just the one row -- no duplicate from either connection');
+  assert.equal(rows[0].status, 'PENDING', 'the winning connection\'s reclaim is the one that took effect');
+  assert.equal(rows[0].attempt_count, 2, 'only the single winning reclaim incremented attempt_count');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('publication identity/uniqueness: retrying FAILED never creates a second row for the same (content_version, provider)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const failingAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, provider: 'mock', errorClass: 'REJECTED_METADATA', retryable: false });
+    await runPublication({ storage, contentBriefId, provider: 'mock', adapter: failingAdapter });
+
+    // Attempting to INSERT a second row for the same (content_version_id,
+    // provider) directly must still violate the UNIQUE index -- the fix
+    // did not weaken or remove that constraint.
+    assert.throws(() => {
+      storage.run(
+        `INSERT INTO publications
+          (id, content_version_id, media_artifact_id, provider, status, request_json, attempt_count, created_at, updated_at)
+         VALUES (?, ?, (SELECT media_artifact_id FROM publications WHERE content_version_id = ?), 'mock', 'PENDING', '{}', 1, ?, ?)`,
+        [crypto.randomUUID(), contentVersionId, contentVersionId, nowISO(), nowISO()]
+      );
+    }, /UNIQUE constraint failed/);
+
+    const retryAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'uniq-1', providerUrl: 'uniq-url' });
+    await runPublication({ storage, contentBriefId, provider: 'mock', adapter: retryAdapter });
+  });
+
+  const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ? AND provider = ?', [contentVersionId, 'mock']);
+  assert.equal(rows.length, 1, 'exactly one publication row for this (content_version, provider) throughout');
+  assert.equal(rows[0].status, 'PUBLISHED');
+
+  cleanup(storage, dbPath, videoFile);
+});
