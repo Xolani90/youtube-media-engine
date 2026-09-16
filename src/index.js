@@ -1,3 +1,4 @@
+import { pathToFileURL } from 'node:url';
 import { createStorage } from './storage/index.js';
 import { LLMRouter } from './providers/llm/router.js';
 import { RssSource } from './providers/opportunity/RssSource.js';
@@ -109,7 +110,7 @@ async function main() {
   );
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error('Autonomous entrypoint failed:', err);
     process.exitCode = 1;
