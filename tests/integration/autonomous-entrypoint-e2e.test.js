@@ -73,7 +73,23 @@ class NoCandidatesSourceProvider extends ResearchSourceProvider {
   }
 }
 
-function stubRegistry() {
+function featureComputationResponse() {
+  return JSON.stringify({
+    novelty: 90,
+    competition: 10,
+    story_potential: 90,
+    evidence_availability: 90,
+    production_difficulty: 10,
+    audience_potential: 90,
+    commercial_intent: 90,
+    affiliate_potential: 90,
+    lead_generation_potential: 90,
+    product_adjacency: 90,
+    sponsorship_potential: 90
+  });
+}
+
+function stubRegistry({ featureResponseText = featureComputationResponse() } = {}) {
   return {
     'e2e-stub': () => ({
       id: 'e2e-stub',
@@ -92,6 +108,13 @@ function stubRegistry() {
               reason: 'Deterministic test response.'
             })
           };
+        }
+
+        // M2: production featureComputation.js's prompt is the only one
+        // that requests 'sponsorship_potential' — distinguishes it from
+        // the proposition-generation prompt below.
+        if (request.prompt.includes('sponsorship_potential')) {
+          return { text: featureResponseText };
         }
 
         return {
@@ -199,7 +222,7 @@ test('autonomous entrypoint runs Discovery once and hands off to runner', async 
   }
 });
 
-test('autonomous entrypoint requires injected Discovery rawFeatures', async () => {
+test('autonomous entrypoint computes rawFeatures via production feature computation when not injected (M2)', async () => {
   const { dir, dbPath } = tempDbPath();
 
   const storage = new SqliteStorageDriver({ dbPath });
@@ -209,6 +232,57 @@ test('autonomous entrypoint requires injected Discovery rawFeatures', async () =
     registry: stubRegistry()
   });
 
+  const opportunitySource = new SingleCandidateSource();
+  const sourceProvider = new NoCandidatesSourceProvider();
+
+  try {
+    const result = await runAutonomousEntrypoint({
+      storage,
+      llmRouter,
+      discovery: {
+        opportunitySource,
+        // No rawFeatures supplied: must fall back to
+        // src/discovery/featureComputation.js's computeRawFeatures,
+        // routed entirely through the injected llmRouter — no network
+        // access, no real credentials.
+        topK: 1
+      },
+      research: {
+        sourceProvider
+      }
+    });
+
+    assert.equal(result.discovery.stats.discovered, 1);
+    assert.equal(result.discovery.stats.selected, 1);
+
+    const opportunity = storage.db
+      .prepare(
+        `SELECT id, status
+           FROM opportunities
+          ORDER BY id DESC
+          LIMIT 1`
+      )
+      .get();
+
+    assert.equal(opportunity.status, 'HANDED_TO_RESEARCH');
+  } finally {
+    storage.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('autonomous entrypoint propagates an explicit failure when production feature computation returns malformed LLM output (M2)', async () => {
+  const { dir, dbPath } = tempDbPath();
+
+  const storage = new SqliteStorageDriver({ dbPath });
+  const llmRouter = new LLMRouter({
+    priority: ['e2e-stub'],
+    allowPaidProviders: false,
+    // Feature-computation prompt resolves to a response missing required
+    // numeric fields — must reject explicitly, not fabricate a score.
+    registry: stubRegistry({ featureResponseText: JSON.stringify({ novelty: 90 }) })
+  });
+
   try {
     await assert.rejects(
       () =>
@@ -216,10 +290,11 @@ test('autonomous entrypoint requires injected Discovery rawFeatures', async () =
           storage,
           llmRouter,
           discovery: {
-            opportunitySource: new SingleCandidateSource()
+            opportunitySource: new SingleCandidateSource(),
+            topK: 1
           }
         }),
-      /requires deps\.discovery\.rawFeatures/
+      /missing or invalid numeric value/
     );
   } finally {
     storage.close();

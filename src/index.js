@@ -3,6 +3,7 @@ import { LLMRouter } from './providers/llm/router.js';
 import { RssSource } from './providers/opportunity/RssSource.js';
 import { runDiscoveryPipeline } from './discovery/pipeline.js';
 import { runAutonomousOperation } from './autonomous/runner.js';
+import { computeRawFeatures } from './discovery/featureComputation.js';
 import { config } from './config/index.js';
 
 export async function runAutonomousEntrypoint(deps = {}) {
@@ -30,12 +31,14 @@ export async function runAutonomousEntrypoint(deps = {}) {
           : []
       });
 
-    if (!deps.discovery?.rawFeatures) {
-      throw new Error(
-        'runAutonomousEntrypoint requires deps.discovery.rawFeatures; ' +
-        'production Discovery feature computation is not implemented yet'
-      );
-    }
+    // M2: deps.discovery.rawFeatures remains an explicit override (used by
+    // tests and controlled callers). When not supplied, fall back to the
+    // production feature-computation function, bound to the same
+    // llmRouter constructed/injected above — Discovery itself is never
+    // responsible for constructing providers.
+    const rawFeatures =
+      deps.discovery?.rawFeatures ??
+      ((observation) => computeRawFeatures(observation, llmRouter));
 
     const {
       candidates,
@@ -58,7 +61,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
       alreadyProducedCorpus:
         deps.discovery?.alreadyProducedCorpus ?? [],
       topK: deps.discovery?.topK ?? config.discoveryTopK,
-      rawFeatures: deps.discovery.rawFeatures
+      rawFeatures
     });
 
     const runnerResult = await runAutonomousOperation({
@@ -95,11 +98,9 @@ export async function runAutonomousEntrypoint(deps = {}) {
 }
 
 async function main() {
-  const result = await runAutonomousEntrypoint({
-    discovery: {
-      rawFeatures: undefined
-    }
-  });
+  // No deps.discovery.rawFeatures supplied: runAutonomousEntrypoint falls
+  // back to the production feature-computation function (M2).
+  const result = await runAutonomousEntrypoint({});
 
   console.log(
     `Autonomous entrypoint complete: discovered=${result.discovery.stats.discovered}, ` +

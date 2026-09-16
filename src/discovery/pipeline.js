@@ -147,7 +147,7 @@ export async function runDiscoveryPipeline({
       decision: 'ACCEPTED', reason: 'proposition_valid', resultingState: 'PROPOSITION_VALID'
     });
 
-    const raw = rawFeatures(candidate.observation);
+    const raw = await rawFeatures(candidate.observation);
     const { overallScore, breakdown } = computeValueScore(
       {
         novelty: raw.novelty, competition: raw.competition, story_potential: raw.story_potential,
