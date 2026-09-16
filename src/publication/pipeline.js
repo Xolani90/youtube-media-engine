@@ -41,6 +41,15 @@ function logDecision(storage, { runId = null, subjectType, subjectId, decision, 
  * @param {import('./PublicationProvider.js').PublicationProvider} [deps.adapter] - injectable for tests; defaults to providerRegistry's resolution of `provider`
  * @param {string|null} [deps.requestedPublishAt]
  * @param {string} [deps.runId]
+ * @param {string} [deps.mode] - 'SIMULATION' | 'LIVE', the authoritative
+ *   mode of the enclosing run (e.g. the value returned by
+ *   SystemRunRecorder.start()). Forwarded verbatim to
+ *   assertExternalActionAllowed() below (D-C2 §3.1.1/§3.3) so
+ *   authorization is checked against the actual run's mode rather than
+ *   process-global config. Left undefined by existing direct callers,
+ *   in which case assertExternalActionAllowed() keeps its own existing
+ *   fallback to config.runMode -- unchanged behavior for every caller
+ *   that does not pass this.
  */
 export async function runPublication({
   storage,
@@ -48,7 +57,8 @@ export async function runPublication({
   provider = 'youtube',
   adapter = resolveProvider(provider),
   requestedPublishAt = null,
-  runId = null
+  runId = null,
+  mode
 }) {
   const nowISO = () => new Date().toISOString();
 
@@ -138,7 +148,7 @@ export async function runPublication({
   // directly through this pipeline. ---
   const action = publicationActionId(provider, contentVersion.id);
   try {
-    assertExternalActionAllowed({ action });
+    assertExternalActionAllowed({ action, mode });
   } catch (err) {
     if (!(err instanceof SideEffectDeniedError)) throw err;
     logDecision(storage, {

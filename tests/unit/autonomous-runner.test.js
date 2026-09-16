@@ -579,3 +579,84 @@ test('with authorized_external_actions.json empty, the runner reaching Publicati
   cleanup(storage, dbPath, videoFile);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------
+// 6. D-C2 mode propagation (FIND-DC2-MODE-001): a SIMULATION
+//    autonomous run must never reach the Publication provider merely
+//    because process-global config.runMode happens to be LIVE.
+// ---------------------------------------------------------------------
+
+test('D-C2: a SIMULATION autonomous run does not reach the Publication provider even though process-global config.runMode is LIVE and the action is authorized', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  const videoFile = path.join(os.tmpdir(), `autonomous-dc2-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const seeded = seedChainAtState(storage, 'PRODUCED');
+  insertMediaArtifact(storage, seeded.contentVersionId, videoFile);
+
+  const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vid1', providerUrl: 'https://x/vid1' });
+
+  const originalPath = config.authorizedExternalActionsPath;
+  const originalMode = config.runMode;
+  const originalAutonomous = config.autonomousEnabled;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'autonomous-dc2-auth-'));
+  const authPath = path.join(dir, 'authorized.json');
+  // The exact action is authorized -- this test isolates the mode
+  // propagation defect from authorization-file denial (already covered
+  // by the preceding test).
+  fs.writeFileSync(authPath, JSON.stringify([`publish:mock:${seeded.contentVersionId}`]));
+  config.authorizedExternalActionsPath = authPath;
+  // The confused-deputy condition: process-global config says LIVE...
+  config.runMode = 'LIVE';
+  config.autonomousEnabled = true;
+
+  let result;
+  try {
+    // ...but THIS run is explicitly started as SIMULATION. Per
+    // ADR-0008 §3.3, SIMULATION is absolute and must deny the external
+    // action regardless of config.runMode.
+    result = await runAutonomousOperation({
+      storage,
+      mode: 'SIMULATION',
+      publication: { provider: 'mock', adapter }
+    });
+  } finally {
+    config.authorizedExternalActionsPath = originalPath;
+    config.runMode = originalMode;
+    config.autonomousEnabled = originalAutonomous;
+  }
+
+  // A. the run is actually SIMULATION (persisted + returned).
+  assert.equal(result.mode, 'SIMULATION');
+  const runRow = storage.get('SELECT mode FROM system_runs WHERE id = ?', [result.runId]);
+  assert.equal(runRow.mode, 'SIMULATION');
+
+  // D + E. Publication was genuinely reached (it is the only eligible
+  // item, and it is reached exactly once) but the provider was NEVER
+  // called -- this is the critical security assertion.
+  assert.equal(result.processed.find((p) => p.stage === 'publication').count, 1);
+  assert.equal(adapter.calls.length, 0, 'provider.publish() must not be called for a SIMULATION run');
+
+  // F. No publications row reaches PUBLISHED (in fact none is created
+  // at all -- the D-C2 check runs before the durable claim/insert).
+  const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [seeded.contentVersionId]);
+  assert.equal(rows.length, 0, 'no publications row is created when D-C2 denies the action');
+  const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [seeded.contentVersionId]);
+  assert.equal(cv.state, 'PRODUCED', 'content_versions.state must never advance to PUBLISHED under SIMULATION');
+
+  // G. The rejection is specifically the D-C2 mode invariant (not a
+  // missing-authorization or autonomous-disabled denial, both of which
+  // are covered by other tests and would produce a different message).
+  const decisions = storage.all(
+    `SELECT * FROM decision_log WHERE run_id = ? AND subject_id = ? AND decision = 'AUTHORIZATION_DENIED'`,
+    [result.runId, seeded.contentVersionId]
+  );
+  assert.equal(decisions.length, 1);
+  assert.match(decisions[0].reason, /run mode is SIMULATION, not LIVE/);
+
+  assert.equal(result.stopReason, 'no_progress');
+
+  cleanup(storage, dbPath, videoFile);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

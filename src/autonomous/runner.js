@@ -38,8 +38,14 @@ import {
  * touching real pipeline modules or real storage side effects; it is
  * never used by runAutonomousOperation itself in normal operation,
  * where every stage's real, unmodified run*() function is called.
+ *
+ * `startedMode` is the authoritative mode of this run, as returned by
+ * SystemRunRecorder.start() (never the process-global config value on
+ * its own -- see D-C2/ADR-0008 §3.1.1). It is forwarded only to the
+ * publication stage, which is the only stage that performs a D-C2
+ * external side effect.
  */
-function buildStages(deps) {
+function buildStages(deps, startedMode) {
   const fn = deps.stageFns ?? {};
   return [
     {
@@ -128,7 +134,12 @@ function buildStages(deps) {
       // FROZEN -- see checkpoint §3/§13. Called exactly as any other
       // caller would: same function, same parameters, no bypass of
       // assertExternalActionAllowed, no write to
-      // config/authorized_external_actions.json from here.
+      // config/authorized_external_actions.json from here. The one
+      // addition, `mode: startedMode`, is not a bypass -- it is what
+      // lets runPublication's existing, unmodified
+      // assertExternalActionAllowed({ action, mode }) call use this
+      // run's actual persisted mode (D-C2) instead of silently falling
+      // back to process-global config.runMode.
       select: selectEligiblePublications,
       run: (item, runId) =>
         (fn.publication ?? runPublication)({
@@ -137,7 +148,8 @@ function buildStages(deps) {
           provider: deps.publication?.provider,
           adapter: deps.publication?.adapter,
           requestedPublishAt: deps.publication?.requestedPublishAt,
-          runId
+          runId,
+          mode: startedMode
         })
     }
   ];
@@ -203,10 +215,10 @@ export async function runAutonomousOperation(deps) {
     throw new Error('runAutonomousOperation requires deps.storage');
   }
   const { storage, mode, onStageError } = deps;
-  const stages = buildStages(deps);
   const recorder = deps.systemRunRecorder ?? new SystemRunRecorder(storage);
 
   const { id: runId, mode: startedMode } = recorder.start(mode ? { mode } : {});
+  const stages = buildStages(deps, startedMode);
   const processed = new Map(stages.map((s) => [s.name, 0]));
   let sweeps = 0;
   let stopReason = 'no_work';
