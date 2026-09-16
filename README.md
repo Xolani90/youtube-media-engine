@@ -19,6 +19,30 @@ npm test                 # runs all unit + integration tests
 node src/index.js       # runs a foundation smoke test (local-stub provider, zero cost)
 ```
 
+### System prerequisite: espeak-ng (Media Production narration)
+
+Media Production's narration step (`src/media/narration.js`) invokes the
+`espeak-ng` command-line binary directly. This is a required system-level
+dependency for v1 — it is not installed by `npm install`, not bundled with
+this repository, and has no fallback or provider abstraction (see
+`src/media/narration.js` and `src/media/constants.js` for the v1 rationale).
+Any environment running Media Production, or the narration/Media Production
+tests (`tests/unit/media-narration.test.js`,
+`tests/integration/media-production-pipeline-e2e.test.js`,
+`tests/integration/publication-pipeline-e2e.test.js`), must have `espeak-ng`
+installed and resolvable on `PATH` before running them.
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y espeak-ng
+```
+
+For other platforms, install `espeak-ng` via your OS's package manager
+(e.g. Homebrew's `espeak-ng` formula on macOS) and confirm it resolves with
+`espeak-ng --version`.
+
 ## What exists today
 - `src/config` — environment/config-driven settings; no business logic hard-coded.
 - `src/storage` — `StorageDriver` interface + `SqliteStorageDriver` implementation.
