@@ -323,7 +323,9 @@ The following are structural failures, distinct from a persisted `REJECT`:
 - `claim_links` references a claim belonging to a different Research
   project than the one that produced the Script;
 - `claim_links` contains duplicate references where the specification's
-  resolution model (§5) requires distinct claims.
+  resolution model (§5) requires distinct claims;
+- `CLAIM_LINKS_EMPTY`: `claim_links` resolves to zero total claims across
+  all sections.
 
 A `claim_links` entry with an absent or empty `heading` is explicitly NOT a
 structural failure (§7a).
@@ -357,12 +359,11 @@ On structural failure:
 - a structured failure is returned to the caller, distinguishable from a
   persisted `REJECT` result.
 
-Open item (P3-B, not resolved by this revision): the field table above
-presumes a current Script already exists, and therefore a `script`
-`subject_type`/`subject_id` to log against. When eligibility fails because
+P3-B documentation exception: when Fact-Check eligibility fails because
 no current Script exists at all (§4b), there is no Script id available.
-This case is not addressed by the table above and remains an open
-documentation question.
+For `CONTENT_VERSION_NOT_FOUND`, `NO_CURRENT_SCRIPT`, or
+`CURRENT_SCRIPT_NOT_FOUND`, the persisted `decision_log` entry uses
+`subject_type='content_brief'` and `subject_id=content_brief_id`.
 
 ## 12. Lifecycle behavior
 
@@ -614,9 +615,10 @@ A future implementation must include tests that exercise, at minimum:
   rerun produces `REJECT` after an earlier `PASS`/`REVIEW` on the same
   `script_id`. Also open: whether that destination is terminal, or whether
   a further Script revision can re-enter Fact-Check from it.
-- P3-A: whether an empty resolved claim set (`CLAIM_LINKS_EMPTY`) should be
-  formally added to §11 as a sixth structural-failure trigger, or removed
-  from the implementation if not intended. Not resolved by this revision.
-- P3-B: how `decision_log.subject_type`/`subject_id` should be defined for
-  the no-current-Script eligibility-failure case, where no Script id
-  exists to log against (§11). Not resolved by this revision.
+- P3-A: RESOLVED — Owner Decision A. An empty resolved claim set
+  (`CLAIM_LINKS_EMPTY`) is formally documented in §11 as a structural-failure
+  trigger. Existing implementation behavior is preserved.
+- P3-B: RESOLVED — Owner Decision A. For the no-current-Script
+  eligibility-failure case, `decision_log.subject_type` is `content_brief`
+  and `decision_log.subject_id` is the `content_brief_id`. Existing
+  implementation behavior is preserved.

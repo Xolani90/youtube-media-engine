@@ -634,3 +634,35 @@ test('AC16: Fact-Check outcome is unaffected by the presence of a risk_assessmen
 
   cleanup(storage, dbPath);
 });
+
+// P3-B ------------------------------------------------------------------
+
+test('P3-B: NO_CURRENT_SCRIPT eligibility failure persists a decision_log row against the content_brief', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { researchProjectId, opportunityId } = seedResearchProject(storage);
+  const contentBriefId = seedBrief(storage, researchProjectId, opportunityId, []);
+  // content_versions row exists but script_id is null: no current Script.
+  storage.run(
+    `INSERT INTO content_versions (id, content_brief_id, script_id, state, created_at) VALUES (?, ?, NULL, 'BRIEF_CREATED', ?)`,
+    [crypto.randomUUID(), contentBriefId, nowISO()]
+  );
+
+  const result = runFactCheck({ storage, contentBriefId });
+
+  assert.equal(result.outcome, 'STRUCTURAL_FAILURE');
+  assert.equal(result.reason, 'NO_CURRENT_SCRIPT');
+  assert.equal(storage.all('SELECT * FROM fact_checks').length, 0, 'no fact_checks row on eligibility failure');
+
+  const logs = storage.all(
+    `SELECT * FROM decision_log WHERE subject_id = ? AND reason = 'NO_CURRENT_SCRIPT'`,
+    [contentBriefId]
+  );
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].subject_type, 'content_brief');
+  assert.equal(logs[0].subject_id, contentBriefId);
+  assert.equal(logs[0].stage, 'FACT_CHECK');
+  assert.equal(logs[0].resulting_state, 'SCRIPT_DRAFT');
+
+  cleanup(storage, dbPath);
+});
