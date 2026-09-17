@@ -2,11 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GroqProvider } from '../../src/providers/llm/GroqProvider.js';
 
-function jsonResponse(status, body) {
+function jsonResponse(status, body, headers = {}) {
+  const text = JSON.stringify(body);
   return {
     ok: status >= 200 && status < 300,
     status,
-    json: async () => body
+    headers: new Headers(headers),
+    json: async () => body,
+    text: async () => text
+  };
+}
+
+// M3-B: a non-2xx response whose body is plain text, not JSON -- exercises
+// GroqProvider's bounded-text fallback in buildGroqRequestError().
+function textResponse(status, text, headers = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(headers),
+    text: async () => text
   };
 }
 
@@ -76,6 +90,71 @@ test('complete(): a non-OK HTTP response is an explicit failure, never a fabrica
   const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'bad-key' });
 
   await assert.rejects(() => provider.complete({ prompt: 'hi' }), /HTTP 401/);
+});
+
+test('complete(): a 429 response captures Retry-After, rate-limit headers, and the JSON error body as structured diagnostics (M3-B)', async () => {
+  const fetchImpl = async () => jsonResponse(
+    429,
+    { error: { message: 'Rate limit reached for requests', type: 'rate_limit_exceeded' } },
+    {
+      'retry-after': '12',
+      'x-ratelimit-limit-requests': '1000',
+      'x-ratelimit-remaining-requests': '0',
+      'x-ratelimit-reset-requests': '3.5s',
+      'x-ratelimit-limit-tokens': '10000',
+      'x-ratelimit-remaining-tokens': '9500',
+      'x-ratelimit-reset-tokens': '1s'
+    }
+  );
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  let caught;
+  try {
+    await provider.complete({ prompt: 'hi' });
+  } catch (err) {
+    caught = err;
+  }
+
+  assert.ok(caught, 'complete() must reject on HTTP 429');
+  assert.match(caught.message, /HTTP 429/);
+  assert.match(caught.message, /Rate limit reached for requests/);
+  assert.equal(caught.status, 429);
+  assert.equal(caught.retryAfter, '12');
+  assert.deepEqual(caught.rateLimit, {
+    'x-ratelimit-limit-requests': '1000',
+    'x-ratelimit-remaining-requests': '0',
+    'x-ratelimit-reset-requests': '3.5s',
+    'x-ratelimit-limit-tokens': '10000',
+    'x-ratelimit-remaining-tokens': '9500',
+    'x-ratelimit-reset-tokens': '1s'
+  });
+  assert.deepEqual(caught.providerBody, {
+    error: { message: 'Rate limit reached for requests', type: 'rate_limit_exceeded' }
+  });
+});
+
+test('complete(): a non-JSON error body is preserved as a bounded text diagnostic, never an enormous exception (M3-B)', async () => {
+  const hugeBody = 'x'.repeat(10_000);
+  const fetchImpl = async () => textResponse(503, hugeBody);
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  let caught;
+  try {
+    await provider.complete({ prompt: 'hi' });
+  } catch (err) {
+    caught = err;
+  }
+
+  assert.ok(caught, 'complete() must reject on HTTP 503');
+  assert.match(caught.message, /HTTP 503/);
+  assert.equal(caught.status, 503);
+  assert.equal(caught.retryAfter, null);
+  assert.deepEqual(caught.rateLimit, {});
+  assert.equal(typeof caught.providerBody, 'string');
+  assert.ok(
+    caught.providerBody.length < hugeBody.length,
+    'a huge non-JSON body must be bounded, not attached in full'
+  );
 });
 
 test('complete(): a 200 response with no completion text is an explicit failure, never fabricated', async () => {

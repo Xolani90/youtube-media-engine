@@ -1,5 +1,76 @@
 import { LLMProvider } from './LLMProvider.js';
 
+// M3-B: observability-only diagnostics for non-2xx Groq responses. No
+// retry/backoff/fallback is implemented here -- see GroqProvider#complete's
+// docstring. Rate-limit header names Groq is documented to return; reading
+// via the standard Headers#get() API is inherently case-insensitive.
+const RATE_LIMIT_HEADER_NAMES = Object.freeze([
+  'x-ratelimit-limit-requests',
+  'x-ratelimit-remaining-requests',
+  'x-ratelimit-reset-requests',
+  'x-ratelimit-limit-tokens',
+  'x-ratelimit-remaining-tokens',
+  'x-ratelimit-reset-tokens'
+]);
+
+// Bounds how much of a non-JSON error body is retained on the thrown error,
+// so an unexpectedly huge provider response can't bloat the exception.
+const MAX_NON_JSON_ERROR_BODY_LENGTH = 2000;
+
+function extractRateLimitHeaders(headers) {
+  const out = {};
+  for (const name of RATE_LIMIT_HEADER_NAMES) {
+    const value = headers?.get?.(name);
+    if (value !== null && value !== undefined) {
+      out[name] = value;
+    }
+  }
+  return out;
+}
+
+/**
+ * Builds the Error thrown by complete() for a non-2xx Groq response.
+ * Reads the response body exactly once (as text), then attempts to parse
+ * it as JSON to recover a useful provider error message without requiring
+ * the caller to understand Groq's response schema; falls back to a
+ * bounded plain-text representation when the body isn't JSON. Never
+ * throws itself -- a body-read failure degrades to an empty body rather
+ * than masking the original HTTP failure.
+ */
+async function buildGroqRequestError(res) {
+  let bodyText = '';
+  try {
+    bodyText = await res.text();
+  } catch {
+    bodyText = '';
+  }
+
+  let providerBody;
+  let providerMessage = null;
+  try {
+    const parsed = JSON.parse(bodyText);
+    providerBody = parsed;
+    if (parsed && typeof parsed.error === 'string') {
+      providerMessage = parsed.error;
+    } else if (parsed && typeof parsed.error?.message === 'string') {
+      providerMessage = parsed.error.message;
+    }
+  } catch {
+    providerBody = bodyText.length > MAX_NON_JSON_ERROR_BODY_LENGTH
+      ? `${bodyText.slice(0, MAX_NON_JSON_ERROR_BODY_LENGTH)}...(truncated)`
+      : bodyText;
+  }
+
+  const error = new Error(
+    `GroqProvider request failed with HTTP ${res.status}${providerMessage ? `: ${providerMessage}` : ''}`
+  );
+  error.status = res.status;
+  error.retryAfter = res.headers?.get?.('retry-after') ?? null;
+  error.rateLimit = extractRateLimitHeaders(res.headers);
+  error.providerBody = providerBody;
+  return error;
+}
+
 /**
  * Real implementation of the 'groq-free' provider id (see candidates.js /
  * REGISTRY and ADR-0001's LLMProvider abstraction). Groq's OpenAI-
@@ -16,6 +87,15 @@ import { LLMProvider } from './LLMProvider.js';
  * { text, model, requestId, inputTokens, outputTokens, estimatedCost, isPaid }
  * or throws. healthCheck() returns a boolean, never throws (the router
  * relies on this to fall through to the next provider in priority order).
+ *
+ * M3-B: on a non-2xx response, the thrown Error carries structured
+ * diagnostics -- error.status (number), error.retryAfter (string|null,
+ * from the Retry-After header), error.rateLimit (object of whichever
+ * x-ratelimit-* headers Groq returned), and error.providerBody (the
+ * parsed JSON error body, or a bounded text excerpt if the body wasn't
+ * JSON) -- in addition to a human-readable error.message. This is
+ * observability only: no retry, backoff, or fallback is performed here
+ * or in LLMRouter as a result of these diagnostics.
  */
 export class GroqProvider extends LLMProvider {
   /**
@@ -74,7 +154,7 @@ export class GroqProvider extends LLMProvider {
     });
 
     if (!res.ok) {
-      throw new Error(`GroqProvider request failed with HTTP ${res.status}`);
+      throw await buildGroqRequestError(res);
     }
 
     const data = await res.json();
