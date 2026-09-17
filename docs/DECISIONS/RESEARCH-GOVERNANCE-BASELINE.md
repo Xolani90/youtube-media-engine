@@ -1,6 +1,6 @@
 # Research Subsystem — Forward Governance Baseline
 
-**Status:** OWNER-APPROVED — forward governance authority for the Research subsystem, effective from approval onward. This approval does not reconstruct, recover, certify, or retroactively replace Research v0.4; does not substantiate any historical freeze; and does not itself authorize a Research freeze, remediation, or closure of any open governance question. As of the current state of this document: RG-01 CLOSED, RG-02 CLOSED, RG-03 CLOSED, RG-04 OPEN, RG-05 OPEN.
+**Status:** OWNER-APPROVED — forward governance authority for the Research subsystem, effective from approval onward. This approval does not reconstruct, recover, certify, or retroactively replace Research v0.4; does not substantiate any historical freeze; and does not itself authorize a Research freeze, remediation, or closure of any open governance question. As of the current state of this document: RG-01 CLOSED, RG-02 CLOSED, RG-03 CLOSED, RG-04 CLOSED, RG-05 OPEN.
 **Creation date:** 2026-09-17
 **Approval date:** 2026-09-17
 **Authority:** Project Owner (Xolani Tshabalala)
@@ -366,17 +366,43 @@ RG-03 — Legacy claim-column disposition.
         freeze. Research remains NOT FROZEN.
 
 RG-04 — Policy governance under the new baseline.
-        The governance framing in Section 13 is Owner-approved.
-        The existing config/research_policy.json remains unchanged.
-        Any future modification of its values or semantics requires a
-        separate Owner decision.
+        CLOSED — OWNER-AUTHORIZED (2026-09-17).
+        The governance framing in Section 13 is Owner-approved: the policy
+        is treated as implementation-controlled configuration whose
+        semantics are documented by this specification, not as an artifact
+        independently backed by a recovered Research v0.4 specification.
+        Evidence basis: config/research_policy.json was verified unchanged
+        since the forward governance baseline was established (last
+        modified by a commit predating baseline creation; no commit since
+        touches this file). Current production code reads the policy
+        exclusively through loadResearchPolicy() in src/config/index.js;
+        no production path in the repository modifies the policy file.
+        The "v0.4" wording in that loader's error message is a source-
+        comment/error-string attribution only, consistent with the
+        Section 13 framing note, and is not treated as evidence of a
+        recoverable v0.4 specification.
+        The RG-04 audit identified, as a LOW finding, the absence of a
+        technical enforcement mechanism (CI guard, runtime hash/signature
+        check, or lint rule) preventing an unauthorized future edit to
+        config/research_policy.json. The Owner has explicitly decided that
+        no such technical enforcement mechanism is required for RG-04.
+        The absence of a technical guard is therefore not a closure
+        defect. Future policy changes remain subject to explicit Owner
+        decision as a governance/process control, per point 3 of this
+        entry and the existing text above.
+        Owner decision: the Owner has reviewed this evidence and
+        explicitly authorizes RG-04 closure as a governance-only decision.
+        This closure does not reconstruct or certify Research v0.4, does
+        not alter RG-01, RG-02, or RG-03, does not close RG-05, and does
+        not itself authorize a Research freeze or declare Research
+        production-ready. Research remains NOT FROZEN.
 
 RG-05 — Schema/E2E dependency-complete verification outstanding.
         Unresolved. An environment discrepancy (Section 16) exists between
         this audit session and previously reported local/CI results.
 ```
 
-RG-01 is CLOSED (Owner decision, Option B, 2026-09-17). RG-02 is CLOSED (Owner-authorized, 2026-09-17). RG-03 is CLOSED (Owner-authorized, 2026-09-17). RG-04 and RG-05 are not closed by this document and remain OPEN. Neither the RG-02 nor the RG-03 closure constitutes or authorizes a Research freeze; Research remains NOT FROZEN (Section 18).
+RG-01 is CLOSED (Owner decision, Option B, 2026-09-17). RG-02 is CLOSED (Owner-authorized, 2026-09-17). RG-03 is CLOSED (Owner-authorized, 2026-09-17). RG-04 is CLOSED (Owner-authorized, 2026-09-17). RG-05 is not closed by this document and remains OPEN. Neither the RG-02, RG-03, nor RG-04 closure constitutes or authorizes a Research freeze; Research remains NOT FROZEN (Section 18).
 
 ---
 
@@ -404,3 +430,4 @@ No freeze record is created by this document. No freeze is declared, implied, or
 - 2026-09-17 — RG-02 CLOSED by explicit Owner decision (Owner-authorized), following implementation (commit `feat: implement RG-02 research contradiction contract`) and an independent read-only verification audit (22/22 focused RG-02 tests passing; full sandbox suite 647/654 passing with 7 pre-existing, unrelated FFmpeg/narration-synthesis environment failures; production wiring in `src/index.js` verified by direct code inspection). This closure records one non-blocking LOW follow-up (no automated end-to-end test yet exercises `src/index.js`'s default-detector wiring) and preserves the audit's hash-evidence finding (`CONTENT EQUIVALENCE: NOT ESTABLISHED` between the verification sandbox's commit hashes and the previously established authoritative-environment hashes) without treating either as an implementation defect. This closure does not reconstruct or certify Research v0.4, does not close RG-03, RG-04, or RG-05, and does not itself authorize a Research freeze. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
 - 2026-09-17 — RG-03 DISPOSITION AUTHORIZED by explicit Owner decision, following an independent read-only evidence audit (claims.source_id = TEST-ONLY, sole dependency `tests/unit/asset-provenance.test.js`; claims.confidence = UNUSED; claims.supporting_evidence = UNUSED; no known supported external consumer requires these columns, per Owner-confirmed scope). Owner disposition: REMOVE claims.source_id, claims.confidence, and claims.supporting_evidence, through a separately authorized future database/schema migration. This entry records the disposition decision only — it is not an implementation authorization, and no migration has been created or performed. RG-03 remains OPEN — DISPOSITION AUTHORIZED; IMPLEMENTATION PENDING, and is NOT CLOSED; closure requires a later, separately authorized implementation-and-verification process. This decision does not reconstruct or certify Research v0.4, does not alter RG-01, RG-02, RG-04, or RG-05, and does not itself authorize a Research freeze. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
 - 2026-09-17 — RG-03 CLOSED by explicit Owner decision (Owner-authorized), following implementation (commit `6fafa7c1071818431220ca40d362bdfcae64854f`, containing exactly the authorized four-file scope: `src/db/migrations/0012_remove_legacy_claim_columns.sql`, `src/storage/SqliteStorageDriver.js`, `tests/unit/asset-provenance.test.js`, `tests/unit/rg03-claims-migration.test.js`) and an independent read-only verification audit (targeted RG-03 + asset-provenance tests: 17/17 PASS; full suite: 661 total, 654 PASS, 7 FAIL, the 7 failures confirmed as the known, pre-existing, unrelated `espeak-ng ENOENT` FFmpeg/narration-synthesis environment failures; changed-file scope and origin/main HEAD position independently confirmed). This closure does not reconstruct or certify Research v0.4 (remains UNRECOVERED / NOT CERTIFIED), does not close RG-04 or RG-05, and does not itself authorize a Research freeze. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
+- 2026-09-17 — RG-04 CLOSED by explicit Owner decision (Owner-authorized, governance-only closure), following an independent read-only audit confirming: the Section 13 governance framing was Owner-approved; `config/research_policy.json` was verified unchanged since the forward governance baseline was established; current production code reads the policy exclusively through `loadResearchPolicy()` in `src/config/index.js`; no production path modifies the policy file; and the "v0.4" wording in that loader's error message is a source-comment/error-string attribution only, not evidence of a recoverable v0.4 specification. The audit identified, as a LOW finding, the absence of a technical enforcement mechanism (CI guard, runtime hash/signature check, or lint rule); the Owner explicitly decided no such mechanism is required for RG-04, and its absence is therefore not treated as a closure defect. No technical enforcement mechanism was implemented as part of this closure. This closure does not reconstruct or certify Research v0.4 (remains UNRECOVERED / NOT CERTIFIED), does not alter RG-01, RG-02, or RG-03, does not close RG-05 (remains OPEN), and does not itself authorize a Research freeze or declare Research production-ready. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
