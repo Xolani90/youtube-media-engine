@@ -251,7 +251,14 @@ No pass counts are invented; the 84/84 figure above is from an actual execution 
 
 ```text
 RG-01 — Historical v0.4 authority unavailable.
-        Unresolved. No external v0.4 document has been supplied or located.
+        CLOSED (Owner decision, Option B, 2026-09-17). The Owner has explicitly
+        decided not to pursue further recovery of the historical Research v0.4
+        specification. Historical Research v0.4 remains permanently recorded as
+        UNRECOVERED / NOT CERTIFIED. This closure does not constitute retroactive
+        certification of v0.4, does not substantiate any historical Research
+        freeze, and does not itself authorize a Research freeze. This
+        Owner-approved document remains the governing authority for the Research
+        subsystem going forward.
 
 RG-02 — Production contradiction detector absent.
         Unresolved. detectContradiction remains an unimplemented injection point.
@@ -271,7 +278,7 @@ RG-05 — Schema/E2E dependency-complete verification outstanding.
         this audit session and previously reported local/CI results.
 ```
 
-None of RG-01 through RG-05 are closed by this document.
+RG-01 is CLOSED (Owner decision, Option B, 2026-09-17). RG-02 through RG-05 are not closed by this document and remain OPEN.
 
 ---
 
@@ -295,3 +302,4 @@ No freeze record is created by this document. No freeze is declared, implied, or
 
 - 2026-09-17 — Initial DRAFT created per Owner authorization. Not approved. Not accepted. Not frozen. Research is not certified conformant by this document.
 - 2026-09-17 — OWNER-APPROVED by Project Owner (Xolani Tshabalala) as the forward governance authority for the Research subsystem. This approval does not reconstruct, recover, or certify Research v0.4 (remains UNRECOVERED / NOT CERTIFIED); does not substantiate any historical Research freeze; does not authorize a Research freeze; and does not close RG-01 through RG-05, which remain OPEN. Not authorized by this approval: implementation of `detectContradiction`, removal/renaming/migration of legacy claim columns, modification of `config/research_policy.json`, modification of Research production code or tests, creation of a freeze record, or retroactive certification of v0.4.
+- 2026-09-17 — RG-01 CLOSED by explicit Owner decision (Option B): the historical Research v0.4 specification will not be pursued for further recovery, and remains permanently recorded as UNRECOVERED / NOT CERTIFIED. This closure does not constitute retroactive certification of v0.4, does not substantiate any historical Research freeze, and does not itself authorize a Research freeze. RG-02, RG-03, RG-04, and RG-05 remain OPEN. All existing freeze rules (Section 18) remain unchanged.
