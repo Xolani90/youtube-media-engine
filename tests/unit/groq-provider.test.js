@@ -85,28 +85,36 @@ test('complete(): constructs a well-formed request and maps a real-shaped respon
   });
 });
 
-test('complete(): a non-OK HTTP response is an explicit failure, never a fabricated result', async () => {
-  const fetchImpl = async () => jsonResponse(401, { error: 'invalid_api_key' });
+test('complete(): a non-OK, non-429 HTTP response is an explicit failure after exactly one attempt, never retried', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => { fetchCalls++; return jsonResponse(401, { error: 'invalid_api_key' }); };
   const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'bad-key' });
 
   await assert.rejects(() => provider.complete({ prompt: 'hi' }), /HTTP 401/);
+  assert.equal(fetchCalls, 1, '401 must not be retried');
 });
 
-test('complete(): a 429 response captures Retry-After, rate-limit headers, and the JSON error body as structured diagnostics (M3-B)', async () => {
-  const fetchImpl = async () => jsonResponse(
-    429,
-    { error: { message: 'Rate limit reached for requests', type: 'rate_limit_exceeded' } },
-    {
-      'retry-after': '12',
-      'x-ratelimit-limit-requests': '1000',
-      'x-ratelimit-remaining-requests': '0',
-      'x-ratelimit-reset-requests': '3.5s',
-      'x-ratelimit-limit-tokens': '10000',
-      'x-ratelimit-remaining-tokens': '9500',
-      'x-ratelimit-reset-tokens': '1s'
-    }
-  );
-  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+test('complete(): a persistent 429 is retried exactly once, then throws with diagnostics from the final attempt (M3-B)', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    return jsonResponse(
+      429,
+      { error: { message: 'Rate limit reached for requests', type: 'rate_limit_exceeded' } },
+      {
+        'retry-after': '12',
+        'x-ratelimit-limit-requests': '1000',
+        'x-ratelimit-remaining-requests': '0',
+        'x-ratelimit-reset-requests': '3.5s',
+        'x-ratelimit-limit-tokens': '10000',
+        'x-ratelimit-remaining-tokens': '9500',
+        'x-ratelimit-reset-tokens': '1s'
+      }
+    );
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
 
   let caught;
   try {
@@ -115,7 +123,9 @@ test('complete(): a 429 response captures Retry-After, rate-limit headers, and t
     caught = err;
   }
 
-  assert.ok(caught, 'complete() must reject on HTTP 429');
+  assert.ok(caught, 'complete() must reject once the retry is also 429');
+  assert.equal(fetchCalls, 2, 'exactly two attempts total: one retry, no third request');
+  assert.equal(sleepCalls.length, 1, 'exactly one retry delay was awaited');
   assert.match(caught.message, /HTTP 429/);
   assert.match(caught.message, /Rate limit reached for requests/);
   assert.equal(caught.status, 429);
@@ -131,6 +141,75 @@ test('complete(): a 429 response captures Retry-After, rate-limit headers, and t
   assert.deepEqual(caught.providerBody, {
     error: { message: 'Rate limit reached for requests', type: 'rate_limit_exceeded' }
   });
+});
+
+test('complete(): a transient 429 followed by a 200 succeeds on the retry, using the second response (M3-B)', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    if (fetchCalls === 1) {
+      return jsonResponse(429, { error: 'rate_limit_exceeded' }, { 'retry-after': '1' });
+    }
+    return jsonResponse(200, {
+      id: 'req-retry-success',
+      model: 'openai/gpt-oss-20b',
+      choices: [{ message: { content: 'Second attempt succeeded.' } }],
+      usage: { prompt_tokens: 3, completion_tokens: 2 }
+    });
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  const result = await provider.complete({ prompt: 'hi' });
+
+  assert.equal(fetchCalls, 2, 'exactly two attempts: the initial 429 and the successful retry');
+  assert.equal(sleepCalls.length, 1, 'the retry delay was awaited exactly once');
+  assert.equal(result.text, 'Second attempt succeeded.');
+  assert.equal(result.requestId, 'req-retry-success');
+});
+
+test('complete(): the 429 retry delay is derived from a present Retry-After header, not the fallback (M3-B)', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    if (fetchCalls === 1) {
+      return jsonResponse(429, { error: 'rate_limit_exceeded' }, { 'retry-after': '3' });
+    }
+    return jsonResponse(200, {
+      choices: [{ message: { content: 'ok' } }],
+      usage: {}
+    });
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  await provider.complete({ prompt: 'hi' });
+
+  assert.deepEqual(sleepCalls, [3000], 'Retry-After: 3 must produce a 3000ms delay, derived from the header');
+});
+
+test('complete(): a 429 with no Retry-After header falls back to the fixed bounded delay (M3-B)', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    if (fetchCalls === 1) {
+      return jsonResponse(429, { error: 'rate_limit_exceeded' }); // no retry-after header
+    }
+    return jsonResponse(200, {
+      choices: [{ message: { content: 'ok' } }],
+      usage: {}
+    });
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  await provider.complete({ prompt: 'hi' });
+
+  assert.equal(sleepCalls.length, 1);
+  assert.ok(sleepCalls[0] > 0, 'a fixed, positive fallback delay must be used when Retry-After is absent');
 });
 
 test('complete(): a non-JSON error body is preserved as a bounded text diagnostic, never an enormous exception (M3-B)', async () => {

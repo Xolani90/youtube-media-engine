@@ -1,9 +1,9 @@
 import { LLMProvider } from './LLMProvider.js';
 
-// M3-B: observability-only diagnostics for non-2xx Groq responses. No
-// retry/backoff/fallback is implemented here -- see GroqProvider#complete's
-// docstring. Rate-limit header names Groq is documented to return; reading
-// via the standard Headers#get() API is inherently case-insensitive.
+// M3-B: diagnostics for non-2xx Groq responses, and (below) bounded retry
+// for 429 specifically -- see GroqProvider#complete's docstring. Rate-limit
+// header names Groq is documented to return; reading via the standard
+// Headers#get() API is inherently case-insensitive.
 const RATE_LIMIT_HEADER_NAMES = Object.freeze([
   'x-ratelimit-limit-requests',
   'x-ratelimit-remaining-requests',
@@ -26,6 +26,34 @@ function extractRateLimitHeaders(headers) {
     }
   }
   return out;
+}
+
+// M3-B: bounded 429 retry. Exactly one retry (two attempts total) for a
+// rate-limited request; every other non-2xx status remains immediately
+// non-retryable, unchanged from before. Intentionally narrow -- this is
+// 429 resilience, not a generalized HTTP retry policy.
+const MAX_ATTEMPTS_ON_429 = 2;
+
+// Used only when a 429 response has no usable Retry-After value. Small and
+// fixed by design, not an adaptive/elaborate rate limiter.
+const FALLBACK_RETRY_DELAY_MS = 2000;
+
+/**
+ * Parses Retry-After's numeric-seconds form (the form Groq is documented
+ * to return, e.g. "3"). The HTTP-date form is intentionally not handled --
+ * an unparseable or missing value is treated as absent, so the caller
+ * falls back to FALLBACK_RETRY_DELAY_MS rather than failing the retry
+ * solely because the header is missing or in an unexpected form.
+ */
+function parseRetryAfterMs(retryAfterHeaderValue) {
+  if (retryAfterHeaderValue === null || retryAfterHeaderValue === undefined || retryAfterHeaderValue === '') {
+    return null;
+  }
+  const seconds = Number(retryAfterHeaderValue);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+  return null;
 }
 
 /**
@@ -93,9 +121,15 @@ async function buildGroqRequestError(res) {
  * from the Retry-After header), error.rateLimit (object of whichever
  * x-ratelimit-* headers Groq returned), and error.providerBody (the
  * parsed JSON error body, or a bounded text excerpt if the body wasn't
- * JSON) -- in addition to a human-readable error.message. This is
- * observability only: no retry, backoff, or fallback is performed here
- * or in LLMRouter as a result of these diagnostics.
+ * JSON) -- in addition to a human-readable error.message.
+ *
+ * A 429 specifically is retried once (see MAX_ATTEMPTS_ON_429), honoring
+ * Retry-After when Groq supplies a usable value and otherwise waiting
+ * FALLBACK_RETRY_DELAY_MS; every other non-2xx status remains immediately
+ * non-retryable. This is transport-layer resilience only: it does not
+ * change provider selection (LLMRouter is untouched and never sees a
+ * mid-flight retry), request semantics, or the success/error contract
+ * shapes documented above.
  */
 export class GroqProvider extends LLMProvider {
   /**
@@ -103,16 +137,19 @@ export class GroqProvider extends LLMProvider {
    * @param {typeof fetch} [opts.fetchImpl] - injectable for tests; defaults to global fetch.
    * @param {() => string|undefined} [opts.apiKeyProvider] - defaults to reading GROQ_FREE_API_KEY from process.env.
    * @param {string} [opts.model] - defaults to 'llama-3.1-8b-instant' (a Groq free-tier model).
+   * @param {(ms: number) => Promise<void>} [opts.sleepImpl] - injectable delay for the M3-B 429 retry, so tests never wait in real time; defaults to a real setTimeout-based sleep.
    */
   constructor({
     fetchImpl = fetch,
     apiKeyProvider = () => process.env.GROQ_FREE_API_KEY,
-    model = 'openai/gpt-oss-20b'
+    model = 'openai/gpt-oss-20b',
+    sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   } = {}) {
     super();
     this._fetch = fetchImpl;
     this._apiKeyProvider = apiKeyProvider;
     this._model = model;
+    this._sleep = sleepImpl;
   }
 
   get id() {
@@ -144,17 +181,29 @@ export class GroqProvider extends LLMProvider {
       ...(maxTokens ? { max_tokens: maxTokens } : {})
     };
 
-    const res = await this._fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(body)
-    });
+    let res;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS_ON_429; attempt++) {
+      res = await this._fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(body)
+      });
 
-    if (!res.ok) {
-      throw await buildGroqRequestError(res);
+      if (res.ok) break;
+
+      // Only 429 is retryable, and only up to MAX_ATTEMPTS_ON_429 total
+      // attempts -- every other non-2xx status (400/401/403/404/5xx, etc.)
+      // and an exhausted 429 retry both throw immediately here, exactly
+      // as before this change.
+      if (res.status !== 429 || attempt === MAX_ATTEMPTS_ON_429) {
+        throw await buildGroqRequestError(res);
+      }
+
+      const delayMs = parseRetryAfterMs(res.headers?.get?.('retry-after')) ?? FALLBACK_RETRY_DELAY_MS;
+      await this._sleep(delayMs);
     }
 
     const data = await res.json();
