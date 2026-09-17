@@ -3,6 +3,7 @@ import { createStorage } from './storage/index.js';
 import { LLMRouter } from './providers/llm/router.js';
 import { detectContradiction as detectContradictionProd } from './research/contradictionDetector.js';
 import { RssSource } from './providers/opportunity/RssSource.js';
+import { PixabayAssetSourceProvider } from './providers/asset/PixabayAssetSourceProvider.js';
 import { runDiscoveryPipeline } from './discovery/pipeline.js';
 import { runAutonomousOperation } from './autonomous/runner.js';
 import { computeRawFeatures } from './discovery/featureComputation.js';
@@ -82,6 +83,15 @@ export async function runAutonomousEntrypoint(deps = {}) {
       },
       briefPolicy: deps.briefPolicy ?? config.briefPolicy,
       scriptPolicy: deps.scriptPolicy ?? config.scriptPolicy,
+      // Asset Provisioning previously had no default provider in the real
+      // entrypoint: deps.assetProvisioning?.provider was always undefined
+      // outside tests, so runAssetProvisioning() ran with no concrete
+      // AssetSourceProvider. Default to the existing PixabayAssetSourceProvider;
+      // a caller-supplied override (tests, controlled callers) still wins.
+      assetProvisioning: {
+        ...deps.assetProvisioning,
+        provider: deps.assetProvisioning?.provider ?? new PixabayAssetSourceProvider()
+      },
       production: {
         ...deps.production,
         artifactsDir:
