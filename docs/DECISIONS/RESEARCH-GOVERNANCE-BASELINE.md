@@ -171,7 +171,7 @@ Verified in `src/research/contradictions.js`, `src/research/contradictionDetecto
 - The binary Research baseline is preserved: the only persisted relation remains `CONTRADICTS`; `UNCERTAIN` and `ERROR` never persist a relation.
 - Evidence grading's existing deterministic rule is unchanged: a recorded unresolved `CONTRADICTS` relation still drives `evidence_status = CONTESTED` (`src/research/evidenceGrading.js`, unmodified).
 
-**Status:** `IMPLEMENTED — VERIFICATION EVIDENCE IN SECTION 17`. This document does not, by itself, close RG-02 or authorize a Research freeze; only the Owner can authorize final closure (Section 17).
+**Status:** `IMPLEMENTED — VERIFICATION PENDING`. This document does not, by itself, close RG-02 or authorize a Research freeze; only the Owner can authorize final closure (Section 17).
 
 ---
 
