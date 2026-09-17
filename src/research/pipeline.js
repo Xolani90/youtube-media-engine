@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { RESEARCH_STAGE, RESEARCH_PROJECT_STATUS, RETRIEVAL_STATUS, EVIDENCE_STATUS } from './constants.js';
+import { RESEARCH_STAGE, RESEARCH_PROJECT_STATUS, RETRIEVAL_STATUS, EVIDENCE_STATUS, CLAIM_TYPE, CONTRADICTION_RESULT, CONTRADICTION_EXECUTION_STATE } from './constants.js';
 import { acquireSources } from './acquisition.js';
 import { classifySourceRole, classifySourceQuality } from './sourceClassification.js';
 import { extractClaims, validateExtractedClaim } from './claims.js';
@@ -112,7 +112,7 @@ function setEvidenceStatus(storage, claimId, evidenceStatus) {
  * @param {object} [deps.classification] - { authoritativeDomains, syndicatedDomains } for sourceClassification
  * @param {function} [deps.retrieveImpl] - injectable retrieval fn for testing
  * @param {function} [deps.fetchImpl] - forwarded to retrieveImpl
- * @param {function} [deps.detectContradiction] - async (claimA, claimB, llmRouter) => boolean; LLM-assisted semantic judgment. Optional: no contradiction detection performed if omitted.
+ * @param {function} [deps.detectContradiction] - async (claimA, claimB, llmRouter) => one of CONTRADICTION_RESULT ('CONTRADICTS'|'NO_CONTRADICTION'|'UNCERTAIN'); a thrown/rejected call is treated as ERROR by the caller. LLM-assisted semantic judgment, RG-02 contract (see ./contradictionDetector.js for the production implementation). Optional: no contradiction detection performed if omitted (logged as NOT_CHECKED).
  * @param {string} [deps.runId]
  */
 export async function runResearchProject({
@@ -240,24 +240,108 @@ export async function runResearchProject({
     }
   }
 
-  // --- Contradiction detection (LLM-assisted semantic judgment), scoped to load-bearing claims to bound cost ---
-  if (detectContradiction && persistedClaims.length > 1) {
-    const loadBearingClaims = persistedClaims.filter((c) => c.is_load_bearing);
-    for (let i = 0; i < loadBearingClaims.length; i++) {
-      for (let j = i + 1; j < loadBearingClaims.length; j++) {
-        const a = loadBearingClaims[i];
-        const b = loadBearingClaims[j];
-        const [canonA, canonB] = canonicalizePair(a.id, b.id);
-        const contradicts = await detectContradiction(a, b, llmRouter);
-        if (contradicts) {
-          recordContradiction(storage, { claimId: canonA, relatedClaimId: canonB });
-          logDecision(storage, {
-            runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'claim', subjectId: canonA,
-            decision: 'CONTRADICTS', reason: `contradicts_${canonB}`
-          });
+  // --- Contradiction detection (LLM-assisted semantic judgment) ---
+  // RG-02 owner-authorized contract: claim-to-claim only (§3.1), scoped to
+  // FACT claims that are is_load_bearing = true (§3.2/§3.3) — both the
+  // semantic scope of this baseline AND the cost-control boundary for
+  // pairwise detector calls. detectContradiction resolves to exactly one
+  // of CONTRADICTION_RESULT's four states; a thrown/rejected call is
+  // treated the same as an explicit ERROR result (§5) — neither is ever
+  // silently downgraded to NO_CONTRADICTION.
+  let contradictionCheckFailed = false;
+  let contradictionCheckFailureReason = null;
+  if (!detectContradiction) {
+    logDecision(storage, {
+      runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
+      decision: CONTRADICTION_EXECUTION_STATE.NOT_CHECKED, reason: 'detector_not_configured'
+    });
+  } else {
+    const eligibleClaims = persistedClaims.filter((c) => c.claim_type === CLAIM_TYPE.FACT && c.is_load_bearing);
+    if (eligibleClaims.length < 2) {
+      logDecision(storage, {
+        runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
+        decision: CONTRADICTION_EXECUTION_STATE.NOT_CHECKED, reason: 'insufficient_eligible_claim_pairs'
+      });
+    } else {
+      let anyContradiction = false;
+      let anyUncertain = false;
+      outer: for (let i = 0; i < eligibleClaims.length; i++) {
+        for (let j = i + 1; j < eligibleClaims.length; j++) {
+          const a = eligibleClaims[i];
+          const b = eligibleClaims[j];
+          const [canonA, canonB] = canonicalizePair(a.id, b.id);
+
+          let outcome;
+          let errorReason = null;
+          try {
+            outcome = await detectContradiction(a, b, llmRouter);
+          } catch (err) {
+            outcome = CONTRADICTION_RESULT.ERROR;
+            errorReason = err?.message || 'detector threw';
+          }
+
+          if (outcome === CONTRADICTION_RESULT.CONTRADICTS) {
+            recordContradiction(storage, { claimId: canonA, relatedClaimId: canonB });
+            anyContradiction = true;
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'claim', subjectId: canonA,
+              decision: CONTRADICTION_RESULT.CONTRADICTS, reason: `contradicts_${canonB}`,
+              resultingState: CONTRADICTION_EXECUTION_STATE.CONTRADICTION_FOUND
+            });
+          } else if (outcome === CONTRADICTION_RESULT.UNCERTAIN) {
+            anyUncertain = true;
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'claim', subjectId: canonA,
+              decision: CONTRADICTION_RESULT.UNCERTAIN, reason: `uncertain_${canonB}`,
+              resultingState: CONTRADICTION_EXECUTION_STATE.UNCERTAIN
+            });
+          } else if (outcome === CONTRADICTION_RESULT.ERROR) {
+            contradictionCheckFailed = true;
+            contradictionCheckFailureReason = errorReason || 'detector_error';
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'claim', subjectId: canonA,
+              decision: CONTRADICTION_RESULT.ERROR, reason: contradictionCheckFailureReason,
+              resultingState: CONTRADICTION_EXECUTION_STATE.ERROR
+            });
+            break outer;
+          } else {
+            // NO_CONTRADICTION: do not persist a relation.
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'claim', subjectId: canonA,
+              decision: CONTRADICTION_RESULT.NO_CONTRADICTION, reason: `no_contradiction_${canonB}`,
+              resultingState: CONTRADICTION_EXECUTION_STATE.NO_CONTRADICTION
+            });
+          }
         }
       }
+
+      if (!contradictionCheckFailed && !anyContradiction && !anyUncertain) {
+        logDecision(storage, {
+          runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
+          decision: CONTRADICTION_EXECUTION_STATE.NO_CONTRADICTION, reason: 'all_eligible_pairs_checked_no_contradiction'
+        });
+      }
     }
+  }
+
+  // Fail-closed (§5): a detector ERROR must not let Research proceed as
+  // though contradiction checking succeeded. Evidence grading and
+  // completeness are never evaluated on a project whose contradiction
+  // check did not complete — mirrors the existing SOURCE_DISCOVERY_FAILED
+  // early-return pattern above.
+  if (contradictionCheckFailed) {
+    logDecision(storage, {
+      runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
+      decision: 'FAILED', reason: contradictionCheckFailureReason, resultingState: RESEARCH_PROJECT_STATUS.FAILED
+    });
+    storage.run('UPDATE research_projects SET status = ?, stop_reason = ?, completed_at = ? WHERE id = ?',
+      [RESEARCH_PROJECT_STATUS.FAILED, 'CONTRADICTION_CHECK_FAILED', new Date().toISOString(), project.id]);
+    return {
+      project: storage.get('SELECT * FROM research_projects WHERE id = ?', [project.id]),
+      stopReason: 'CONTRADICTION_CHECK_FAILED',
+      claims: persistedClaims,
+      sources: persistedSources
+    };
   }
 
   // --- Deterministic evidence grading (never LLM self-certified) ---

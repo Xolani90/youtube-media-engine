@@ -24,6 +24,29 @@ export const CLAIM_TYPE = Object.freeze({
   OPINION: 'OPINION'
 });
 
+// RG-02: the four-state contradiction-detector result contract (Owner
+// decision, §4). Every detector call MUST resolve to exactly one of
+// these — never a boolean, and ERROR/UNCERTAIN must never be silently
+// collapsed into NO_CONTRADICTION.
+export const CONTRADICTION_RESULT = Object.freeze({
+  CONTRADICTS: 'CONTRADICTS',
+  NO_CONTRADICTION: 'NO_CONTRADICTION',
+  UNCERTAIN: 'UNCERTAIN',
+  ERROR: 'ERROR'
+});
+
+// RG-02 §6: execution-state observability for the contradiction-check
+// stage as a whole (distinct from CONTRADICTION_RESULT, which is a
+// per-pair detector outcome). NOT_CHECKED must never be indistinguishable
+// from NO_CONTRADICTION in the decision log.
+export const CONTRADICTION_EXECUTION_STATE = Object.freeze({
+  NOT_CHECKED: 'NOT_CHECKED',
+  NO_CONTRADICTION: 'NO_CONTRADICTION',
+  CONTRADICTION_FOUND: 'CONTRADICTION_FOUND',
+  UNCERTAIN: 'UNCERTAIN',
+  ERROR: 'ERROR'
+});
+
 export const EVIDENCE_STATUS = Object.freeze({
   VERIFIED: 'VERIFIED',
   PARTIALLY_SUPPORTED: 'PARTIALLY_SUPPORTED',

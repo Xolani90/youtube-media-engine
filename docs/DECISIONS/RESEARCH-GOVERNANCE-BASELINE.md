@@ -159,15 +159,19 @@ Verified in `src/research/completeness.js`, `config/research_policy.json`, and `
 
 ## 11. Contradiction Handling
 
-Verified in `src/research/contradictions.js`, `src/research/pipeline.js`, `src/autonomous/runner.js`:
+Verified in `src/research/contradictions.js`, `src/research/contradictionDetector.js`, `src/research/pipeline.js`, `src/research/constants.js`, `src/autonomous/runner.js`, `src/index.js`:
 
-- Contradiction persistence and canonicalization exist: `claim_relations` stores undirected `CONTRADICTS` relations with canonical ordering (smaller `claim_id` first) enforced at the application layer, plus a unique index preventing mirrored duplicate pairs.
-- `detectContradiction` is an **optional injected callback** (`pipeline.js`: `detectContradiction = null` by default). The pipeline JSDoc states explicitly: "no contradiction detection performed if omitted."
-- No concrete production implementation of `detectContradiction` exists anywhere in the current codebase — it is wired as an injection point in `runner.js` (`deps.research?.detectContradiction`) but nothing currently supplies a real implementation in production code paths.
-- Research can reach `RESEARCH_COMPLETE` without contradiction detection ever running.
-- Absence of the detector means contradiction relations are simply never generated in current production use — this is not a failure state, and evidence grading remains fully deterministic regardless.
+- Contradiction persistence and canonicalization exist unchanged: `claim_relations` stores undirected `CONTRADICTS` relations with canonical ordering (smaller `claim_id` first) enforced at the application layer, plus a unique index preventing mirrored duplicate pairs. No schema migration was made or required (see RG-02 implementation note below).
+- `detectContradiction` is still an **optional injected callback** on `runResearchProject` (`pipeline.js`: `detectContradiction = null` by default) — Research can still reach a terminal status without contradiction detection ever running if no detector is supplied at all, and this is logged as `NOT_CHECKED`, never conflated with `NO_CONTRADICTION`.
+- A **concrete production detector now exists**: `src/research/contradictionDetector.js` exports `detectContradiction(claimA, claimB, llmRouter)`, an LLM-assisted, claim-to-claim semantic judgment implementing the Owner-authorized RG-02 contract (temporal, scope/entity, negation, and numeric-value semantics per the RG-02 authorization; claim text is fenced via `derivedContentBlock` before crossing the LLM boundary). It resolves to exactly one of `CONTRADICTION_RESULT`: `CONTRADICTS`, `NO_CONTRADICTION`, `UNCERTAIN`, `ERROR` — never a boolean.
+- **Production wiring:** `src/index.js`'s `runAutonomousEntrypoint` now defaults `deps.research.detectContradiction` to this production detector when no caller override is supplied, so the real autonomous entrypoint actually performs contradiction checking. A caller-supplied `deps.research.detectContradiction` (tests, controlled callers) still takes priority.
+- **Eligibility:** contradiction detection is scoped to `claim_type = FACT` claims with `is_load_bearing = true` only (both the semantic scope and the cost-control boundary for pairwise detector calls). `INFERENCE`/`OPINION` claims and non-load-bearing `FACT` claims are excluded and never passed to the detector.
+- **Execution-state observability:** every contradiction-check pass logs a `CONTRADICTION_CHECK`-stage `decision_log` entry distinguishing `NOT_CHECKED` (no detector configured, or fewer than 2 eligible claims), `NO_CONTRADICTION`, `CONTRADICTS`, `UNCERTAIN`, and `ERROR` — `NOT_CHECKED` and `NO_CONTRADICTION` are never indistinguishable.
+- **Fail-closed on detector failure:** a detector call that returns `ERROR`, or that throws/rejects, is treated identically — the research project transitions to `FAILED` with `stop_reason = 'CONTRADICTION_CHECK_FAILED'`, and evidence grading/completeness evaluation are never run for that pass. Research cannot silently complete as though contradiction checking succeeded when it did not.
+- The binary Research baseline is preserved: the only persisted relation remains `CONTRADICTS`; `UNCERTAIN` and `ERROR` never persist a relation.
+- Evidence grading's existing deterministic rule is unchanged: a recorded unresolved `CONTRADICTS` relation still drives `evidence_status = CONTESTED` (`src/research/evidenceGrading.js`, unmodified).
 
-**Status:** `OPEN GOVERNANCE / DESIGN QUESTION`. This document does not authorize implementation of a production contradiction detector; that remains a separate Owner decision (see RG-02, Section 17).
+**Status:** `IMPLEMENTED — VERIFICATION EVIDENCE IN SECTION 17`. This document does not, by itself, close RG-02 or authorize a Research freeze; only the Owner can authorize final closure (Section 17).
 
 ---
 
@@ -261,7 +265,31 @@ RG-01 — Historical v0.4 authority unavailable.
         subsystem going forward.
 
 RG-02 — Production contradiction detector absent.
-        Unresolved. detectContradiction remains an unimplemented injection point.
+        IMPLEMENTED — VERIFICATION PENDING (2026-09-17, RG-02 implementation
+        session). Owner decision: the semantic contract in the RG-02
+        authorization prompt (claim-to-claim only; FACT + load-bearing
+        eligibility; temporal/scope/negation/numeric semantics handled by
+        detector judgment, no new structured columns; four-state result
+        contract CONTRADICTS/NO_CONTRADICTION/UNCERTAIN/ERROR; fail-closed
+        on detector ERROR or thrown/rejected calls; binary CONTRADICTS-only
+        persisted relation; no confidence/rationale/detector-version schema).
+        Implementation evidence: src/research/contradictionDetector.js
+        (production detector), src/research/pipeline.js (eligibility,
+        result-contract handling, fail-closed transition to FAILED),
+        src/research/constants.js (CONTRADICTION_RESULT,
+        CONTRADICTION_EXECUTION_STATE), src/index.js (production wiring of
+        the concrete detector into deps.research.detectContradiction).
+        Verification evidence: focused tests
+        tests/unit/research-contradiction-detector.test.js (12 tests) and
+        tests/integration/research-contradiction-pipeline.test.js (8 tests),
+        all passing; full suite 647/654 passing, the same 7 pre-existing
+        sandbox FFmpeg/narration-synthesis failures as prior sessions
+        (unrelated to Research), verified unchanged by this implementation.
+        No schema migration was made or required — the existing
+        claim_relations/decision_log schema already satisfied the contract.
+        RG-02 is described here as IMPLEMENTED — VERIFICATION PENDING per
+        the RG-02 authorization's own instruction: only the Owner may
+        authorize final closure.
 
 RG-03 — Legacy claim-column disposition unresolved.
         Unresolved. claims.source_id / confidence / supporting_evidence:

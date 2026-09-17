@@ -232,7 +232,7 @@ function eligibilitySignature(sweepEligible) {
  * @param {object} [deps.researchPolicy] - default policy for Research (falls back to deps.research.policy override)
  * @param {object} [deps.briefPolicy] - default policy for Brief
  * @param {object} [deps.scriptPolicy] - default policy for Script
- * @param {object} [deps.research] - { sourceProvider, llmRouter, policy, classification, retrieveImpl, fetchImpl, detectContradiction } -- Research-stage overrides
+ * @param {object} [deps.research] - { sourceProvider, llmRouter, policy, classification, retrieveImpl, fetchImpl, detectContradiction } -- Research-stage overrides. detectContradiction defaults to the RG-02 production detector (src/research/contradictionDetector.js) when not overridden -- see src/index.js.
  * @param {object} [deps.brief] - { llmRouter, policy } -- Brief-stage overrides
  * @param {object} [deps.script] - { llmRouter, policy } -- Script-stage overrides
  * @param {object} [deps.production] - { artifactsDir }

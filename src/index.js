@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { createStorage } from './storage/index.js';
 import { LLMRouter } from './providers/llm/router.js';
+import { detectContradiction as detectContradictionProd } from './research/contradictionDetector.js';
 import { RssSource } from './providers/opportunity/RssSource.js';
 import { runDiscoveryPipeline } from './discovery/pipeline.js';
 import { runAutonomousOperation } from './autonomous/runner.js';
@@ -70,6 +71,15 @@ export async function runAutonomousEntrypoint(deps = {}) {
       storage,
       llmRouter,
       researchPolicy: deps.researchPolicy ?? config.researchPolicy,
+      // RG-02: the production path must actually receive a concrete
+      // contradiction detector (§10) -- deps.research.detectContradiction
+      // was previously always undefined here, so Research silently ran
+      // with contradiction checking disabled. A caller-supplied override
+      // (tests, controlled callers) still takes priority.
+      research: {
+        ...deps.research,
+        detectContradiction: deps.research?.detectContradiction ?? detectContradictionProd
+      },
       briefPolicy: deps.briefPolicy ?? config.briefPolicy,
       scriptPolicy: deps.scriptPolicy ?? config.scriptPolicy,
       production: {
