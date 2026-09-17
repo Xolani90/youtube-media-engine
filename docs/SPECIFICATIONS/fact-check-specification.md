@@ -7,9 +7,10 @@ Does not depend on: Risk stage, Originality stage
 Provenance note: this document is being added to the repository for the
 first time as part of a specification-reconciliation task. No prior
 version of this file existed in this repository. Two open items from that
-reconciliation are marked inline below (P1, P2); P2 is resolved in this
-revision, P1 is explicitly left unresolved pending a further Owner
-decision — see the marked block in §14 and the new §14a.
+reconciliation are marked inline below (P1, P2); both are resolved as of
+this revision. P1 (the destination state for a later forced REJECT) is
+resolved in this revision per ADR-0002 (`docs/DECISIONS/0002-governance-cost-and-prompt-trust-boundary.md`),
+decision D-A — see the updated block in §14 and §14a.
 
 ## 1. Purpose
 
@@ -380,8 +381,8 @@ introduced.
 
 This table describes the outcome of a Fact-Check run evaluated against a
 Script that is still at `SCRIPT_DRAFT` at the time of that run. See §14a
-for the currently unresolved question of what happens when a later,
-forced rerun against a Script already at `FACT_CHECK` produces `REJECT`.
+for the resolved behavior governing what happens when a later, forced
+rerun against a Script already at `FACT_CHECK` produces `REJECT`.
 
 Transitions must go through the existing state-machine conventions
 (`src/state/ContentStateMachine.js`) rather than mutating stored state
@@ -400,9 +401,11 @@ without any lifecycle transition (state simply remains `SCRIPT_DRAFT`); this
 persistence is not required to share a transaction with anything else, since
 there is no accompanying state change to keep atomic with it.
 
-This requirement extends to whatever lifecycle behavior §14a eventually
-defines: once that behavior is specified, its transition (if any) and its
-`fact_checks` row must also be atomic with each other, for the same reason.
+This requirement extends to the lifecycle behavior §14a defines: the
+`FACT_CHECK → REJECTED` transition on a later forced REJECT and its
+`fact_checks` row must also be atomic with each other, for the same
+reason. This is already satisfied by the existing implementation (see
+`src/fact-check/pipeline.js`).
 
 ## 14. Current-Script-version invariant
 
@@ -433,69 +436,58 @@ Consequences for implementation:
 **P1 reconciliation note:** as literally written, this invariant is
 satisfied by the existence of *any* persisted PASS/REVIEW row for the
 current `script_id` — it does not require that row to be the *latest* one
-for that `script_id`. The Owner has decided (P1 = Option B) that this
-literal reading is insufficient: a later `REJECT` against the same current
+for that `script_id`. The Owner decided (P1 = Option B) that this literal
+reading is insufficient: a later `REJECT` against the same current
 `script_id` must not leave the Script appearing to have successfully
-cleared Fact-Check. That decision is recorded here, but its implementation
-is deliberately incomplete — see §14a.
+cleared Fact-Check. That decision is recorded here; its destination state
+and implementation are resolved in §14a per ADR-0002 D-A.
 
-## 14a. Lifecycle destination after a later REJECT — OWNER DECISION PENDING
+## 14a. Lifecycle destination after a later REJECT — RESOLVED (P1, Owner-ratified)
 
-This section is new in this revision and intentionally does not resolve
-the question it raises. **Do not implement against this section until it
-is completed by an explicit Owner decision.**
+**Ratified destination:** a forced Fact-Check rerun against a Script's
+current `script_id` that produces `REJECT` after an earlier `PASS`/`REVIEW`
+on that same `script_id` transitions `content_versions.state` from
+`FACT_CHECK` to `REJECTED` — the Script no longer appears to have
+successfully cleared Fact-Check (P1 = Option B, recorded in §14). This is
+distinct from, and does not change, the first-time-REJECT case in §12: a
+`REJECT` evaluated while the Script is still at `SCRIPT_DRAFT` remains at
+`SCRIPT_DRAFT`, as before.
 
-**Decided:** a forced Fact-Check rerun against a Script's current
-`script_id` that produces `REJECT` after an earlier `PASS`/`REVIEW` on that
-same `script_id` must change `content_versions.state` away from
-`FACT_CHECK` — the Script must no longer appear to have successfully
-cleared Fact-Check (P1 = Option B, recorded in §14).
+This is an Owner decision, recorded in
+`docs/DECISIONS/0002-governance-cost-and-prompt-trust-boundary.md`
+(ADR-0002, decision D-A): **"ACCEPT AS IMPLEMENTED. Close P1. No
+`ContentStateMachine` change is authorized or required by this decision."**
+The existing implementation in `src/fact-check/pipeline.js` already
+performs the `FACT_CHECK → REJECTED` transition via the existing
+`canTransition`/`transition` functions, so no change to
+`src/state/ContentStateMachine.js` was required — consistent with §16's
+protection of that file.
 
-**Not yet decided — the destination state itself.** Investigation of the
-existing `src/state/ContentStateMachine.js` (read-only; not modified by
-this reconciliation) establishes the following constraints on what the
-destination *can* be, without settling which of the remaining options it
-*should* be:
+For historical context, the investigation that preceded this decision
+established the following about the space of mechanically-available
+destinations under `src/state/ContentStateMachine.js` as it exists today:
 
 - `content_versions.state` cannot revert to `SCRIPT_DRAFT` through the
   existing `canTransition`/`transition` functions: they permit only a
   forward move to the immediate next state in `STATES`, or a move to any
   state in `FAILURE_STATES` (`REJECTED`, `BLOCKED`, `NEEDS_REVIEW`,
   `FAILED`) from any state. A `FACT_CHECK → SCRIPT_DRAFT` move is backward
-  and is rejected by `canTransition` as currently written. Achieving a
-  reversion to `SCRIPT_DRAFT` would require changing
-  `src/state/ContentStateMachine.js` itself, which §16 lists as an
-  explicitly protected area for any Fact-Check change — so this option is
-  not available without a separate, broader decision to lift that
-  protection.
-- The remaining mechanically-available destinations are therefore the four
-  existing `FAILURE_STATES`: `REJECTED`, `BLOCKED`, `NEEDS_REVIEW`,
-  `FAILED`. All four are already reachable from `FACT_CHECK` per
-  `canTransition`, without any state-machine change.
-- No pipeline currently implemented in this repository (Discovery, Brief,
-  Script, or the current Fact-Check implementation) has ever actually set
-  `content_versions.state` to any of these four failure states. Every use
-  of strings like `REJECTED`/`FAILED` found elsewhere in the codebase is
-  either a `decision_log.decision` audit label or a value of the
-  unrelated, separately-defined `opportunities.status` column — neither of
-  which is `content_versions.state`. There is therefore no existing
-  precedent in this repository that makes one of the four failure states
-  the "obviously correct" choice; nothing here is being decided by
-  convenience or inertia.
-- Choosing among `REJECTED`, `BLOCKED`, `NEEDS_REVIEW`, and `FAILED` for
-  this specific case is a product decision about what a "Script that
-  passed Fact-Check once but has since failed it again" *means* for the
-  rest of the pipeline (e.g., is it terminal, or can a further Script
-  revision re-enter Fact-Check?). That meaning is not established anywhere
-  in the current repository and must be supplied by the Owner, not
-  inferred here.
+  and is rejected by `canTransition` as currently written, so reversion to
+  `SCRIPT_DRAFT` was not pursued.
+- The remaining mechanically-available destinations were the four existing
+  `FAILURE_STATES`: `REJECTED`, `BLOCKED`, `NEEDS_REVIEW`, `FAILED` — all
+  already reachable from `FACT_CHECK` per `canTransition`, without any
+  state-machine change. The Owner selected `REJECTED`.
+- Whether `REJECTED` is terminal for this path, or whether a further
+  Script revision can re-enter Fact-Check from it, is not redefined by
+  this decision beyond the existing meaning of `REJECTED` elsewhere in the
+  state machine.
 
-Until this section is completed with an explicit destination state (and,
-if `NEEDS_REVIEW`/`BLOCKED` is chosen, whatever downstream re-entry
-semantics that implies), no implementation of the P1 decision is
-authorized, per §13's atomicity note above and per the Owner's own
-instruction that this destination must be spec-defined before code is
-written.
+Coverage: this behavior, including its atomicity and its interaction with
+the current-Script-version invariant (§14), is exercised by
+`tests/integration/fact-check-pipeline-e2e.test.js` AC17 (transition,
+persistence, decision log), AC18 (atomicity under mid-transaction
+failure), and AC19 (the current-Script-version guard on the REJECT path).
 
 ## 15. Manual execution boundary
 
@@ -536,9 +528,9 @@ this one):
 - `tests/integration/fact-check-pipeline-e2e.test.js`
 
 This specification reconciliation task did not modify any of them. The P2
-change recorded in §7a and the P1 open question recorded in §14a both
-require implementation follow-up that is explicitly not authorized by this
-task.
+change recorded in §7a and the P1 decision recorded in §14a are both
+already implemented in these files; this task is documentation-only and
+authorizes no further changes to them.
 
 ## 18. Explicit non-goals
 
@@ -552,7 +544,7 @@ introduce:
 - automatic/scheduled execution;
 - any dependency on or import of RiskPolicy;
 - any new lifecycle state (see §14a — the destination for a later REJECT
-  must be chosen from existing states);
+  is `REJECTED`, an existing state);
 - any modification to `risk_assessments` or Research evidence data.
 
 ## 19. Testing requirements for future implementation
@@ -577,9 +569,9 @@ A future implementation must include tests that exercise, at minimum:
 - heading-optional representation (§7a): a `claim_links` entry with a
   heading and one without must both be valid, and the persisted finding's
   `section_heading` key must be present only in the former case;
-- once §14a is resolved: PASS/REVIEW followed by a later forced REJECT on
-  the same current `script_id` must produce the specified destination
-  state, atomically with the new `fact_checks` row.
+- §14a: PASS/REVIEW followed by a later forced REJECT on the same current
+  `script_id` transitions to `REJECTED`, atomically with the new
+  `fact_checks` row — covered by AC17/AC18/AC19.
 
 ## 20. Owner decisions
 
@@ -601,20 +593,14 @@ A future implementation must include tests that exercise, at minimum:
 - Heading (P2): optional; absent heading omits `section_heading` from the
   persisted finding rather than nulling it or treating it as a structural
   failure (§7a).
-- Lifecycle-must-reflect-latest-result (P1, principle only): a later
-  REJECT on the current `script_id` must move the Script off `FACT_CHECK`.
-  The destination state is explicitly NOT decided by this revision — see
-  §14a.
+- Lifecycle-must-reflect-latest-result (P1): a later REJECT on the current
+  `script_id` moves the Script off `FACT_CHECK`, to `REJECTED` — RESOLVED,
+  see §14a.
 
 ## 21. Remaining owner decisions
 
-- P1 (destination state, §14a): which of `REJECTED`, `BLOCKED`,
-  `NEEDS_REVIEW`, `FAILED` — or a decision to lift the §16 protection on
-  `src/state/ContentStateMachine.js` in order to allow reversion to
-  `SCRIPT_DRAFT` instead — is the intended destination when a later forced
-  rerun produces `REJECT` after an earlier `PASS`/`REVIEW` on the same
-  `script_id`. Also open: whether that destination is terminal, or whether
-  a further Script revision can re-enter Fact-Check from it.
+- P1 (destination state, §14a): RESOLVED — Owner Decision, ADR-0002 D-A.
+  The destination is `REJECTED`. No remaining open question.
 - P3-A: RESOLVED — Owner Decision A. An empty resolved claim set
   (`CLAIM_LINKS_EMPTY`) is formally documented in §11 as a structural-failure
   trigger. Existing implementation behavior is preserved.

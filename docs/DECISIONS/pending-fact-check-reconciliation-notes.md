@@ -15,8 +15,12 @@ only the source code, tests, and migration were placed and verified.
 - **P1 (major, RESOLVED and OWNER-RATIFIED — see ADR-0002, decision D-A)**:
   if a Script passes Fact-Check (state -> `FACT_CHECK`) and a later forced
   rerun on the same `script_id` produces `REJECT`, `content_versions.state`
-  stays at `FACT_CHECK`. The Owner has accepted this as implemented; P1 is
-  closed with no `ContentStateMachine` change. See
+  transitions to `REJECTED`. (Note: an earlier draft of this note
+  incorrectly said the state "stays at `FACT_CHECK`" — that was wrong; the
+  Owner-ratified and implemented behavior is the `FACT_CHECK → REJECTED`
+  transition, per `src/fact-check/pipeline.js` and tests AC17/AC18/AC19.)
+  The Owner has accepted this as implemented; P1 is closed with no
+  `ContentStateMachine` change. See
   `docs/DECISIONS/0002-governance-cost-and-prompt-trust-boundary.md` for the
   authoritative record of this decision.
 - **P2 (moderate, RESOLVED and IMPLEMENTED)**: `parseClaimLinks()` no
@@ -37,7 +41,6 @@ only the source code, tests, and migration were placed and verified.
   doesn't anticipate this case.
 
 ## What to do next session
-1. Decide P1's destination state (or confirm lifting the §16 protection
-   instead), then implement the transition + a regression test.
+1. P1 is resolved and implemented — no further action needed.
 2. P2 is implemented (see above) — no further action needed.
 3. Resolve or explicitly defer P3-A / P3-B.
