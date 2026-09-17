@@ -206,6 +206,12 @@ test('asset provenance stays on the assets table and is not written into content
 });
 
 // 6. Existing source/research functionality remains unaffected.
+// Prior to RG-03 (docs/DECISIONS/RESEARCH-GOVERNANCE-BASELINE.md), this test
+// also inserted and read back claims.source_id — the sole dependency on that
+// now-removed legacy column (see RG-03 in the governance baseline). The
+// active claim-to-source relationship is claim_sources, unaffected by RG-03
+// and not exercised here since this test's purpose is claims/sources/
+// research_projects basics, not claim_sources itself.
 test('sources/research_projects/claims still work exactly as before D-G2', async () => {
   const { storage, dbPath } = await freshStorage();
 
@@ -226,13 +232,13 @@ test('sources/research_projects/claims still work exactly as before D-G2', async
   );
   const claimId = crypto.randomUUID();
   storage.run(
-    `INSERT INTO claims (id, research_project_id, claim, source_id, claim_type, created_at)
-     VALUES (?, ?, 'X happened', ?, 'FACT', ?)`,
-    [claimId, researchProjectId, sourceId, nowISO()]
+    `INSERT INTO claims (id, research_project_id, claim, claim_type, created_at)
+     VALUES (?, ?, 'X happened', 'FACT', ?)`,
+    [claimId, researchProjectId, nowISO()]
   );
 
   const claim = storage.get('SELECT * FROM claims WHERE id = ?', [claimId]);
-  assert.equal(claim.source_id, sourceId);
+  assert.equal(claim.claim, 'X happened');
   assert.equal(claim.claim_type, 'FACT');
 
   cleanup(storage, dbPath);

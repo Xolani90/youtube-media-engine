@@ -31,6 +31,17 @@ export class SqliteStorageDriver extends StorageDriver {
       this.db.prepare('SELECT id FROM schema_migrations').all().map((r) => r.id)
     );
 
+    // RG-03 (docs/DECISIONS/RESEARCH-GOVERNANCE-BASELINE.md): this one migration
+    // rebuilds `claims` (DROP + rename-into-place) while `claim_sources` and
+    // `claim_relations` still hold FK references to it. With FK enforcement ON,
+    // SQLite's DROP TABLE step would fail those foreign keys mid-rebuild even
+    // though the rename restores a schema-compatible table immediately after.
+    // FK enforcement cannot be toggled inside an already-open transaction, so it
+    // is toggled here, at the connection level, strictly around this one
+    // filename's transaction — not embedded in the migration SQL itself, and not
+    // applied to any other migration.
+    const RG03_FK_TOGGLE_MIGRATION = '0012_remove_legacy_claim_columns.sql';
+
     for (const file of files) {
       if (applied.has(file)) continue;
       const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
@@ -40,7 +51,17 @@ export class SqliteStorageDriver extends StorageDriver {
           .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
           .run(file, new Date().toISOString());
       });
-      applyMigration();
+
+      if (file === RG03_FK_TOGGLE_MIGRATION) {
+        this.db.pragma('foreign_keys = OFF');
+        try {
+          applyMigration();
+        } finally {
+          this.db.pragma('foreign_keys = ON');
+        }
+      } else {
+        applyMigration();
+      }
     }
     return files;
   }
