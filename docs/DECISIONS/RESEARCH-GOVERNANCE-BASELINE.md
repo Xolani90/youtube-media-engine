@@ -171,7 +171,7 @@ Verified in `src/research/contradictions.js`, `src/research/contradictionDetecto
 - The binary Research baseline is preserved: the only persisted relation remains `CONTRADICTS`; `UNCERTAIN` and `ERROR` never persist a relation.
 - Evidence grading's existing deterministic rule is unchanged: a recorded unresolved `CONTRADICTS` relation still drives `evidence_status = CONTESTED` (`src/research/evidenceGrading.js`, unmodified).
 
-**Status:** `IMPLEMENTED — VERIFICATION PENDING`. This document does not, by itself, close RG-02 or authorize a Research freeze; only the Owner can authorize final closure (Section 17).
+**Status:** `CLOSED — OWNER-AUTHORIZED`. Implementation and read-only verification are complete (Section 17 records the evidence: 22/22 focused RG-02 tests passing, and direct code inspection of production wiring in `src/index.js`). The Owner has explicitly authorized RG-02 closure. This closure is scoped to RG-02 only — it does not reconstruct or certify Research v0.4, does not close RG-03/RG-04/RG-05, and does not itself authorize a Research freeze (Research remains NOT FROZEN; see Section 18).
 
 ---
 
@@ -265,31 +265,55 @@ RG-01 — Historical v0.4 authority unavailable.
         subsystem going forward.
 
 RG-02 — Production contradiction detector absent.
-        IMPLEMENTED — VERIFICATION PENDING (2026-09-17, RG-02 implementation
-        session). Owner decision: the semantic contract in the RG-02
-        authorization prompt (claim-to-claim only; FACT + load-bearing
-        eligibility; temporal/scope/negation/numeric semantics handled by
-        detector judgment, no new structured columns; four-state result
-        contract CONTRADICTS/NO_CONTRADICTION/UNCERTAIN/ERROR; fail-closed
-        on detector ERROR or thrown/rejected calls; binary CONTRADICTS-only
-        persisted relation; no confidence/rationale/detector-version schema).
+        CLOSED — OWNER-AUTHORIZED (2026-09-17). Implemented under the
+        semantic contract in the RG-02 authorization prompt (claim-to-claim
+        only; FACT + load-bearing eligibility; temporal/scope/negation/
+        numeric semantics handled by detector judgment, no new structured
+        columns; four-state result contract CONTRADICTS/NO_CONTRADICTION/
+        UNCERTAIN/ERROR; fail-closed on detector ERROR or thrown/rejected
+        calls; binary CONTRADICTS-only persisted relation; no confidence/
+        rationale/detector-version schema).
         Implementation evidence: src/research/contradictionDetector.js
         (production detector), src/research/pipeline.js (eligibility,
         result-contract handling, fail-closed transition to FAILED),
         src/research/constants.js (CONTRADICTION_RESULT,
         CONTRADICTION_EXECUTION_STATE), src/index.js (production wiring of
         the concrete detector into deps.research.detectContradiction).
-        Verification evidence: focused tests
-        tests/unit/research-contradiction-detector.test.js (12 tests) and
-        tests/integration/research-contradiction-pipeline.test.js (8 tests),
-        all passing; full suite 647/654 passing, the same 7 pre-existing
-        sandbox FFmpeg/narration-synthesis failures as prior sessions
-        (unrelated to Research), verified unchanged by this implementation.
+        Verification evidence: a read-only verification audit independently
+        re-ran the focused RG-02 tests
+        (tests/unit/research-contradiction-detector.test.js,
+        tests/integration/research-contradiction-pipeline.test.js,
+        tests/unit/research-contradictions.test.js) and confirmed
+        22/22 PASS, and traced production wiring by direct code inspection
+        of src/index.js. The same audit re-ran the full sandbox suite and
+        recorded 647/654 PASS, with the 7 failures identified as
+        pre-existing FFmpeg/narration-synthesis environment failures
+        outside RG-02 scope, unchanged by this implementation. This is
+        recorded as the actual sandbox result — it is not represented as
+        matching the previously reported authoritative-environment result
+        of 654/654.
         No schema migration was made or required — the existing
         claim_relations/decision_log schema already satisfied the contract.
-        RG-02 is described here as IMPLEMENTED — VERIFICATION PENDING per
-        the RG-02 authorization's own instruction: only the Owner may
-        authorize final closure.
+        Follow-up (non-blocking): the same audit identified one LOW item —
+        no automated end-to-end test currently exercises src/index.js's
+        production wiring of the default contradiction detector; that
+        wiring was verified by direct code inspection only. This is
+        recorded as a test-hardening follow-up and does not reopen RG-02
+        under this closure decision.
+        Hash evidence: the verification audit was performed in a sandbox
+        whose commit hashes (implementation 93cf31a86084b5c668de9887a963fe
+        038ebd191f, HEAD cc6c392d6cdb59d4ce714ba69602288d7c24b309) differ
+        from the previously established authoritative-environment hashes
+        (implementation 50e12fd11536ff0bb122c2671d7ac6ae0c1bd21a, HEAD
+        5f7d321dc5413e0db49c92a666e3934b1c73556a). The audit explicitly
+        recorded CONTENT EQUIVALENCE: NOT ESTABLISHED between the sandbox
+        and the authoritative environment for those hashes; this closure
+        decision does not resolve or overwrite that finding, and it is
+        preserved here rather than treated as an implementation defect.
+        Owner decision: the Owner has reviewed this evidence and explicitly
+        authorizes RG-02 closure. This closure is scoped to RG-02 only. It
+        does not certify Research v0.4, does not close RG-03/RG-04/RG-05,
+        and does not itself authorize a Research freeze.
 
 RG-03 — Legacy claim-column disposition unresolved.
         Unresolved. claims.source_id / confidence / supporting_evidence:
@@ -306,7 +330,7 @@ RG-05 — Schema/E2E dependency-complete verification outstanding.
         this audit session and previously reported local/CI results.
 ```
 
-RG-01 is CLOSED (Owner decision, Option B, 2026-09-17). RG-02 through RG-05 are not closed by this document and remain OPEN.
+RG-01 is CLOSED (Owner decision, Option B, 2026-09-17). RG-02 is CLOSED (Owner-authorized, 2026-09-17). RG-03, RG-04, and RG-05 are not closed by this document and remain OPEN. RG-02 closure does not constitute or authorize a Research freeze; Research remains NOT FROZEN (Section 18).
 
 ---
 
@@ -331,3 +355,4 @@ No freeze record is created by this document. No freeze is declared, implied, or
 - 2026-09-17 — Initial DRAFT created per Owner authorization. Not approved. Not accepted. Not frozen. Research is not certified conformant by this document.
 - 2026-09-17 — OWNER-APPROVED by Project Owner (Xolani Tshabalala) as the forward governance authority for the Research subsystem. This approval does not reconstruct, recover, or certify Research v0.4 (remains UNRECOVERED / NOT CERTIFIED); does not substantiate any historical Research freeze; does not authorize a Research freeze; and does not close RG-01 through RG-05, which remain OPEN. Not authorized by this approval: implementation of `detectContradiction`, removal/renaming/migration of legacy claim columns, modification of `config/research_policy.json`, modification of Research production code or tests, creation of a freeze record, or retroactive certification of v0.4.
 - 2026-09-17 — RG-01 CLOSED by explicit Owner decision (Option B): the historical Research v0.4 specification will not be pursued for further recovery, and remains permanently recorded as UNRECOVERED / NOT CERTIFIED. This closure does not constitute retroactive certification of v0.4, does not substantiate any historical Research freeze, and does not itself authorize a Research freeze. RG-02, RG-03, RG-04, and RG-05 remain OPEN. All existing freeze rules (Section 18) remain unchanged.
+- 2026-09-17 — RG-02 CLOSED by explicit Owner decision (Owner-authorized), following implementation (commit `feat: implement RG-02 research contradiction contract`) and an independent read-only verification audit (22/22 focused RG-02 tests passing; full sandbox suite 647/654 passing with 7 pre-existing, unrelated FFmpeg/narration-synthesis environment failures; production wiring in `src/index.js` verified by direct code inspection). This closure records one non-blocking LOW follow-up (no automated end-to-end test yet exercises `src/index.js`'s default-detector wiring) and preserves the audit's hash-evidence finding (`CONTENT EQUIVALENCE: NOT ESTABLISHED` between the verification sandbox's commit hashes and the previously established authoritative-environment hashes) without treating either as an implementation defect. This closure does not reconstruct or certify Research v0.4, does not close RG-03, RG-04, or RG-05, and does not itself authorize a Research freeze. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
