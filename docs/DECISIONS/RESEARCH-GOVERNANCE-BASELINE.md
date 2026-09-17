@@ -1,6 +1,6 @@
 # Research Subsystem — Forward Governance Baseline
 
-**Status:** OWNER-APPROVED — forward governance authority for the Research subsystem, effective from approval onward. This approval does not reconstruct, recover, certify, or retroactively replace Research v0.4; does not substantiate any historical freeze; and does not itself authorize a Research freeze, remediation, or closure of any open governance question. As of the current state of this document: RG-01 CLOSED, RG-02 CLOSED, RG-03 CLOSED, RG-04 CLOSED, RG-05 OPEN.
+**Status:** OWNER-APPROVED — forward governance authority for the Research subsystem, effective from approval onward. This approval does not reconstruct, recover, certify, or retroactively replace Research v0.4; does not substantiate any historical freeze; and does not itself authorize a Research freeze, remediation, or closure of any open governance question. As of the current state of this document: RG-01 CLOSED, RG-02 CLOSED, RG-03 CLOSED, RG-04 CLOSED, RG-05 CLOSED — OWNER-AUTHORIZED (2026-09-17).
 **Creation date:** 2026-09-17
 **Approval date:** 2026-09-17
 **Authority:** Project Owner (Xolani Tshabalala)
@@ -243,7 +243,7 @@ Result: 84 / 84 passing, 0 failing
 
 The prior owner decision package (this repository's audit history) recorded Research schema/E2E tests as **environment-blocked** because `better-sqlite3` was reported unavailable. In **this** audit session's container, `better-sqlite3` loaded successfully and all schema and E2E Research tests executed and passed. This document does not treat this as proof that your local/CI environment is in the same state — it records only what was verified in this session's environment, and flags the discrepancy explicitly:
 
-> **Open question for the Owner:** which environment (this audit container vs. your local/CI setup) reflects the environment that should count for future freeze-readiness verification? This is addressed as an open item (RG-05), not resolved by this document.
+> This environment discrepancy was carried forward into the RG-05 dependency-completeness audit and is recorded, resolved as a governance matter, in Section 17's RG-05 entry: the Owner-reported authoritative local environment (661/661) and this audit's sandbox environment (654/661, 7 pre-existing unrelated FFmpeg/narration-synthesis failures) are recorded separately, neither overwrites the other, and the environments are not claimed to be equivalent. RG-05 closure does not resolve which environment is authoritative for any future freeze-readiness verification — that remains a distinct question if and when a freeze is proposed under Section 18.
 
 No pass counts are invented; the 84/84 figure above is from an actual execution in this session, not carried over from any prior claim.
 
@@ -398,11 +398,105 @@ RG-04 — Policy governance under the new baseline.
         production-ready. Research remains NOT FROZEN.
 
 RG-05 — Schema/E2E dependency-complete verification outstanding.
-        Unresolved. An environment discrepancy (Section 16) exists between
-        this audit session and previously reported local/CI results.
+        CLOSED — OWNER-AUTHORIZED (2026-09-17).
+        Evidence basis: an independent read-only dependency-completeness
+        audit traced the Research subsystem's production dependency graph
+        end-to-end — Discovery (HANDED_TO_RESEARCH) → Research eligibility
+        → research_projects → source acquisition/persistence → claim
+        extraction/persistence → claim_sources → contradiction detection
+        → claim_relations → evidence grading → completeness → terminal
+        state → Brief eligibility → Brief claim/source consumption →
+        Script → Fact-Check. The audit verified: Research → Brief
+        eligibility requires research_projects.status = RESEARCH_COMPLETE
+        exactly (src/brief/eligibility.js); Brief claim selection is
+        hard-scoped to a single research_project_id
+        (src/brief/claims.js:selectEligibleKeyClaims); proposed key-claim
+        ids are re-validated against that same scoped eligible set before
+        persistence (validateKeyClaimIds), preventing cross-project claim
+        contamination; Script and Fact-Check preserve Research project
+        lineage through content_briefs.research_project_id and
+        scripts.content_brief_id; the RG-03 removed columns
+        (claims.source_id, claims.confidence, claims.supporting_evidence)
+        are absent from the current schema and are not read or written by
+        any active production path (claim_sources.source_id, a distinct
+        column on a distinct table, is correctly unaffected); fresh-database
+        (0001→0012) and populated-database upgrade migration paths were
+        both independently verified, including FK integrity
+        (PRAGMA foreign_key_check empty) and transactional rollback safety
+        on an induced 0012 failure; RG-02's contradiction-detection wiring
+        (eligibility → detector → claim_relations → evidence grading →
+        fail-closed FAILED transition on detector ERROR) was verified
+        connected with no downstream bypass; and RG-04's policy-governance
+        framing was reconfirmed technically consistent with current code
+        (config/research_policy.json unchanged, read exclusively through
+        loadResearchPolicy(), no production writer).
+        Test evidence: targeted subset (migration, contradiction, Brief
+        claim-eligibility, and Research/Brief/Fact-Check/Script E2E tests)
+        70/70 PASS. Owner-reported authoritative local environment: 661
+        total, 661 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo. This
+        audit's sandbox environment: 661 total, 654 pass, 7 fail, all
+        seven failures confirmed as the known, pre-existing, unrelated
+        `spawnSync espeak-ng ENOENT` FFmpeg/narration-synthesis
+        environment failures. These two results are recorded separately;
+        neither overwrites the other, and the environments are not
+        claimed to be equivalent.
+        Owner-accepted limitations recorded (RG05-F1, decided 2026-09-17):
+        F1-A (claims.insertClaim + linkClaimSource are not wrapped in a
+        single transaction; a failure between them can leave an orphaned
+        claim and, combined with F1-C, permanently strand the owning
+        research_projects row in RESEARCHING) — accepted by the Owner as
+        a bounded current architectural limitation; no transaction
+        implementation is authorized by this closure. F1-B
+        (recordContradiction's claim_relations write and logDecision's
+        decision_log write are independent, uncoordinated writes) —
+        confirmed as an intentional, non-defective design: decision_log
+        has no production readers anywhere in the repository, so its loss
+        or divergence from claim_relations does not affect Research
+        correctness. F1-C (no timeout, lease, retry, or stale-project
+        recovery mechanism exists; selectEligibleResearch excludes an
+        opportunity from re-selection once any research_projects row
+        exists for it, regardless of that row's status, so a crashed
+        RESEARCHING project or a FAILED project cannot currently be
+        resumed or retried; run_id carries no recovery semantics) —
+        accepted by the Owner as a bounded current architectural
+        limitation, explicitly treated as a separate future architectural
+        decision; no resumability/retry/lease/state-machine implementation
+        is authorized by this closure.
+        RG-05 Finding 4 recorded (decided 2026-09-17): content_briefs has
+        no database-level UNIQUE constraint on research_project_id;
+        createBrief's idempotency check (src/brief/pipeline.js) is an
+        application-level SELECT-then-INSERT only, leaving a narrow
+        window under genuine concurrent invocation for duplicate Brief
+        rows against the same research_project_id. Classified LOW
+        severity — no failing test demonstrates the race, and it requires
+        genuine concurrent invocation to manifest. The Owner accepts this
+        as a known, bounded, LOW-severity downstream limitation for the
+        current baseline. No schema change, transaction/concurrency
+        implementation, or new concurrency test is authorized by this
+        closure. This finding concerns Brief-side idempotency only; it
+        does not indicate incorrect Research project scoping, and it does
+        not reopen RG05-F1.
+        These accepted limitations (F1-A, F1-C, Finding 4) do not
+        represent unresolved dependency ambiguity for RG-05 closure — the
+        full production dependency graph was traced and no unresolved
+        *correctness* dependency remains. F1-B is confirmed intentional
+        independent audit persistence, not a limitation requiring
+        acceptance. None of the above constitutes implementation
+        authorization for any future remediation; any future work on
+        F1-A, F1-C, or Finding 4 requires separate, explicit Owner
+        implementation authorization.
+        This closure does not assert zero defects, production readiness,
+        a Research freeze, recovery or certification of Research v0.4,
+        transactional atomicity for F1-A, or a database uniqueness
+        constraint for Brief. It does not reconstruct or certify Research
+        v0.4 (remains UNRECOVERED / NOT CERTIFIED), does not alter RG-01,
+        RG-02, RG-03, or RG-04, and does not itself authorize a Research
+        freeze. Research remains NOT FROZEN.
+        Owner decision: the Owner has reviewed this evidence and
+        explicitly authorizes RG-05 closure.
 ```
 
-RG-01 is CLOSED (Owner decision, Option B, 2026-09-17). RG-02 is CLOSED (Owner-authorized, 2026-09-17). RG-03 is CLOSED (Owner-authorized, 2026-09-17). RG-04 is CLOSED (Owner-authorized, 2026-09-17). RG-05 is not closed by this document and remains OPEN. Neither the RG-02, RG-03, nor RG-04 closure constitutes or authorizes a Research freeze; Research remains NOT FROZEN (Section 18).
+RG-01 is CLOSED (Owner decision, Option B, 2026-09-17). RG-02 is CLOSED (Owner-authorized, 2026-09-17). RG-03 is CLOSED (Owner-authorized, 2026-09-17). RG-04 is CLOSED (Owner-authorized, 2026-09-17). RG-05 is CLOSED (Owner-authorized, 2026-09-17). Neither the RG-02, RG-03, RG-04, nor RG-05 closure constitutes or authorizes a Research freeze; Research remains NOT FROZEN (Section 18). RG-01 through RG-05 are all now CLOSED; per Section 18, a Research freeze still requires a separate, explicit Owner authorization and has not occurred.
 
 ---
 
@@ -431,3 +525,4 @@ No freeze record is created by this document. No freeze is declared, implied, or
 - 2026-09-17 — RG-03 DISPOSITION AUTHORIZED by explicit Owner decision, following an independent read-only evidence audit (claims.source_id = TEST-ONLY, sole dependency `tests/unit/asset-provenance.test.js`; claims.confidence = UNUSED; claims.supporting_evidence = UNUSED; no known supported external consumer requires these columns, per Owner-confirmed scope). Owner disposition: REMOVE claims.source_id, claims.confidence, and claims.supporting_evidence, through a separately authorized future database/schema migration. This entry records the disposition decision only — it is not an implementation authorization, and no migration has been created or performed. RG-03 remains OPEN — DISPOSITION AUTHORIZED; IMPLEMENTATION PENDING, and is NOT CLOSED; closure requires a later, separately authorized implementation-and-verification process. This decision does not reconstruct or certify Research v0.4, does not alter RG-01, RG-02, RG-04, or RG-05, and does not itself authorize a Research freeze. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
 - 2026-09-17 — RG-03 CLOSED by explicit Owner decision (Owner-authorized), following implementation (commit `6fafa7c1071818431220ca40d362bdfcae64854f`, containing exactly the authorized four-file scope: `src/db/migrations/0012_remove_legacy_claim_columns.sql`, `src/storage/SqliteStorageDriver.js`, `tests/unit/asset-provenance.test.js`, `tests/unit/rg03-claims-migration.test.js`) and an independent read-only verification audit (targeted RG-03 + asset-provenance tests: 17/17 PASS; full suite: 661 total, 654 PASS, 7 FAIL, the 7 failures confirmed as the known, pre-existing, unrelated `espeak-ng ENOENT` FFmpeg/narration-synthesis environment failures; changed-file scope and origin/main HEAD position independently confirmed). This closure does not reconstruct or certify Research v0.4 (remains UNRECOVERED / NOT CERTIFIED), does not close RG-04 or RG-05, and does not itself authorize a Research freeze. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
 - 2026-09-17 — RG-04 CLOSED by explicit Owner decision (Owner-authorized, governance-only closure), following an independent read-only audit confirming: the Section 13 governance framing was Owner-approved; `config/research_policy.json` was verified unchanged since the forward governance baseline was established; current production code reads the policy exclusively through `loadResearchPolicy()` in `src/config/index.js`; no production path modifies the policy file; and the "v0.4" wording in that loader's error message is a source-comment/error-string attribution only, not evidence of a recoverable v0.4 specification. The audit identified, as a LOW finding, the absence of a technical enforcement mechanism (CI guard, runtime hash/signature check, or lint rule); the Owner explicitly decided no such mechanism is required for RG-04, and its absence is therefore not treated as a closure defect. No technical enforcement mechanism was implemented as part of this closure. This closure does not reconstruct or certify Research v0.4 (remains UNRECOVERED / NOT CERTIFIED), does not alter RG-01, RG-02, or RG-03, does not close RG-05 (remains OPEN), and does not itself authorize a Research freeze or declare Research production-ready. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
+- 2026-09-17 — RG-05 CLOSED by explicit Owner decision (Owner-authorized), following an independent read-only dependency-completeness audit that traced the Research subsystem's full production dependency graph (Discovery → Research → Brief → Script → Fact-Check), confirmed Research → Brief eligibility requires RESEARCH_COMPLETE, confirmed Brief claim selection and its re-validation are hard-scoped to a single research_project_id with no cross-project claim contamination possible, confirmed RG-03's removed claim columns are absent from the schema and unreferenced by any active production path, independently verified both fresh-database and populated-database-upgrade migration paths (including FK integrity and transactional rollback safety), and reconfirmed the RG-02 contradiction-detection wiring and RG-04 policy-governance framing remain technically consistent with current code. Targeted test subset: 70/70 PASS. Owner-reported authoritative local environment: 661/661 PASS, 0 fail. This audit's sandbox environment: 661 total, 654 PASS, 7 FAIL, confirmed as the known, pre-existing, unrelated `espeak-ng ENOENT` FFmpeg/narration-synthesis environment failures; the two results are recorded separately and are not claimed to be equivalent. This closure explicitly incorporates, without reopening, the following Owner-accepted limitations decided the same day: RG05-F1-A (claim/claim-source-link write pair is not transactional; accepted as a bounded limitation, no implementation authorized), RG05-F1-B (claim_relations and decision_log are intentionally independent writes; decision_log has no production readers; confirmed non-defective, no change required), RG05-F1-C (no Research project timeout/lease/retry/resume mechanism exists; a crashed RESEARCHING or FAILED project cannot currently be resumed; accepted as a bounded limitation and a separate future architectural decision, no implementation authorized), and RG-05 Finding 4 (`content_briefs.research_project_id` has no database-level UNIQUE constraint; `createBrief`'s idempotency check is application-level only, a narrow concurrency race; accepted as a known LOW-severity downstream limitation, no schema, transaction, or test implementation authorized). None of these accepted limitations were treated as unresolved dependency ambiguity preventing closure, and none of them was implemented, fixed, or tested as part of this closure decision. This closure does not reconstruct or certify Research v0.4 (remains UNRECOVERED / NOT CERTIFIED), does not alter RG-01, RG-02, RG-03, or RG-04, and does not itself authorize a Research freeze or declare Research or Brief production-ready. Research remains NOT FROZEN. RG-01 through RG-05 are now all CLOSED; per Section 18, a Research freeze still requires a separate, explicit Owner authorization, which has not occurred. All existing freeze rules (Section 18) remain unchanged.
