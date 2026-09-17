@@ -113,3 +113,75 @@ test('unparseable LLM output yields core_question_type=null, still fails validat
   assert.equal(proposition.core_question_type, null);
   assert.equal(validateProposition(proposition).valid, false);
 });
+
+// --- Markdown JSON fence handling (parser hardening) ---
+
+test('existing raw JSON (unfenced) still parses successfully', async () => {
+  const router = stubRouter(COMPLETE_PROPOSITION);
+  const { proposition } = await generateProposition({ title: 'x' }, router);
+  assert.equal(validateProposition(proposition).valid, true);
+  assert.equal(proposition.subject, JSON.parse(COMPLETE_PROPOSITION).subject);
+});
+
+test('Markdown-fenced JSON (```json ... ```) parses successfully', async () => {
+  const fenced = '```json\n' + COMPLETE_PROPOSITION + '\n```';
+  const router = stubRouter(fenced);
+  const { proposition } = await generateProposition({ title: 'x' }, router);
+  const validation = validateProposition(proposition);
+  assert.equal(validation.valid, true, validation.reason || '');
+  const expected = JSON.parse(COMPLETE_PROPOSITION);
+  for (const field of ['subject', 'target_audience', 'audience_problem', 'core_question', 'gap', 'angle', 'differentiation', 'commercial_relevance', 'core_question_type']) {
+    assert.equal(proposition[field], expected[field]);
+  }
+});
+
+test('the observed Groq-shaped fenced proposition produces a populated, valid proposition object', async () => {
+  const groqShaped = {
+    subject: 'Preserving the Passage of Time',
+    target_audience: 'Adults aged 30-55 who feel nostalgic or overwhelmed by how quickly time passes',
+    audience_problem: 'They struggle to keep track of memories and feel disconnected from past experiences',
+    core_question: 'How can we create a digital solution that helps people recall and cherish the moments that feel like they have slipped away?',
+    gap: 'Existing memory apps focus on storage but lack emotional context and storytelling features that engage users over time',
+    angle: 'An AI-powered interactive timeline that turns personal data into a narrative journey',
+    differentiation: 'Unlike generic photo albums, our platform uses contextual AI, AR overlays, and scheduled prompts to actively engage users and reinforce memory recall',
+    commercial_relevance: 'The personal memory and wellness market is projected to grow; subscription-based model and B2B partnerships with elder-care facilities create multiple revenue streams',
+    core_question_type: 'MIXED'
+  };
+  const fenced = '```json\n' + JSON.stringify(groqShaped) + '\n```';
+  const router = stubRouter(fenced);
+  const { proposition } = await generateProposition({ title: 'x' }, router);
+  const validation = validateProposition(proposition);
+  assert.equal(validation.valid, true, validation.reason || '');
+  assert.equal(proposition.subject, groqShaped.subject);
+  assert.equal(proposition.core_question_type, 'MIXED');
+});
+
+test('an invalid/non-JSON fenced response still fails closed', async () => {
+  const fenced = '```json\nnot actually json\n```';
+  const router = stubRouter(fenced);
+  const { proposition } = await generateProposition({ title: 'x' }, router);
+  assert.equal(validateProposition(proposition).valid, false);
+});
+
+test('arbitrary prose containing a JSON-looking object is NOT silently accepted (no broad extraction)', async () => {
+  const prose = `Sure, here is the proposition you asked for:\n${COMPLETE_PROPOSITION}\nLet me know if you need anything else!`;
+  const router = stubRouter(prose);
+  const { proposition } = await generateProposition({ title: 'x' }, router);
+  // Not a whole-string fence, and not raw JSON on its own -> must fail closed
+  // rather than having the embedded object silently extracted.
+  assert.equal(validateProposition(proposition).valid, false);
+});
+
+test('a fence with leading/trailing prose around it is NOT unwrapped (fence must be the entire response)', async () => {
+  const notWholeFence = 'preamble\n```json\n' + COMPLETE_PROPOSITION + '\n```\ntrailing text';
+  const router = stubRouter(notWholeFence);
+  const { proposition } = await generateProposition({ title: 'x' }, router);
+  assert.equal(validateProposition(proposition).valid, false);
+});
+
+test('a bare fence with no language tag (``` ... ```) also parses successfully', async () => {
+  const fenced = '```\n' + COMPLETE_PROPOSITION + '\n```';
+  const router = stubRouter(fenced);
+  const { proposition } = await generateProposition({ title: 'x' }, router);
+  assert.equal(validateProposition(proposition).valid, true);
+});
