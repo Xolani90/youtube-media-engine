@@ -316,8 +316,32 @@ RG-02 — Production contradiction detector absent.
         and does not itself authorize a Research freeze.
 
 RG-03 — Legacy claim-column disposition unresolved.
-        Unresolved. claims.source_id / confidence / supporting_evidence:
-        retain, formally deprecate, remove via migration, or assign new semantics.
+        OPEN — DISPOSITION AUTHORIZED; IMPLEMENTATION PENDING (2026-09-17).
+        Owner disposition: REMOVE claims.source_id, claims.confidence, and
+        claims.supporting_evidence. This is the Owner's disposition decision
+        only; it does not itself authorize an implementation migration, and
+        no migration has been created or performed. Removal is to occur
+        through a separately authorized future database/schema migration.
+        RG-03 is NOT CLOSED. Closure requires a later, separately
+        authorized implementation-and-verification process demonstrating
+        the authorized removal has been correctly implemented and
+        verified. This disposition does not certify Research v0.4, does
+        not close RG-04 or RG-05, and does not itself authorize a Research
+        freeze; Research remains NOT FROZEN.
+        Evidence basis (read-only audit, 2026-09-17): claims.source_id is
+        TEST-ONLY (sole dependency: tests/unit/asset-provenance.test.js,
+        `INSERT INTO claims (..., source_id, ...)` and
+        `assert.equal(claim.source_id, sourceId)`); the active claim-to-
+        source relationship is represented separately by claim_sources
+        (claim_sources.source_id is a distinct, actively-used column and is
+        not conflated with claims.source_id here). claims.confidence and
+        claims.supporting_evidence are UNUSED — no production or test
+        writer/reader was found for either. Current evidence strength is
+        handled by the Research evidence-grading model (evidence_status),
+        not by these legacy fields. No known supported external consumer
+        outside this repository was identified as requiring these columns
+        (Owner-confirmed scope). No forward-looking semantic requirement
+        for these columns was established.
 
 RG-04 — Policy governance under the new baseline.
         The governance framing in Section 13 is Owner-approved.
@@ -356,3 +380,4 @@ No freeze record is created by this document. No freeze is declared, implied, or
 - 2026-09-17 — OWNER-APPROVED by Project Owner (Xolani Tshabalala) as the forward governance authority for the Research subsystem. This approval does not reconstruct, recover, or certify Research v0.4 (remains UNRECOVERED / NOT CERTIFIED); does not substantiate any historical Research freeze; does not authorize a Research freeze; and does not close RG-01 through RG-05, which remain OPEN. Not authorized by this approval: implementation of `detectContradiction`, removal/renaming/migration of legacy claim columns, modification of `config/research_policy.json`, modification of Research production code or tests, creation of a freeze record, or retroactive certification of v0.4.
 - 2026-09-17 — RG-01 CLOSED by explicit Owner decision (Option B): the historical Research v0.4 specification will not be pursued for further recovery, and remains permanently recorded as UNRECOVERED / NOT CERTIFIED. This closure does not constitute retroactive certification of v0.4, does not substantiate any historical Research freeze, and does not itself authorize a Research freeze. RG-02, RG-03, RG-04, and RG-05 remain OPEN. All existing freeze rules (Section 18) remain unchanged.
 - 2026-09-17 — RG-02 CLOSED by explicit Owner decision (Owner-authorized), following implementation (commit `feat: implement RG-02 research contradiction contract`) and an independent read-only verification audit (22/22 focused RG-02 tests passing; full sandbox suite 647/654 passing with 7 pre-existing, unrelated FFmpeg/narration-synthesis environment failures; production wiring in `src/index.js` verified by direct code inspection). This closure records one non-blocking LOW follow-up (no automated end-to-end test yet exercises `src/index.js`'s default-detector wiring) and preserves the audit's hash-evidence finding (`CONTENT EQUIVALENCE: NOT ESTABLISHED` between the verification sandbox's commit hashes and the previously established authoritative-environment hashes) without treating either as an implementation defect. This closure does not reconstruct or certify Research v0.4, does not close RG-03, RG-04, or RG-05, and does not itself authorize a Research freeze. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
+- 2026-09-17 — RG-03 DISPOSITION AUTHORIZED by explicit Owner decision, following an independent read-only evidence audit (claims.source_id = TEST-ONLY, sole dependency `tests/unit/asset-provenance.test.js`; claims.confidence = UNUSED; claims.supporting_evidence = UNUSED; no known supported external consumer requires these columns, per Owner-confirmed scope). Owner disposition: REMOVE claims.source_id, claims.confidence, and claims.supporting_evidence, through a separately authorized future database/schema migration. This entry records the disposition decision only — it is not an implementation authorization, and no migration has been created or performed. RG-03 remains OPEN — DISPOSITION AUTHORIZED; IMPLEMENTATION PENDING, and is NOT CLOSED; closure requires a later, separately authorized implementation-and-verification process. This decision does not reconstruct or certify Research v0.4, does not alter RG-01, RG-02, RG-04, or RG-05, and does not itself authorize a Research freeze. Research remains NOT FROZEN. All existing freeze rules (Section 18) remain unchanged.
