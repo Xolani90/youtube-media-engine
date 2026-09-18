@@ -1,11 +1,3 @@
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-
-const envPath = resolve(process.cwd(), '.env');
-if (existsSync(envPath)) {
-  process.loadEnvFile?.(envPath);
-}
-
 // Central configuration. Everything here is read from environment variables
 // or config files — nothing is hard-coded business logic.
 //
@@ -17,6 +9,12 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
+// Optional repository-root .env loading. This must happen before the
+// environment-dependent config object below is evaluated.
+const envFilePath = path.join(REPO_ROOT, '.env');
+if (fs.existsSync(envFilePath)) {
+  process.loadEnvFile(envFilePath);
+}
 
 function envBool(name, fallback) {
   const v = process.env[name];
