@@ -22,9 +22,12 @@ function logDecision(storage, { runId = null, subjectType, subjectId, decision, 
 /**
  * Runs Publication v1 for the current Script/content_version of a
  * content item that Media Production has already rendered (a
- * `media_artifacts` row exists). Standalone, explicitly-invoked stage —
- * no orchestrator calls this automatically, mirroring every prior
- * stage's manual-trigger-surface convention.
+ * `media_artifacts` row exists). This function may be invoked directly
+ * by any caller, mirroring every prior stage's manual-trigger-surface
+ * convention, and is also invoked automatically by
+ * src/autonomous/runner.js's buildStages() as part of the Owner-authorized
+ * runner stage order (ADR-0010), with the run's mode (D-C2) propagated
+ * into assertExternalActionAllowed() as documented at the call site.
  *
  * This is the ONLY place PRODUCED -> PUBLISHED is transitioned, and only
  * after a confirmed provider SUCCESS result (see step 7 below).

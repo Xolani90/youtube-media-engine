@@ -38,9 +38,11 @@ function fetchAssetsWithUsageContext(storage, contentVersionId) {
 
 /**
  * Runs Production for the current Script of a content item (Owner
- * Production MVP brief). Standalone, explicitly-invoked stage — no
- * orchestrator calls this automatically, mirroring every prior stage's
- * "manual trigger surface" convention.
+ * Production MVP brief). This function may be invoked directly by any
+ * caller, mirroring every prior stage's "manual trigger surface"
+ * convention, and is also invoked automatically by
+ * src/autonomous/runner.js's buildStages() as part of the Owner-authorized
+ * runner stage order (ADR-0010).
  *
  * @param {object} deps
  * @param {import('../storage/StorageDriver.js').StorageDriver} deps.storage

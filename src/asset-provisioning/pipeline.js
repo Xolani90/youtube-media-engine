@@ -20,11 +20,12 @@ function logDecision(storage, { runId = null, subjectType, subjectId, decision, 
 
 /**
  * Runs Asset Provisioning for a content item Production has already
- * produced (Milestone D). Standalone, explicitly-invoked stage -- no
- * orchestrator calls this automatically, mirroring every prior stage's
- * manual-trigger-surface convention. NOT wired into
- * src/autonomous/runner.js's buildStages() -- that integration is
- * explicitly out of scope for this milestone.
+ * produced (Milestone D). This function may be invoked directly by any
+ * caller, mirroring every prior stage's manual-trigger-surface
+ * convention, and is also invoked automatically by
+ * src/autonomous/runner.js's buildStages() as the Owner-authorized
+ * Asset Provisioning -> Rights Verification -> Media Production runner
+ * insertion (ADR-0013).
  *
  * Entry precondition: content_version.state === 'PRODUCED' and a
  * `productions` row exists for it (Production has already run). This

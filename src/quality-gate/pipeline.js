@@ -61,10 +61,12 @@ function aggregate(results) {
  * Runs Gate 1 (Quality Gate / Production Readiness) for the current
  * Script of a content item (ADR-0006 D-G8, Owner Gate-1 decision).
  *
- * This is a standalone, explicitly-invoked stage (mirrors runFactCheck's
- * / runOriginalityCheck's "manual trigger surface, any driver may invoke
- * it" shape) — no production orchestrator calls this automatically, and
- * none is created here.
+ * This function may be invoked directly by any caller (mirrors
+ * runFactCheck's / runOriginalityCheck's "manual trigger surface, any
+ * driver may invoke it" shape), and is also invoked automatically by
+ * src/autonomous/runner.js's buildStages() as part of the Owner-authorized
+ * runner stage order (ADR-0010) — the same shape as every other stage in
+ * that order.
  *
  * @param {object} deps
  * @param {import('../storage/StorageDriver.js').StorageDriver} deps.storage
