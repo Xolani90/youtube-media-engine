@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { ASSET_PROVISIONING_STAGE, OUTCOME, DECISION_LOG_DECISION, PROVISIONING_USAGE_CONTEXT } from './constants.js';
+import { ASSET_PROVISIONING_STAGE, OUTCOME, DECISION_LOG_DECISION, PROVISIONING_USAGE_CONTEXT, PROVISIONING_CLAIM } from './constants.js';
 import { resolveProducedContentForProvisioning } from './eligibility.js';
 import { deriveVisualQuery } from './visualQuery.js';
 import { validateAcquiredAsset } from './validate.js';
@@ -127,7 +127,29 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
   // precedent for multi-statement persistence): if recordUsage() throws
   // for any reason, the whole transaction rolls back and the asset row
   // is never left orphaned without a usage.
-  const assetId = storage.transaction(() => {
+  //
+  // F5-01 (Owner-authorized Candidate A): a concurrent invocation may
+  // have already committed its own automated-provisioning claim for
+  // this content_version between the pre-call check above and this
+  // transaction (the awaited provider call in between is exactly the
+  // check-then-act window F5-01 identified). Re-check for that race
+  // immediately before persisting, inside this same transaction, mirroring
+  // src/publication/pipeline.js's attemptClaim() and src/media/pipeline.js's
+  // race re-check. The partial UNIQUE index in
+  // 0014_asset_usages_provisioning_claim.sql (content_version_id WHERE
+  // provisioning_claim IS NOT NULL) is the actual backstop for
+  // interleavings this re-check can still miss; this re-check exists so
+  // the common case resolves to a clean, defined outcome rather than a
+  // raw constraint-violation exception.
+  const outcome = storage.transaction(() => {
+    const raceExisting = storage.get(
+      'SELECT * FROM asset_usages WHERE content_version_id = ? AND provisioning_claim IS NOT NULL',
+      [contentVersion.id]
+    );
+    if (raceExisting) {
+      return { raced: true, existingAssetId: raceExisting.asset_id };
+    }
+
     const id = repo.recordAsset({
       assetType: result.assetType,
       location: result.location,
@@ -143,17 +165,33 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
     repo.recordUsage({
       assetId: id,
       contentVersionId: contentVersion.id,
-      usageContext: PROVISIONING_USAGE_CONTEXT
+      usageContext: PROVISIONING_USAGE_CONTEXT,
+      provisioningClaim: PROVISIONING_CLAIM
     });
-    return id;
+    return { raced: false, assetId: id };
   });
+
+  if (outcome.raced) {
+    // Another invocation's automated-provisioning claim won the race.
+    // This invocation acquired a (now-discarded) asset from the provider
+    // but persisted nothing -- the existing ALREADY_PROVISIONED outcome
+    // already represents "automated provisioning has already happened
+    // for this content_version" accurately from this invocation's point
+    // of view, so no new outcome is introduced (F5-01 design §9).
+    const existingAsset = repo.getAsset(outcome.existingAssetId);
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.ALREADY_PROVISIONED, reason: `race_lost_existing_asset_${outcome.existingAssetId}`
+    }, nowISO);
+    return { outcome: OUTCOME.ALREADY_PROVISIONED, asset: existingAsset };
+  }
 
   logDecision(storage, {
     runId, subjectType: 'content_version', subjectId: contentVersion.id,
-    decision: DECISION_LOG_DECISION.PROVISIONED, reason: `asset_${assetId}_persisted`
+    decision: DECISION_LOG_DECISION.PROVISIONED, reason: `asset_${outcome.assetId}_persisted`
   }, nowISO);
 
-  const asset = repo.getAsset(assetId);
+  const asset = repo.getAsset(outcome.assetId);
   return { outcome: OUTCOME.PROVISIONED, asset };
 }
 

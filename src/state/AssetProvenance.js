@@ -85,16 +85,27 @@ export class AssetProvenanceRepository {
    * content_version_id with different asset_ids is how one piece of
    * content comes to use multiple assets.
    */
-  recordUsage({ assetId, contentVersionId, usageContext = null }) {
+  /**
+   * `provisioningClaim` (F5-01, Candidate A): an optional, separate
+   * identity distinct from `usageContext`. Every existing caller omits
+   * it and gets the same NULL it always got. Only
+   * src/asset-provisioning/pipeline.js's automated path supplies it, so
+   * that stage's own concurrency invariant (at most one automated
+   * provisioning claim per content_version_id) can be enforced by the
+   * partial UNIQUE index in 0014_asset_usages_provisioning_claim.sql --
+   * without touching `usageContext`'s existing free-text semantics or
+   * any existing row/caller.
+   */
+  recordUsage({ assetId, contentVersionId, usageContext = null, provisioningClaim = null }) {
     if (!assetId) throw new Error('recordUsage requires assetId');
     if (!contentVersionId) throw new Error('recordUsage requires contentVersionId');
 
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     this.storage.run(
-      `INSERT INTO asset_usages (id, asset_id, content_version_id, usage_context, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      [id, assetId, contentVersionId, usageContext, now]
+      `INSERT INTO asset_usages (id, asset_id, content_version_id, usage_context, provisioning_claim, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, assetId, contentVersionId, usageContext, provisioningClaim, now]
     );
     return id;
   }

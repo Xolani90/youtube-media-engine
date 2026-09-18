@@ -38,6 +38,18 @@ export const DECISION_LOG_DECISION = Object.freeze({
 // here rather than inventing a new usage_context string.
 export const PROVISIONING_USAGE_CONTEXT = 'b-roll';
 
+// F5-01 (Owner-authorized Candidate A): the automated-provisioning
+// identity written to asset_usages.provisioning_claim, enforced unique
+// per content_version_id by the partial index in
+// 0014_asset_usages_provisioning_claim.sql. Deliberately a SEPARATE
+// value/column from PROVISIONING_USAGE_CONTEXT above -- usage_context
+// remains free-text, shared, descriptive metadata (per the F5-01
+// identity audit's finding that 'b-roll' is not an exclusive identity);
+// this constant exists only to mark "this row is the automated
+// provisioning stage's own claim," and no other writer in the codebase
+// ever supplies it.
+export const PROVISIONING_CLAIM = 'asset-provisioning:auto-visual-v1';
+
 // Free-text length the derived visual query is truncated to when it is
 // built from a Script fallback (visual_ideas is used verbatim, untouched,
 // since it is already meant to be a short/curated field).
