@@ -1,17 +1,57 @@
 # Fact-Check Spec Reconciliation — Notes (carried from prior session)
 
-**Status: NOT independently re-verified this session — treat as a starting
-point, not ground truth. Re-derive before relying on it, per the standing
-lesson in SESSION_HANDOFF.md.**
+**Status: RECONCILED against repository evidence as of the read-only
+three-way audit (governance record ↔ specification ↔ implementation ↔
+tests ↔ git history) completed this session.**
 
-This session did not redo the line-by-line spec audit. What follows is
-what the prior session's handoff reported. The spec file placed at
-`docs/SPECIFICATIONS/fact-check-specification.md` in this package is the
-**original uploaded document, unmodified** — the §7a/§14a amendments
-described below were NOT actually re-applied to the file this session;
-only the source code, tests, and migration were placed and verified.
+The statements previously here — that the specification file was "the
+original uploaded document, unmodified" and that the §7a/§14a amendments
+"were NOT actually re-applied to the file" — were accurate for the session
+in which they were originally written, but are now stale. Git history shows
+two later documentation commits actually applied these amendments to the
+specification:
 
-## Reported open items (Owner decisions)
+- `32e5c8f docs(fact-check): reconcile P1 specification` — updated both
+  the specification (§14a) and this reconciliation note for P1.
+- `e34dfd3 docs(fact-check): reconcile P3-A and P3-B specification` —
+  updated the specification (§11) and the integration test file, but did
+  **not** update this note — which is why P3-A and P3-B were still
+  described as "open" below until this reconciliation.
+
+Current repository evidence (this session):
+- `docs/SPECIFICATIONS/fact-check-specification.md` **does** contain §7a
+  (heading-optional, P2) and §14a (FACT_CHECK → REJECTED, P1,
+  Owner-ratified per ADR-0002 D-A) in full.
+- §11 of the specification **already lists** `CLAIM_LINKS_EMPTY` as a
+  structural-failure trigger and **already documents** the
+  `subject_type='content_brief'` fallback as the "P3-B documentation
+  exception."
+- `src/fact-check/validate.js` and `decision.js` implement
+  `CLAIM_LINKS_INVALID_HEADING_TYPE` and `CLAIM_LINKS_EMPTY`;
+  `CLAIM_LINKS_MISSING_HEADING` does not exist anywhere in `src/` or
+  `tests/` (only referenced historically, as removed, in the spec).
+- `src/fact-check/pipeline.js` implements both the P1
+  `FACT_CHECK → REJECTED` transition and the P3-B `content_brief`
+  fallback.
+- Test evidence, actually executed this session:
+  `node --test tests/unit/fact-check-validate.test.js
+  tests/unit/fact-check-decision.test.js` → **36 pass, 0 fail** (pure
+  logic, no DB dependency).
+- Test evidence **not established** this session:
+  `node --test tests/integration/fact-check-pipeline-e2e.test.js`,
+  including AC17/AC18/AC19 (P1's integration coverage), could not execute
+  in this environment — `better_sqlite3.node: invalid ELF header`,
+  `ERR_DLOPEN_FAILED`. This is an environmental/native-binding limitation
+  of this container, not an assertion failure, and it blocks every subtest
+  in that file, not only the P1-related ones. AC17/18/19 are therefore
+  **unverified in this environment**, not passing and not failing.
+
+This reconciliation does not claim every Fact-Check concern is closed, and
+does not claim the SQLite environment issue is resolved — it only brings
+this note into alignment with the specification and implementation as they
+already exist.
+
+## Reported items (Owner decisions)
 - **P1 (major, RESOLVED and OWNER-RATIFIED — see ADR-0002, decision D-A)**:
   if a Script passes Fact-Check (state -> `FACT_CHECK`) and a later forced
   rerun on the same `script_id` produces `REJECT`, `content_versions.state`
@@ -34,13 +74,28 @@ only the source code, tests, and migration were placed and verified.
   `src/fact-check/decision.js`, `tests/unit/fact-check-validate.test.js`,
   and `tests/unit/fact-check-decision.test.js` were the only files changed
   for this implementation.
-- **P3-A (minor, open)**: `CLAIM_LINKS_EMPTY` is a sixth structural-failure
-  trigger not listed among the spec's five in §11.
-- **P3-B (minor, open)**: `decision_log.subject_type` falls back to
-  `'content_brief'` when no current Script exists; the spec's field table
-  doesn't anticipate this case.
+- **P3-A (minor, RESOLVED — specification reconciled)**: `CLAIM_LINKS_EMPTY`
+  is now explicitly listed as a structural-failure trigger in spec §11
+  (`claim_links` resolves to zero total claims across all sections). This
+  reconciliation was made in commit
+  `e34dfd3 docs(fact-check): reconcile P3-A and P3-B specification`, which
+  updated the specification and integration test but did not update this
+  note at the time — that gap is what this reconciliation closes.
+  Implementation: `src/fact-check/validate.js`. Tests:
+  `tests/unit/fact-check-validate.test.js` (part of the 36/36 pass result
+  above).
+- **P3-B (minor, RESOLVED — specification reconciled)**: spec §11 now
+  explicitly documents the `decision_log.subject_type='content_brief'`
+  fallback for `CONTENT_VERSION_NOT_FOUND` / `NO_CURRENT_SCRIPT` /
+  `CURRENT_SCRIPT_NOT_FOUND` as the "P3-B documentation exception,"
+  reconciled in the same `e34dfd3` commit. Implementation:
+  `src/fact-check/pipeline.js`.
 
 ## What to do next session
-1. P1 is resolved and implemented — no further action needed.
+1. P1 is resolved and implemented — no further action needed on the
+   decision itself. AC17/18/19 integration coverage remains unverified in
+   this container due to the SQLite native-binding issue; re-run once that
+   environment limitation is addressed, rather than assuming pass or fail.
 2. P2 is implemented (see above) — no further action needed.
-3. Resolve or explicitly defer P3-A / P3-B.
+3. P3-A and P3-B are resolved in the specification and implementation —
+   no further action needed beyond the note reconciliation performed here.
