@@ -97,18 +97,18 @@ The seven failures recorded at the historical 9463eb2 baseline are retained as h
 
 ## 5. Governance Decisions Already Made (Owner-Confirmed)
 
-| Decision | Owner's choice | Approved artifact (not yet created) | Constraints |
+| Decision | Owner's choice | Artifact | Constraints |
 |---|---|---|---|
-| A — D-C2 implementation provenance | CONFIRMED — implementation at `5bd81ca`/`48918ec`/`9463eb2` was Owner-authorized | `docs/DECISIONS/0009-d-c2-implementation-authorization-provenance.md` | Documentation only; no source/test/migration/`ContentStateMachine`/authorization-behavior change |
+| A — D-C2 implementation provenance | CONFIRMED — implementation at `5bd81ca`/`48918ec`/`9463eb2` was Owner-authorized | Complete — `docs/DECISIONS/0009-d-c2-implementation-authorization-provenance.md` exists | Documentation only; no source/test/migration/`ContentStateMachine`/authorization-behavior change |
 | B — Autonomous Operation scope | B1 — Discovery stays outside the runner | (recorded jointly with C, see next row) | No change to `runner.js` stage list, `workSelection.js`, or `src/discovery/*` |
-| C — Discovery specification | C3 — defer reconciliation of missing "v0.6" spec | `docs/DECISIONS/0010-autonomous-operation-scope-and-discovery-deferral.md` | Do not reconstruct v0.6; do not write a replacement spec yet |
-| D — ADR-0005 | D1 — classify `MISSING / UNRECOVERABLE` | `docs/DECISIONS/0011-adr-0005-provenance-classification.md` | Do not reconstruct its contents; must distinguish ADR-0006's summary of outcomes from the actual missing document |
-| E — Publication specification | E3 — defer formal recovery; existing code/tests/ADRs stand as historical evidence only | `docs/DECISIONS/0012-publication-specification-provenance.md` | Do not modify Publication code; do not present inline comments as a reconstructed spec |
+| C — Discovery specification | C3 — defer reconciliation of missing "v0.6" spec | Complete — `docs/DECISIONS/0010-autonomous-operation-scope-and-discovery-deferral.md` exists | Do not reconstruct v0.6; do not write a replacement spec yet |
+| D — ADR-0005 | D1 — classify `MISSING / UNRECOVERABLE` | Complete — `docs/DECISIONS/0011-adr-0005-provenance-classification.md` exists | Do not reconstruct its contents; must distinguish ADR-0006's summary of outcomes from the actual missing document |
+| E — Publication specification | E3 — defer formal recovery; existing code/tests/ADRs stand as historical evidence only | Complete — `docs/DECISIONS/0012-publication-specification-provenance.md` exists | Do not modify Publication code; do not present inline comments as a reconstructed spec |
 | F — Media Production | RECONCILED — historical failures are not currently reproducible | Historical investigation outcome recorded in §4 | Seven historical failures retained as evidence; current suite is 707/707 pass; root cause remains inconclusive; no corrective implementation is authorized from this reconciliation alone |
 
-None of the four documentation artifacts (0009â€“0012) have been created yet.
-They were scoped and approved for creation in the prior session but explicitly
-deferred to the next session per the execution order below.
+Artifacts 0009â€“0012 already exist in the repository. All four were introduced
+together by commit `cd13085` (`docs: record autonomous operation governance
+decisions`), which predates the checkpoint baseline `611abc3`.
 
 ## 6. Hard Prohibitions (Carry Forward Unconditionally)
 
@@ -137,20 +137,16 @@ checkpoint:
 ## 7. Next Session Execution Order
 
 1. The historical `9463eb2` baseline has been reconciled against current repository state `611abc3`; do not treat the historical baseline as the current repository state.
-2. Create `docs/DECISIONS/0009-d-c2-implementation-authorization-provenance.md` (Decision A).
-3. Create `docs/DECISIONS/0010-autonomous-operation-scope-and-discovery-deferral.md` (Decisions B/C).
-4. Create `docs/DECISIONS/0011-adr-0005-provenance-classification.md` (Decision D).
-5. Create `docs/DECISIONS/0012-publication-specification-provenance.md` (Decision E).
-6. Decision F is satisfied as far as available evidence permits: the seven historical narration/media-production failures are not currently reproducible.
-7. Do not reopen those historical failures unless new evidence makes a failure reproducible.
-8. Any future corrective implementation for Media Production requires a separate, explicit Owner authorization based on new evidence.
+2. 0009â€“0012 are already recorded and require no further creation action.
+3. Decision F is satisfied as far as available evidence permits: the seven historical narration/media-production failures are not currently reproducible.
+4. Do not reopen those historical failures unless new evidence makes a failure reproducible.
+5. Any future corrective implementation for Media Production requires a separate, explicit Owner authorization based on new evidence.
 
 ## 8. Summary
 
 | Category | Items |
 |---|---|
-| **Complete / Closed** | D-C2 mode propagation (`9463eb2`); Publication concurrency/`SQLITE_BUSY_SNAPSHOT` handling |
-| **Approved, not yet created** | ADRs 0009, 0010, 0011, 0012 (Decisions A, B/C, D, E) |
+| **Complete / Closed** | D-C2 mode propagation (`9463eb2`); Publication concurrency/`SQLITE_BUSY_SNAPSHOT` handling; ADRs 0009, 0010, 0011, 0012 (Decisions A, C, D, E) |
 | **Historical / reconciled** | Decision F read-only investigation; seven historical narration/media-production failures are not currently reproducible |
 | **Deferred (no timeline set)** | Real LLM providers; `contentId`/cost-identity wiring; `NEEDS_REVIEW` exit transition; performance metrics; learning events; scheduler implementation; Discovery v0.6 spec recovery; Publication v1 spec recovery |
 | **Missing / Unrecoverable** | ADR-0005 (file absent, only ADR-0006's summary of outcomes survives); Discovery "v0.6" spec document; "Autonomous Operation Checkpoint" as previously cited in code comments (this file now fills that role going forward, but does not retroactively reconstruct whatever the code comments originally pointed to) |
