@@ -39,6 +39,16 @@ export const OUTCOME = Object.freeze({
   INELIGIBLE_STATE: 'INELIGIBLE_STATE',
   ARTIFACT_MISSING: 'ARTIFACT_MISSING',
   ALREADY_PUBLISHED: 'ALREADY_PUBLISHED',
+  // F2-G Open Decision 1 (ADR-0013 §6 "Publication redesign") — Owner
+  // decision: publication-time blocking rights gate. Re-reads the
+  // current assets.verification_status immediately before the D-C2
+  // authorization/provider-call sequence, exactly mirroring the
+  // existing ASSET_RIGHTS_BLOCKED vocabulary already used identically
+  // by src/production/pipeline.js and src/media/pipeline.js (each
+  // module re-declares its own copy per this repository's existing
+  // per-stage decoupling convention -- this is not a new value, just
+  // this module's own copy of an established cross-stage vocabulary).
+  ASSET_RIGHTS_BLOCKED: 'ASSET_RIGHTS_BLOCKED',
   AUTHORIZATION_DENIED: 'AUTHORIZATION_DENIED',
   PROVIDER_FAILURE: 'PROVIDER_FAILURE',
   AMBIGUOUS: 'AMBIGUOUS',
@@ -50,6 +60,7 @@ export const DECISION_LOG_DECISION = Object.freeze({
   NOT_YET_RENDERED: 'NOT_YET_RENDERED',
   INELIGIBLE_STATE: 'INELIGIBLE_STATE',
   ARTIFACT_MISSING: 'ARTIFACT_MISSING',
+  ASSET_RIGHTS_BLOCKED: 'ASSET_RIGHTS_BLOCKED',
   AUTHORIZATION_DENIED: 'AUTHORIZATION_DENIED',
   PROVIDER_FAILURE: 'PROVIDER_FAILURE',
   AMBIGUOUS: 'AMBIGUOUS',

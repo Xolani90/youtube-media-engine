@@ -6,6 +6,7 @@ import { buildPublicationRequest } from './PublicationRequest.js';
 import { resolveProvider } from './providerRegistry.js';
 import { assertExternalActionAllowed, SideEffectDeniedError } from '../state/SideEffectAuthorization.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
+import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
 
 /** Same shape/discipline as every other stage's local logDecision helper. */
 function logDecision(storage, { runId = null, subjectType, subjectId, decision, reason, resultingState = null }, nowISO = () => new Date().toISOString()) {
@@ -139,6 +140,34 @@ export async function runPublication({
       decision: DECISION_LOG_DECISION.ARTIFACT_MISSING, reason: `media_artifact_file_missing_${mediaArtifact.artifact_path}`
     }, nowISO);
     return { outcome: OUTCOME.ARTIFACT_MISSING, publication: null };
+  }
+
+  // --- 4.5. F2-G Open Decision 1 (ADR-0013 §6 "Publication redesign")
+  // -- Owner decision: publication-time blocking rights gate. Re-reads
+  // assets.verification_status fresh, right now, via the same
+  // AssetProvenanceRepository.getAssetsForContent() relationship
+  // Production and Media Production each already use to determine
+  // which assets belong to this content_version (asset_usages join) --
+  // never a status cached from an earlier stage. Placed after artifact
+  // existence (step 4) and before D-C2 authorization/the durable claim
+  // (steps 5-6), so a DISPUTED/UNVERIFIED asset stops this attempt
+  // before authorization is checked, before a publications row is
+  // claimed, and before the provider adapter is ever reached -- mirrors
+  // Media Production's own placement and non-transitioning behavior
+  // (content_version.state is left exactly as it is; Publication does
+  // not own a BLOCKED transition here, matching Media Production's
+  // precedent rather than Production's, since both Media Production and
+  // Publication run on an already-PRODUCED content_version and neither
+  // transitions state on this outcome). ---
+  const assets = new AssetProvenanceRepository(storage).getAssetsForContent(contentVersion.id);
+  const unsafeAsset = assets.find((a) => a.verification_status === 'DISPUTED' || a.verification_status === 'UNVERIFIED');
+  if (unsafeAsset) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.ASSET_RIGHTS_BLOCKED,
+      reason: `asset_${unsafeAsset.id}_verification_status_${unsafeAsset.verification_status}`
+    }, nowISO);
+    return { outcome: OUTCOME.ASSET_RIGHTS_BLOCKED, reason: unsafeAsset.verification_status, publication: null };
   }
 
   // --- 5. D-C2 external side-effect authorization. Checked immediately

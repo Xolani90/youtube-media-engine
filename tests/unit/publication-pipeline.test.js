@@ -9,6 +9,7 @@ import { SqliteStorageDriver } from '../../src/storage/SqliteStorageDriver.js';
 import { runPublication } from '../../src/publication/pipeline.js';
 import { PublicationProvider } from '../../src/publication/PublicationProvider.js';
 import { PUBLICATION_RESULT_STATUS } from '../../src/publication/constants.js';
+import { AssetProvenanceRepository } from '../../src/state/AssetProvenance.js';
 import { config } from '../../src/config/index.js';
 
 /**
@@ -72,6 +73,14 @@ function seedFullyEligibleContent(storage, { mediaFilePath }) {
     [mediaArtifactId, productionId, contentVersionId, mediaFilePath, nowISO()]
   );
   return { contentBriefId, contentVersionId, mediaArtifactId };
+}
+
+/** Identical helper/pattern to tests/integration/media-production-pipeline-e2e.test.js's own seedVisualAsset. */
+function seedAsset(storage, contentVersionId, verificationStatus) {
+  const repo = new AssetProvenanceRepository(storage);
+  const assetId = repo.recordAsset({ assetType: 'image', location: '/tmp/not-read-by-publication.png', verificationStatus });
+  repo.recordUsage({ assetId, contentVersionId, usageContext: 'b-roll' });
+  return assetId;
 }
 
 function withLiveAuthorized(actions, fn) {
@@ -856,6 +865,128 @@ test('publication identity/uniqueness: retrying FAILED never creates a second ro
   const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ? AND provider = ?', [contentVersionId, 'mock']);
   assert.equal(rows.length, 1, 'exactly one publication row for this (content_version, provider) throughout');
   assert.equal(rows[0].status, 'PUBLISHED');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+// --- F2-G Open Decision 1 (ADR-0013 §6): publication-time rights gate ------
+
+test('VERIFIED asset: publication proceeds through to the provider call as before', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+  seedAsset(storage, contentVersionId, 'VERIFIED');
+
+  const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vid-verified', providerUrl: 'https://youtu.be/vid-verified' });
+    const r = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
+    assert.equal(adapter.calls.length, 1, 'adapter must be called once VERIFIED');
+    return r;
+  });
+
+  assert.equal(result.outcome, 'PUBLISHED');
+  assert.equal(result.publication.provider_item_id, 'vid-verified');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('UNVERIFIED asset: ASSET_RIGHTS_BLOCKED, adapter never called, no publications row created', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+  seedAsset(storage, contentVersionId, 'UNVERIFIED');
+
+  const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'SHOULD_NOT_HAPPEN', providerUrl: 'x' });
+    const r = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
+    assert.equal(adapter.calls.length, 0, 'adapter must never be called for UNVERIFIED');
+    return r;
+  });
+
+  assert.equal(result.outcome, 'ASSET_RIGHTS_BLOCKED');
+  assert.equal(result.reason, 'UNVERIFIED');
+  assert.equal(result.publication, null);
+  assert.equal(storage.get('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]), undefined);
+
+  const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
+  assert.equal(cv.state, 'PRODUCED', 'content_version.state is left unchanged on a rights block (mirrors Media Production, not Production)');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('DISPUTED asset: ASSET_RIGHTS_BLOCKED, adapter never called, no publications row created', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+  seedAsset(storage, contentVersionId, 'DISPUTED');
+
+  const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'SHOULD_NOT_HAPPEN', providerUrl: 'x' });
+    const r = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
+    assert.equal(adapter.calls.length, 0, 'adapter must never be called for DISPUTED');
+    return r;
+  });
+
+  assert.equal(result.outcome, 'ASSET_RIGHTS_BLOCKED');
+  assert.equal(result.reason, 'DISPUTED');
+  assert.equal(result.publication, null);
+  assert.equal(storage.get('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]), undefined);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('status changes to DISPUTED after upstream verification but before Publication runs: Publication observes the current persisted status, not a stale one, and blocks', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  // Seeded VERIFIED, exactly as an earlier stage (e.g. Rights
+  // Verification/Production/Media Production) would have observed it.
+  const assetId = seedAsset(storage, contentVersionId, 'VERIFIED');
+
+  // The status changes in the real, persisted assets table -- via the
+  // actual persistence mechanism, never an in-memory variable -- after
+  // that earlier observation but before Publication's own gate runs.
+  storage.run('UPDATE assets SET verification_status = ? WHERE id = ?', ['DISPUTED', assetId]);
+
+  const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'SHOULD_NOT_HAPPEN', providerUrl: 'x' });
+    const r = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
+    assert.equal(adapter.calls.length, 0, 'adapter must not be called once the current persisted status is DISPUTED');
+    return r;
+  });
+
+  assert.equal(result.outcome, 'ASSET_RIGHTS_BLOCKED');
+  assert.equal(result.reason, 'DISPUTED');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('no assets attached: existing behavior is unaffected -- publication proceeds (mirrors NO_VISUAL_ASSETS being a Media Production concern, not Publication\'s)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+  // No assets attached at all -- identical to every pre-existing test in
+  // this file, which never seeded assets before this change either.
+
+  const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'no-assets', providerUrl: 'https://youtu.be/no-assets' });
+    const r = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
+    assert.equal(adapter.calls.length, 1);
+    return r;
+  });
+
+  assert.equal(result.outcome, 'PUBLISHED');
 
   cleanup(storage, dbPath, videoFile);
 });
