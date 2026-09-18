@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-**AUTHORIZED — OWNER DECISION RECORDED — IMPLEMENTATION COMPLETE — PUSH NOT YET AUTHORIZED**
+**AUTHORIZED — OWNER DECISION RECORDED — IMPLEMENTATION COMPLETE — COMMITTED — PUSHED**
 
 ## 2. Purpose
 
@@ -102,11 +102,11 @@ decision (§4 above), not on reconstructed F2/F2-G history.
 ## 8. Resulting implementation
 
 Scope in §5 implemented on top of HEAD `9fa1ef3c754b769782d9b620bc05fda7d3d0527e`.
-Commit not yet made — see §9.
+Committed as `e3c3716` ("fix(publication): enforce current asset rights verification gate") — see §9.
 
 ## 9. Push authorization
 
-Not yet given. Per this repository's established convention (ADR-0007 §6,
+Given. Commit `e3c3716` ("fix(publication): enforce current asset rights verification gate") was made and is present on `main` and `origin/main`. Per this repository's established convention (ADR-0007 §6,
 ADR-0009 §5, ADR-0013 §9, ADR-0016), commit and push authorization are
 separate acts from implementation authorization and are recorded separately
 once given.
@@ -114,5 +114,5 @@ once given.
 ## 10. Final status
 
 ```text
-IMPLEMENTATION COMPLETE — COMMIT NOT MADE — PUSH NOT AUTHORIZED
+IMPLEMENTATION COMPLETE — COMMITTED (e3c3716) — PUSHED
 ```
