@@ -31,16 +31,27 @@ export class SqliteStorageDriver extends StorageDriver {
       this.db.prepare('SELECT id FROM schema_migrations').all().map((r) => r.id)
     );
 
-    // RG-03 (docs/DECISIONS/RESEARCH-GOVERNANCE-BASELINE.md): this one migration
+    // RG-03 (docs/DECISIONS/RESEARCH-GOVERNANCE-BASELINE.md): this migration
     // rebuilds `claims` (DROP + rename-into-place) while `claim_sources` and
     // `claim_relations` still hold FK references to it. With FK enforcement ON,
     // SQLite's DROP TABLE step would fail those foreign keys mid-rebuild even
     // though the rename restores a schema-compatible table immediately after.
     // FK enforcement cannot be toggled inside an already-open transaction, so it
-    // is toggled here, at the connection level, strictly around this one
-    // filename's transaction — not embedded in the migration SQL itself, and not
-    // applied to any other migration.
-    const RG03_FK_TOGGLE_MIGRATION = '0012_remove_legacy_claim_columns.sql';
+    // is toggled here, at the connection level, strictly around this filename's
+    // transaction — not embedded in the migration SQL itself.
+    //
+    // F-DB-01 (Owner-authorized disposition: RETAIN OPEN -> schema hardening):
+    // 0013 rebuilds `content_versions` the same way, to add a CHECK constraint
+    // on `state`, while six dependent tables (risk_assessments,
+    // originality_checks, asset_usages, productions, media_artifacts,
+    // publications) still hold FK references to it. The identical FK-toggle
+    // need applies, so the same mechanism is reused here rather than
+    // introducing a new one. Both filenames below get the same toggle/restore
+    // lifecycle; 0012's own behavior is unchanged.
+    const FK_TOGGLE_MIGRATIONS = new Set([
+      '0012_remove_legacy_claim_columns.sql',
+      '0013_content_versions_state_check.sql',
+    ]);
 
     for (const file of files) {
       if (applied.has(file)) continue;
@@ -52,7 +63,7 @@ export class SqliteStorageDriver extends StorageDriver {
           .run(file, new Date().toISOString());
       });
 
-      if (file === RG03_FK_TOGGLE_MIGRATION) {
+      if (FK_TOGGLE_MIGRATIONS.has(file)) {
         this.db.pragma('foreign_keys = OFF');
         try {
           applyMigration();
