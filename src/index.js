@@ -4,6 +4,7 @@ import { LLMRouter } from './providers/llm/router.js';
 import { detectContradiction as detectContradictionProd } from './research/contradictionDetector.js';
 import { RssSource } from './providers/opportunity/RssSource.js';
 import { PixabayAssetSourceProvider } from './providers/asset/PixabayAssetSourceProvider.js';
+import { TavilySearchProvider } from './providers/research/TavilySearchProvider.js';
 import { runDiscoveryPipeline } from './discovery/pipeline.js';
 import { runAutonomousOperation } from './autonomous/runner.js';
 import { computeRawFeatures } from './discovery/featureComputation.js';
@@ -77,9 +78,17 @@ export async function runAutonomousEntrypoint(deps = {}) {
       // was previously always undefined here, so Research silently ran
       // with contradiction checking disabled. A caller-supplied override
       // (tests, controlled callers) still takes priority.
+      //
+      // ADR-0015: the production path must also receive a concrete
+      // sourceProvider -- deps.research.sourceProvider was previously
+      // always undefined here, so SOURCE_DISCOVERY crashed on
+      // `provider.discoverCandidates` in every real run that reached
+      // Research. Default to TavilySearchProvider; a caller-supplied
+      // override (tests, controlled callers) still takes priority.
       research: {
         ...deps.research,
-        detectContradiction: deps.research?.detectContradiction ?? detectContradictionProd
+        detectContradiction: deps.research?.detectContradiction ?? detectContradictionProd,
+        sourceProvider: deps.research?.sourceProvider ?? new TavilySearchProvider()
       },
       briefPolicy: deps.briefPolicy ?? config.briefPolicy,
       scriptPolicy: deps.scriptPolicy ?? config.scriptPolicy,
