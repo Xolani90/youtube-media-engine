@@ -1,3 +1,11 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const envPath = resolve(process.cwd(), '.env');
+if (existsSync(envPath)) {
+  process.loadEnvFile?.(envPath);
+}
+
 // Central configuration. Everything here is read from environment variables
 // or config files — nothing is hard-coded business logic.
 //
