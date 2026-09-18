@@ -27,10 +27,11 @@ class UnconfiguredProvider extends LLMProvider {
   }
 
   async healthCheck() {
-    // No API key wired yet in M0 scaffold -> reports unhealthy so the
-    // router falls through instead of throwing on missing credentials.
-    const envKey = `${this._id.toUpperCase().replace(/-/g, '_')}_API_KEY`;
-    return Boolean(process.env[envKey]);
+    // No live implementation exists yet in M0 scaffolding, regardless of
+    // whether an API key happens to be configured -> always reports
+    // unhealthy so the router falls through instead of selecting a
+    // provider whose complete() is guaranteed to throw (F2-L1).
+    return false;
   }
 
   async complete() {

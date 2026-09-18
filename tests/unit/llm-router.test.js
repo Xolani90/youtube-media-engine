@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LLMRouter } from '../../src/providers/llm/router.js';
 import { LLMProvider } from '../../src/providers/llm/LLMProvider.js';
+import { REGISTRY } from '../../src/providers/llm/candidates.js';
 
 class FakeHealthyFree extends LLMProvider {
   get id() { return 'fake-free'; }
@@ -70,4 +71,65 @@ test('does not silently fall through to paid when free options are exhausted', a
     }
   });
   await assert.rejects(() => router.complete({ prompt: 'hi' }), /No usable LLM provider/);
+});
+
+// F2-L1 regression: an UnconfiguredProvider (gemini-free/openrouter-free/
+// deepseek-paid via the real REGISTRY) must never be selected just because
+// its *_API_KEY env var happens to be set -- it has no live implementation,
+// so complete() always throws. Before the fix, a present env var made
+// healthCheck() return true, so the router would select it and then hard-
+// fail instead of falling through to a genuinely usable provider.
+test('F2-L1: an unimplemented provider with its API key env var set is NOT selected, and the router falls through to the next eligible provider', async () => {
+  const envKey = 'GEMINI_FREE_API_KEY';
+  const hadKey = Object.prototype.hasOwnProperty.call(process.env, envKey);
+  const previousValue = process.env[envKey];
+  process.env[envKey] = 'sk-not-a-real-key-just-present';
+
+  try {
+    const { providerUsed, attempted } = await new LLMRouter({
+      priority: ['gemini-free', 'fake-free'],
+      allowPaidProviders: false,
+      registry: {
+        'gemini-free': REGISTRY['gemini-free'],
+        'fake-free': () => new FakeHealthyFree()
+      }
+    }).complete({ prompt: 'hi' });
+
+    // The real, unimplemented gemini-free stub was skipped despite its key
+    // being present, and the router moved on to the next eligible provider.
+    assert.equal(providerUsed, 'fake-free');
+    assert.deepEqual(attempted, [
+      { id: 'gemini-free', skipped: 'failed health check (missing key or quota exhausted)' }
+    ]);
+  } finally {
+    if (hadKey) {
+      process.env[envKey] = previousValue;
+    } else {
+      delete process.env[envKey];
+    }
+  }
+});
+
+test('F2-L1: with no fallback provider available, an unimplemented provider with its API key set correctly produces "no usable provider" rather than selecting it and throwing from complete()', async () => {
+  const envKey = 'OPENROUTER_FREE_API_KEY';
+  const hadKey = Object.prototype.hasOwnProperty.call(process.env, envKey);
+  const previousValue = process.env[envKey];
+  process.env[envKey] = 'sk-not-a-real-key-just-present';
+
+  try {
+    await assert.rejects(
+      () => new LLMRouter({
+        priority: ['openrouter-free'],
+        allowPaidProviders: false,
+        registry: { 'openrouter-free': REGISTRY['openrouter-free'] }
+      }).complete({ prompt: 'hi' }),
+      /No usable LLM provider/
+    );
+  } finally {
+    if (hadKey) {
+      process.env[envKey] = previousValue;
+    } else {
+      delete process.env[envKey];
+    }
+  }
 });
