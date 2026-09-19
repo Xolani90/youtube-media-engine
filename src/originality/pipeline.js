@@ -5,9 +5,11 @@ import {
   ALGORITHM,
   ALGORITHM_VERSION,
   KNOWN_LIMITATIONS,
-  DECISION_LOG_DECISION
+  DECISION_LOG_DECISION,
+  NO_ORIGINALITY_REPRESENTATION_REASON
 } from './constants.js';
 import { resolveCurrentScript } from './eligibility.js';
+import { deriveOriginalityText, NO_REPRESENTATION } from './representation.js';
 import { tokenize, jaccardSimilarity } from '../discovery/similarity.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
 
@@ -80,23 +82,54 @@ export function runOriginalityCheck({ storage, contentBriefId, runId = null }) {
   }
   const { script } = eligibility;
 
+  // ADR-0019 §4.4/§4.5: the current Script must itself have a valid
+  // Originality representation. A current Script with no valid
+  // representation is a representation failure — it must not produce an
+  // Originality result row, must not fall back to raw serialized JSON or
+  // Media narration conversion, and uses the same established
+  // decision_log STRUCTURAL_FAILURE path already used for eligibility
+  // failures (resolveCurrentScript() above), not a new mechanism.
+  const candidateText = deriveOriginalityText(script.body);
+  if (candidateText === NO_REPRESENTATION) {
+    return structuralFailure(storage, {
+      runId, subjectType: 'content_brief', subjectId: contentBriefId,
+      reason: NO_ORIGINALITY_REPRESENTATION_REASON
+    }, nowISO);
+  }
+
   // Corpus: every persisted scripts row except the exact current
   // script_id. Earlier drafts of the same content_brief_id are NOT
   // excluded (Owner Decision). Ordered by id for deterministic tie-break
   // on the maximum (first row encountered at a given similarity wins).
   const corpusRows = storage.all('SELECT id, body FROM scripts WHERE id != ? ORDER BY id ASC', [script.id]);
-  const corpusSize = corpusRows.length;
+
+  // ADR-0019 §4.5/§7: corpus rows with no valid Originality
+  // representation are excluded deterministically — they contribute
+  // nothing to similarity, can never become the selected maximum, and
+  // are not counted as an eligible comparison (corpus_size reflects only
+  // eligible rows). No new persistence mechanism records these
+  // exclusions individually (no exclusion table/column, no per-row
+  // decision_log event); the existing evidence establishes only that
+  // decision_log supports the current-Script failure path above, not a
+  // per-excluded-corpus-row event (ADR-0019 §4.5).
+  const eligibleCorpusRows = [];
+  for (const row of corpusRows) {
+    const rowText = deriveOriginalityText(row.body);
+    if (rowText === NO_REPRESENTATION) continue;
+    eligibleCorpusRows.push({ id: row.id, text: rowText });
+  }
+  const corpusSize = eligibleCorpusRows.length;
 
   // tokenize()/jaccardSimilarity() are total, pure functions over text —
-  // this computation cannot throw for a persisted `body TEXT NOT NULL`
-  // row. It is deliberately performed outside the transaction (mirrors
+  // this computation cannot throw for a derived Originality Text string.
+  // It is deliberately performed outside the transaction (mirrors
   // Fact-Check's evaluateDecision(), computed before its transaction),
   // since it does not itself perform any write.
-  const candidateTokens = tokenize(script.body);
+  const candidateTokens = tokenize(candidateText);
   let maxSimilarity = null;
   let mostSimilarScriptId = null;
-  for (const row of corpusRows) {
-    const sim = jaccardSimilarity(candidateTokens, tokenize(row.body));
+  for (const row of eligibleCorpusRows) {
+    const sim = jaccardSimilarity(candidateTokens, tokenize(row.text));
     if (maxSimilarity === null || sim > maxSimilarity) {
       maxSimilarity = sim;
       mostSimilarScriptId = row.id;
@@ -105,7 +138,9 @@ export function runOriginalityCheck({ storage, contentBriefId, runId = null }) {
   // corpus_size = 0 is a genuine, distinct outcome, not "0 similarity" —
   // jaccardSimilarity() itself returns 0 for empty/empty input, so this
   // stage (not the reused similarity function) explicitly owns the
-  // empty-corpus branch: null, not 0, and no most-similar script.
+  // empty-corpus branch: null, not 0, and no most-similar script. This
+  // also covers the case where every corpus row was excluded for having
+  // no valid representation (ADR-0019 T-15).
   if (corpusSize === 0) {
     maxSimilarity = null;
     mostSimilarScriptId = null;
