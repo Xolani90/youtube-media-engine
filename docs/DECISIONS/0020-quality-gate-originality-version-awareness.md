@@ -84,5 +84,3 @@ The following repository evidence was established by the preceding read-only aud
 ## 10. Final Status
 
 ACCEPTED — OWNER DECISION. Resolves ADR-0019 §6. No implementation authorized.
-
-ADR-0020 export complete.
