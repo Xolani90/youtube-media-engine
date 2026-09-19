@@ -1,5 +1,22 @@
 import { derivedContentBlock } from '../providers/llm/promptTrust.js';
 
+// Some providers (observed with Groq elsewhere in this repository) wrap an
+// otherwise well-formed JSON payload in exactly one Markdown code fence.
+// This recognizes ONLY a response that, after trimming, is entirely one
+// fence (optional ```json / ```JSON tag, or a bare ```) around the payload:
+// nothing before the opening fence, nothing after the closing fence. It is
+// deliberately narrow -- it never searches for JSON inside prose, never
+// repairs malformed JSON, and never touches an unfenced response. The
+// unwrapped payload then goes through the same JSON.parse + object check
+// + deterministic validation as any plain response.
+const FENCED_PAYLOAD = /^```(?:json|JSON)?\r?\n([\s\S]*?)\r?\n```$/;
+
+function unwrapSingleFence(text) {
+  const trimmed = (text || '').trim();
+  const match = trimmed.match(FENCED_PAYLOAD);
+  return match ? match[1] : text;
+}
+
 /**
  * Generation (LLM-assisted) of a Script's body fields, from an eligible
  * Brief. Mirrors Brief's generate.js proposes/validates split (Brief
@@ -59,7 +76,7 @@ export async function generateScriptFields({ brief, eligibleClaimIds, allowCallT
 
   let parsed;
   try {
-    parsed = JSON.parse(result.text);
+    parsed = JSON.parse(unwrapSingleFence(result.text));
   } catch {
     parsed = null;
   }
