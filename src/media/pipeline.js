@@ -8,6 +8,7 @@ import { computeVisualSequencing } from './visualSequencing.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
 import { synthesizeNarration, probeDurationSeconds } from './narration.js';
+import { scriptBodyToNarrationText, ScriptBodyContractError } from './scriptText.js';
 import { renderSilentVideo, muxNarration, writeSrtFile } from './render.js';
 import { validateMediaArtifact } from './validate.js';
 import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
@@ -137,6 +138,26 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     return { outcome: OUTCOME.RENDER_FAILED, reason: `missing_asset_file_${missingAsset.id}`, mediaArtifact: null };
   }
 
+  // --- Script -> Media contract (B-01 / F-4) ---
+  // scripts.body is the persisted structured (JSON) script. Convert it
+  // ONCE, deterministically, into the human-readable prose that both
+  // narration and caption segmentation consume (src/media/scriptText.js).
+  // A body that cannot be interpreted per the Script contract fails
+  // explicitly here -- before any narration or render work -- rather than
+  // being spoken or captioned as raw JSON. No new outcome or state is
+  // introduced: this is a narration-input failure.
+  let narrationText;
+  try {
+    narrationText = scriptBodyToNarrationText(script.body);
+  } catch (err) {
+    if (!(err instanceof ScriptBodyContractError)) throw err;
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.NARRATION_FAILED, reason: `script_body_contract_violation_${err.reason}`
+    }, nowISO);
+    return { outcome: OUTCOME.NARRATION_FAILED, reason: err.reason, mediaArtifact: null };
+  }
+
   const dir = mediaDir(artifactsDir, contentVersion.id);
 
   // --- Narration ---
@@ -144,7 +165,7 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   const narrationTmpPath = path.join(dir, `.narration.wav.tmp-${process.pid}-${Date.now()}`);
   let narrationDurationSeconds;
   try {
-    synthesizeNarration(script.body, narrationTmpPath);
+    synthesizeNarration(narrationText, narrationTmpPath);
     fs.renameSync(narrationTmpPath, narrationPath);
     narrationDurationSeconds = probeDurationSeconds(narrationPath);
   } catch (err) {
@@ -157,12 +178,13 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   }
 
   // --- Captions (Media Production v1.1) ---
-  // Caption text comes from script.body verbatim, deterministically
+  // Caption text is the SAME narrationText the narrator speaks (the
+  // canonical Script -> Media conversion above), deterministically
   // segmented — never an LLM, never a rewrite. No caption-worthy text
   // simply renders with no subtitles, exactly as v1 did. Computed before
   // visual sequencing (below) because v1.2's sequencing uses caption
   // segment boundaries as its script-structure signal.
-  const captionSegments = segmentCaptions(script.body, CAPTION_DEFAULTS.MAX_CAPTION_LENGTH);
+  const captionSegments = segmentCaptions(narrationText, CAPTION_DEFAULTS.MAX_CAPTION_LENGTH);
   let captionTiming = [];
   if (captionSegments.length > 0) {
     try {
