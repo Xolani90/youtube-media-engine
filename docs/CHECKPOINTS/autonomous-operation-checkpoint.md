@@ -131,7 +131,7 @@ checkpoint:
 - Modify `workSelection.js` to change the `HANDED_TO_RESEARCH` boundary
 - Modify `src/state/SideEffectAuthorization.js`
 - Modify Publication concurrency/reclaim logic
-- Implement real LLM providers
+- Implement additional real LLM providers beyond the already-implemented, retrospectively ratified Groq provider (see ADR-0018 — Groq's own runtime behavior, priority, retry behavior, and credentials remain unmodifiable without separate authorization; ratification is not a template for adding further providers without one)
 - Add `contentId` wiring
 - Implement the scheduler
 - Implement performance-metrics/learning-events schema
@@ -152,7 +152,7 @@ checkpoint:
 
 | Category | Items |
 |---|---|
-| **Complete / Closed** | D-C2 mode propagation (`9463eb2`); Publication concurrency/`SQLITE_BUSY_SNAPSHOT` handling; ADRs 0009, 0010, 0011, 0012 (Decisions A, C, D, E) |
-| **Historical / reconciled** | Decision F read-only investigation; seven historical narration/media-production failures are not currently reproducible |
-| **Deferred (no timeline set)** | Real LLM providers; `contentId`/cost-identity wiring; `NEEDS_REVIEW` exit transition; performance metrics; learning events; scheduler implementation; Discovery v0.6 spec recovery; Publication v1 spec recovery |
+| **Complete / Closed** | D-C2 mode propagation (`9463eb2`); Publication concurrency/`SQLITE_BUSY_SNAPSHOT` handling; ADRs 0009, 0010, 0011, 0012 (Decisions A, C, D, E); Groq real LLM provider implementation, retrospectively ratified (ADR-0018) |
+| **Historical / reconciled** | Decision F read-only investigation; seven historical narration/media-production failures are not currently reproducible; Groq implementation timing/authorization gap (ADR-0018 — implemented before ratification; contemporaneous authorization not established; retrospectively ratified) |
+| **Deferred (no timeline set)** | Additional real LLM providers beyond Groq (Gemini, OpenRouter, DeepSeek); `contentId`/cost-identity wiring; `NEEDS_REVIEW` exit transition; performance metrics; learning events; scheduler implementation; Discovery v0.6 spec recovery; Publication v1 spec recovery |
 | **Missing / Unrecoverable** | ADR-0005 (file absent, only ADR-0006's summary of outcomes survives); Discovery "v0.6" spec document; "Autonomous Operation Checkpoint" as previously cited in code comments (this file now fills that role going forward, but does not retroactively reconstruct whatever the code comments originally pointed to) |
