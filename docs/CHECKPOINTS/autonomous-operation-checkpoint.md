@@ -34,8 +34,12 @@ not freeze the remote.
 
 ## 2. Current Architecture State
 
-Autonomous Operation stage order (`src/autonomous/runner.js`), unchanged and
-not authorized to change without a separate governance decision:
+Autonomous Operation stage order (`src/autonomous/runner.js`,
+`buildStages()`), as of current baseline `699c9b6` (superseding this
+section's prior 9-stage description recorded at the `611abc3` baseline;
+Asset Provisioning and Rights Verification were added via ADR-0013/0014,
+each under separate governance decision, and are not authorized to change
+further without a separate governance decision):
 
 1. Research
 2. Brief
@@ -44,8 +48,10 @@ not authorized to change without a separate governance decision:
 5. Originality Check
 6. Quality Gate
 7. Production
-8. Media Production
-9. Publication
+8. Asset Provisioning
+9. Rights Verification
+10. Media Production
+11. Publication
 
 Boundary (Owner-decided, current scope):
 
