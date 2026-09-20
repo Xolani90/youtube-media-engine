@@ -6,6 +6,7 @@ import { writeManifestArtifact } from './artifactStore.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
 import { config } from '../config/index.js';
+import { isQuarantined, recordFailedAttempt, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /**
  * Records a decision_log entry. Same shape/discipline as every other
@@ -85,6 +86,17 @@ export function runProduction({ storage, contentBriefId, artifactsDir = config.p
     return { outcome: OUTCOME.INELIGIBLE_STATE, reason: contentVersion.state, production: null };
   }
 
+  // Bounded-retry governance: a quarantined item is refused on direct
+  // invocation too (selection filtering is not the only guard). Owner-only
+  // reactivation (src/state/StageRetryPolicy.js) is the sole way out.
+  if (isQuarantined(storage, contentVersion.id, RETRY_STAGE.PRODUCTION)) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: 'QUARANTINE_REFUSED', reason: 'production_quarantined_owner_reactivation_required'
+    }, nowISO);
+    return { outcome: OUTCOME.QUARANTINED, reason: 'production_quarantined', production: null };
+  }
+
   // Re-check D-G2 asset rights at production time (not just Gate 1's
   // earlier snapshot — assets may have been attached, or their
   // verification_status changed, since Gate 1 ran). Any DISPUTED or
@@ -126,11 +138,21 @@ export function runProduction({ storage, contentBriefId, artifactsDir = config.p
   try {
     artifactPath = writeManifestArtifact(artifactsDir, contentVersion.id, manifestJson);
   } catch (err) {
-    logDecision(storage, {
-      runId, subjectType: 'content_version', subjectId: contentVersion.id,
-      decision: DECISION_LOG_DECISION.ARTIFACT_WRITE_FAILED, reason: `artifact_write_failed_${err.message}`
-    }, nowISO);
-    return { outcome: OUTCOME.ARTIFACT_WRITE_FAILED, reason: err.message, production: null };
+    // One Production attempt = this invocation returning
+    // ARTIFACT_WRITE_FAILED. The decision_log entry, the counter increment
+    // and (on the 3rd) the quarantine are persisted in ONE transaction; a
+    // persistence failure propagates (never silently unbounded retry).
+    const retry = storage.transaction(() => {
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersion.id,
+        decision: DECISION_LOG_DECISION.ARTIFACT_WRITE_FAILED, reason: `artifact_write_failed_${err.message}`
+      }, nowISO);
+      return recordFailedAttempt(storage, {
+        contentVersionId: contentVersion.id, stage: RETRY_STAGE.PRODUCTION,
+        reason: `artifact_write_failed_${err.message}`, runId, nowISO
+      });
+    });
+    return { outcome: OUTCOME.ARTIFACT_WRITE_FAILED, reason: err.message, production: null, attempt: retry.attempt, quarantined: retry.quarantined };
   }
 
   const outcome = storage.transaction(() => {

@@ -7,6 +7,7 @@ import { resolveProvider } from './providerRegistry.js';
 import { assertExternalActionAllowed, SideEffectDeniedError } from '../state/SideEffectAuthorization.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
+import { isQuarantined, recordFailedAttempt, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /** Same shape/discipline as every other stage's local logDecision helper. */
 function logDecision(storage, { runId = null, subjectType, subjectId, decision, reason, resultingState = null }, nowISO = () => new Date().toISOString()) {
@@ -131,6 +132,17 @@ export async function runPublication({
       decision: DECISION_LOG_DECISION.INTERRUPTED_ATTEMPT, reason: `publication_${existing.id}_interrupted`
     }, nowISO);
     return { outcome: OUTCOME.AMBIGUOUS, reason: 'interrupted_prior_attempt', publication: interrupted };
+  }
+
+  // --- 3.5. Bounded-retry governance: a quarantined (FAILED-cap-exhausted)
+  // publication is refused on direct invocation as well as by selection.
+  // publications.status stays FAILED; quarantine is a separate record. ---
+  if (isQuarantined(storage, contentVersion.id, RETRY_STAGE.PUBLICATION)) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: 'QUARANTINE_REFUSED', reason: 'publication_quarantined_owner_reactivation_required'
+    }, nowISO);
+    return { outcome: OUTCOME.QUARANTINED, reason: 'publication_quarantined', publication: existing ?? null };
   }
 
   // --- 4. Media artifact must still exist on disk. ---
@@ -343,18 +355,25 @@ export async function runPublication({
 
   // --- 8. Interpret the normalized result and persist accordingly. ---
   if (result.status === PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE) {
-    const row = storage.transaction(() => {
+    // One Publication attempt = one confirmed EXPLICIT_FAILURE persisted as
+    // FAILED. The FAILED update, counter increment and (on the 3rd) the
+    // quarantine record commit together; failure propagates.
+    const { row, retry } = storage.transaction(() => {
       storage.run(
         `UPDATE publications SET status = 'FAILED', result_json = ?, failure_reason = ?, updated_at = ? WHERE id = ?`,
         [JSON.stringify(result), result.errorClass ?? 'PROVIDER_FAILURE', nowISO(), claim.publicationId]
       );
-      return storage.get('SELECT * FROM publications WHERE id = ?', [claim.publicationId]);
+      const retryResult = recordFailedAttempt(storage, {
+        contentVersionId: contentVersion.id, stage: RETRY_STAGE.PUBLICATION,
+        reason: `publication_failed_${result.errorClass ?? 'PROVIDER_FAILURE'}`, runId, nowISO
+      });
+      return { row: storage.get('SELECT * FROM publications WHERE id = ?', [claim.publicationId]), retry: retryResult };
     });
     logDecision(storage, {
       runId, subjectType: 'content_version', subjectId: contentVersion.id,
       decision: DECISION_LOG_DECISION.PROVIDER_FAILURE, reason: `publication_${claim.publicationId}_failed_${result.errorClass}`
     }, nowISO);
-    return { outcome: OUTCOME.PROVIDER_FAILURE, reason: result.errorClass, publication: row };
+    return { outcome: OUTCOME.PROVIDER_FAILURE, reason: result.errorClass, publication: row, attempt: retry.attempt, quarantined: retry.quarantined };
   }
 
   if (result.status === PUBLICATION_RESULT_STATUS.AMBIGUOUS) {

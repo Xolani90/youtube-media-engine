@@ -68,7 +68,11 @@ export function selectEligibleQualityGates(storage) {
 
 export function selectEligibleProductions(storage) {
   return storage
-    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'PRODUCTION_READY'`)
+    .all(
+      `SELECT content_brief_id FROM content_versions
+       WHERE state = 'PRODUCTION_READY'
+       AND id NOT IN (SELECT content_version_id FROM stage_retry_state WHERE stage = 'PRODUCTION' AND quarantined_at IS NOT NULL)`
+    )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
@@ -133,7 +137,8 @@ export function selectEligiblePublications(storage) {
     .all(
       `SELECT content_brief_id FROM content_versions
        WHERE state = 'PRODUCED'
-       AND id IN (SELECT content_version_id FROM media_artifacts)`
+       AND id IN (SELECT content_version_id FROM media_artifacts)
+       AND id NOT IN (SELECT content_version_id FROM stage_retry_state WHERE stage = 'PUBLICATION' AND quarantined_at IS NOT NULL)`
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
