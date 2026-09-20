@@ -12,6 +12,7 @@ import { resolveCurrentScript } from './eligibility.js';
 import { deriveOriginalityText, NO_REPRESENTATION } from './representation.js';
 import { tokenize, jaccardSimilarity } from '../discovery/similarity.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
+import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /**
  * Records a decision_log entry. Same shape/discipline as Fact-Check's,
@@ -37,16 +38,33 @@ function logDecision(storage, { runId = null, stage, subjectType, subjectId, dec
  * failure the caller receives. No Originality result row is persisted —
  * there was nothing to evaluate.
  */
-function structuralFailure(storage, { runId, subjectType, subjectId, reason }, nowISO) {
-  logDecision(storage, {
-    runId,
-    stage: ORIGINALITY_STAGE,
-    subjectType,
-    subjectId,
-    decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE,
-    reason
-  }, nowISO);
-  return { outcome: 'STRUCTURAL_FAILURE', reason, originalityCheck: null };
+function structuralFailure(storage, { runId, subjectType, subjectId, reason, contentBriefId, evidence }, nowISO) {
+  // A4: STRUCTURAL_FAILURE is a named A4 outcome CLASS, not an automatically
+  // retryable one. It is DETERMINISTIC by default (approved policy): every
+  // current path reports persisted-data state that a re-run cannot change, so
+  // it is logged and returned as before but consumes NO (ORIGINALITY,
+  // content_version_id) budget. A path may only become retryable by passing
+  // `evidence: { nature: 'TRANSIENT', basis }` established by the stage
+  // itself (none does today; formal classification is Slice 3). With no
+  // content_version there is no identity for an attempt, none is fabricated.
+  const contentVersion = storage.get('SELECT id FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+  return storage.transaction(() => {
+    logDecision(storage, {
+      runId,
+      stage: ORIGINALITY_STAGE,
+      subjectType,
+      subjectId,
+      decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE,
+      reason
+    }, nowISO);
+    const result = { outcome: 'STRUCTURAL_FAILURE', reason, originalityCheck: null };
+    if (!contentVersion) return result;
+    const retry = recordFailedAttemptIfRetryable(storage, {
+      outcome: 'STRUCTURAL_FAILURE', evidence,
+      subjectId: contentVersion.id, stage: RETRY_STAGE.ORIGINALITY, reason: `STRUCTURAL_FAILURE_${reason}`, runId, nowISO
+    });
+    return { ...result, ...retryFields(retry) };
+  });
 }
 
 /**
@@ -72,12 +90,23 @@ function structuralFailure(storage, { runId, subjectType, subjectId, reason }, n
 export function runOriginalityCheck({ storage, contentBriefId, runId = null }) {
   const nowISO = () => new Date().toISOString();
 
+  // A4 bounded-retry governance: a quarantined content version is refused on
+  // direct invocation too. Owner-only reactivation is the sole way out.
+  const guardCv = storage.get('SELECT id FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+  if (guardCv && isQuarantined(storage, guardCv.id, RETRY_STAGE.ORIGINALITY)) {
+    logDecision(storage, {
+      runId, stage: ORIGINALITY_STAGE, subjectType: 'content_version', subjectId: guardCv.id,
+      decision: 'QUARANTINE_REFUSED', reason: 'originality_quarantined_owner_reactivation_required'
+    }, nowISO);
+    return { outcome: 'QUARANTINED', reason: 'ORIGINALITY_QUARANTINED', originalityCheck: null };
+  }
+
   // Resolve the current Script via content_versions.script_id only — no
   // independent "ORDER BY version DESC" definition of current.
   const eligibility = resolveCurrentScript(storage, contentBriefId);
   if (!eligibility.eligible) {
     return structuralFailure(storage, {
-      runId, subjectType: 'content_brief', subjectId: contentBriefId, reason: eligibility.reason
+      runId, subjectType: 'content_brief', subjectId: contentBriefId, reason: eligibility.reason, contentBriefId
     }, nowISO);
   }
   const { script } = eligibility;
@@ -93,7 +122,7 @@ export function runOriginalityCheck({ storage, contentBriefId, runId = null }) {
   if (candidateText === NO_REPRESENTATION) {
     return structuralFailure(storage, {
       runId, subjectType: 'content_brief', subjectId: contentBriefId,
-      reason: NO_ORIGINALITY_REPRESENTATION_REASON
+      reason: NO_ORIGINALITY_REPRESENTATION_REASON, contentBriefId
     }, nowISO);
   }
 

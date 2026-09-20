@@ -51,6 +51,9 @@ export class SqliteStorageDriver extends StorageDriver {
     const FK_TOGGLE_MIGRATIONS = new Set([
       '0012_remove_legacy_claim_columns.sql',
       '0013_content_versions_state_check.sql',
+      // A4 Slice 1: rebuilds both retry tables (drops the content_versions FK,
+      // renames content_version_id -> subject_id, widens the stage CHECK).
+      '0017_generalize_stage_retry_identity.sql',
     ]);
 
     for (const file of files) {

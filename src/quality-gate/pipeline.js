@@ -10,6 +10,7 @@ import {
 import { resolveCurrentScript } from './eligibility.js';
 import { checkFactCheck, checkOriginalityEvidence, checkAssetRights } from './checks.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
+import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /**
  * Records a decision_log entry. Same shape/discipline as Fact-Check's,
@@ -36,16 +37,33 @@ function logDecision(storage, { runId = null, stage, subjectType, subjectId, dec
  * structured failure the caller receives. No lifecycle transition is
  * attempted — mirrors Fact-Check's and Originality's structuralFailure.
  */
-function structuralFailure(storage, { runId, subjectType, subjectId, reason }, nowISO) {
-  logDecision(storage, {
-    runId,
-    stage: QUALITY_GATE_STAGE,
-    subjectType,
-    subjectId,
-    decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE,
-    reason
-  }, nowISO);
-  return { outcome: 'STRUCTURAL_FAILURE', reason, checks: null, aggregate: null, transitioned: false };
+function structuralFailure(storage, { runId, subjectType, subjectId, reason, contentBriefId, evidence }, nowISO) {
+  // A4: STRUCTURAL_FAILURE is a named A4 outcome CLASS, not an automatically
+  // retryable one. It is DETERMINISTIC by default (approved policy): every
+  // current path reports persisted-data state that a re-run cannot change, so
+  // it is logged and returned as before but consumes NO (QUALITY_GATE,
+  // content_version_id) budget. A path may only become retryable by passing
+  // `evidence: { nature: 'TRANSIENT', basis }` established by the stage
+  // itself (none does today; formal classification is Slice 3). With no
+  // content_version there is no identity for an attempt, none is fabricated.
+  const contentVersion = storage.get('SELECT id FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+  return storage.transaction(() => {
+    logDecision(storage, {
+      runId,
+      stage: QUALITY_GATE_STAGE,
+      subjectType,
+      subjectId,
+      decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE,
+      reason
+    }, nowISO);
+    const result = { outcome: 'STRUCTURAL_FAILURE', reason, checks: null, aggregate: null, transitioned: false };
+    if (!contentVersion) return result;
+    const retry = recordFailedAttemptIfRetryable(storage, {
+      outcome: 'STRUCTURAL_FAILURE', evidence,
+      subjectId: contentVersion.id, stage: RETRY_STAGE.QUALITY_GATE, reason: `STRUCTURAL_FAILURE_${reason}`, runId, nowISO
+    });
+    return { ...result, ...retryFields(retry) };
+  });
 }
 
 /** Deterministic worst-case selector across independent check results. Never a score, weight, or average. */
@@ -76,13 +94,24 @@ function aggregate(results) {
 export function runQualityGate({ storage, contentBriefId, runId = null }) {
   const nowISO = () => new Date().toISOString();
 
+  // A4 bounded-retry governance: a quarantined content version is refused on
+  // direct invocation too. Owner-only reactivation is the sole way out.
+  const guardCv = storage.get('SELECT id FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+  if (guardCv && isQuarantined(storage, guardCv.id, RETRY_STAGE.QUALITY_GATE)) {
+    logDecision(storage, {
+      runId, stage: QUALITY_GATE_STAGE, subjectType: 'content_version', subjectId: guardCv.id,
+      decision: 'QUARANTINE_REFUSED', reason: 'quality_gate_quarantined_owner_reactivation_required'
+    }, nowISO);
+    return { outcome: 'QUARANTINED', reason: 'QUALITY_GATE_QUARANTINED', checks: null, aggregate: null, transitioned: false };
+  }
+
   // Structural-completeness check (content_version -> script ->
   // content_brief all resolve). Failing here IS the BLOCK condition for
   // that check — no partial gate evaluation is attempted.
   const eligibility = resolveCurrentScript(storage, contentBriefId);
   if (!eligibility.eligible) {
     return structuralFailure(storage, {
-      runId, subjectType: 'content_brief', subjectId: contentBriefId, reason: eligibility.reason
+      runId, subjectType: 'content_brief', subjectId: contentBriefId, reason: eligibility.reason, contentBriefId
     }, nowISO);
   }
   const { script, contentVersion } = eligibility;

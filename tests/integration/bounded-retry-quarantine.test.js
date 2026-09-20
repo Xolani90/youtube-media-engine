@@ -66,7 +66,7 @@ function seedContent(storage, { state, mediaFilePath = null } = {}) {
 }
 
 const OWNER = { actor: 'OWNER', reason: 'root cause fixed: disk permissions repaired' };
-const retryRow = (storage, cv, stage) => storage.get('SELECT * FROM stage_retry_state WHERE content_version_id = ? AND stage = ?', [cv, stage]);
+const retryRow = (storage, cv, stage) => storage.get('SELECT * FROM stage_retry_state WHERE subject_id = ? AND stage = ?', [cv, stage]);
 const decisions = (storage, cv, decision) => storage.all('SELECT * FROM decision_log WHERE subject_id = ? AND decision = ?', [cv, decision]);
 
 // ---------------------------------------------------------------- Production
@@ -156,7 +156,7 @@ test('Production: Owner reactivation preserves history, starts cycle 2, item eli
   const log = decisions(storage, contentVersionId, 'QUARANTINE_REACTIVATED');
   assert.equal(log.length, 1);
   assert.match(log[0].reason, /disk permissions repaired/);
-  const hist = storage.all('SELECT * FROM stage_retry_cycle_history WHERE content_version_id = ?', [contentVersionId]);
+  const hist = storage.all('SELECT * FROM stage_retry_cycle_history WHERE subject_id = ?', [contentVersionId]);
   assert.equal(hist.length, 1);
   assert.equal(hist[0].attempts_in_cycle, 3);
   assert.equal(hist[0].quarantined_at, quarantinedAt);

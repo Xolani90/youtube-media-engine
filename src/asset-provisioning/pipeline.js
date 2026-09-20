@@ -5,15 +5,19 @@ import { deriveVisualQuery } from './visualQuery.js';
 import { validateAcquiredAsset } from './validate.js';
 import { VISUAL_ASSET_TYPES } from '../media/constants.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
+import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, FAILURE_NATURE, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /** Same shape/discipline as every other stage's local logDecision helper. Asset Provisioning never transitions content_versions.state (mirrors Media Production's own discipline), so resultingState is always null here. */
-function logDecision(storage, { runId = null, subjectType, subjectId, decision, reason }, nowISO = () => new Date().toISOString()) {
+function logDecision(storage, { runId = null, subjectType, subjectId, decision, reason, evidence = null }, nowISO = () => new Date().toISOString()) {
   const id = crypto.randomUUID();
+  // `evidence` (optional) is persisted as structured JSON in config_snapshot so
+  // a later classification (A2, Slice 3) can re-read WHY a failure was
+  // dispositioned as it was, without parsing the free-text reason.
   storage.run(
     `INSERT INTO decision_log
       (id, run_id, subject_type, subject_id, decision, reason, provider, config_snapshot, confidence, risk_level, resulting_state, created_at, stage)
-     VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)`,
-    [id, runId, subjectType, subjectId, decision, reason, nowISO(), ASSET_PROVISIONING_STAGE]
+     VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?)`,
+    [id, runId, subjectType, subjectId, decision, reason, evidence ? JSON.stringify(evidence) : null, nowISO(), ASSET_PROVISIONING_STAGE]
   );
   return id;
 }
@@ -64,6 +68,43 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
     return { outcome: OUTCOME.NOT_YET_PRODUCED, reason: contentVersion.state, asset: null };
   }
 
+  // A4 bounded-retry governance: a quarantined content version is refused on
+  // direct invocation too (no provider call is made). Owner-only reactivation
+  // is the sole way out.
+  if (isQuarantined(storage, contentVersion.id, RETRY_STAGE.ASSET_PROVISIONING)) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: 'QUARANTINE_REFUSED', reason: 'asset_provisioning_quarantined_owner_reactivation_required'
+    }, nowISO);
+    return { outcome: OUTCOME.QUARANTINED, reason: 'ASSET_PROVISIONING_QUARANTINED', asset: null };
+  }
+
+  // A4: NO_ASSET_ACQUIRED and INVALID_PROVIDER_RESULT are the two authorized
+  // named outcome CLASSES; they share ONE budget under (ASSET_PROVISIONING,
+  // content_version_id) but only a failure whose evidence establishes an
+  // item-specific, recoverable cause consumes it (see StageRetryPolicy
+  // assessRetryEligibility). One invocation makes at most one provider call
+  // and records at most one attempt - there is no in-invocation retry. The
+  // decision_log entry (with structured evidence), counter increment and (on
+  // the 3rd) quarantine commit in ONE transaction; a persistence error
+  // propagates.
+  const failWith = (outcome, decision, logReason, resultReason, evidence, extra = {}) => {
+    const retry = storage.transaction(() => {
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersion.id, decision, reason: logReason,
+        evidence: { failure: outcome, evidence: evidence ?? null, ...extra }
+      }, nowISO);
+      return recordFailedAttemptIfRetryable(storage, {
+        outcome, evidence,
+        subjectId: contentVersion.id, stage: RETRY_STAGE.ASSET_PROVISIONING, reason: `${outcome}_${logReason}`, runId, nowISO
+      });
+    });
+    return {
+      outcome, ...(resultReason !== undefined ? { reason: resultReason } : {}), asset: null,
+      ...extra, ...retryFields(retry)
+    };
+  };
+
   const repo = new AssetProvenanceRepository(storage);
 
   // Idempotency: if a suitable (visual-type) asset is already attached to
@@ -89,32 +130,53 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
     return { outcome: OUTCOME.NO_VISUAL_CONTEXT, asset: null };
   }
 
+  // Missing provider = CONFIGURATION failure, not an item-specific asset
+  // acquisition failure. It keeps the existing NO_ASSET_ACQUIRED outcome
+  // (no new outcome) but is distinguishable (reason PROVIDER_NOT_CONFIGURED,
+  // configurationFailure: true, structured evidence in decision_log) and can
+  // NEVER consume item retry budget or quarantine content: the runner being
+  // misconfigured says nothing about this content item. Its final disposition
+  // is deferred to Slice 3 (A2/A3).
+  if (typeof provider?.acquireVisualAsset !== 'function') {
+    return failWith(
+      OUTCOME.NO_ASSET_ACQUIRED, DECISION_LOG_DECISION.NO_ASSET_ACQUIRED, 'provider_not_configured', 'PROVIDER_NOT_CONFIGURED',
+      { nature: FAILURE_NATURE.INFRASTRUCTURE, basis: 'asset_provider_not_configured' },
+      { configurationFailure: true, failureKind: 'PROVIDER_NOT_CONFIGURED' }
+    );
+  }
+
   let result;
   try {
     result = await provider.acquireVisualAsset({ query, assetTypes: [...VISUAL_ASSET_TYPES] });
   } catch (err) {
-    logDecision(storage, {
-      runId, subjectType: 'content_version', subjectId: contentVersion.id,
-      decision: DECISION_LOG_DECISION.NO_ASSET_ACQUIRED, reason: `provider_threw_${err.message}`
-    }, nowISO);
-    return { outcome: OUTCOME.NO_ASSET_ACQUIRED, reason: err.message, asset: null };
+    // A provider THROW is not a provider result: the in-repo provider never
+    // throws for operational failures (it returns null), so a throw is a
+    // contract/programming/configuration fault, and nothing here establishes
+    // it is item-specific or transient. It records NO A4 attempt; the error is
+    // preserved as structured evidence for Slice 3's classification.
+    return failWith(
+      OUTCOME.NO_ASSET_ACQUIRED, DECISION_LOG_DECISION.NO_ASSET_ACQUIRED, `provider_threw_${err.message}`, err.message,
+      { nature: FAILURE_NATURE.INFRASTRUCTURE, basis: 'provider_threw_not_a_provider_result' },
+      { failureKind: 'PROVIDER_THREW', providerError: { name: err?.name ?? null, message: err?.message ?? String(err) } }
+    );
   }
 
   if (!result) {
-    logDecision(storage, {
-      runId, subjectType: 'content_version', subjectId: contentVersion.id,
-      decision: DECISION_LOG_DECISION.NO_ASSET_ACQUIRED, reason: 'provider_returned_null'
-    }, nowISO);
-    return { outcome: OUTCOME.NO_ASSET_ACQUIRED, asset: null };
+    // A genuine provider result of "no asset" for this item's query.
+    return failWith(
+      OUTCOME.NO_ASSET_ACQUIRED, DECISION_LOG_DECISION.NO_ASSET_ACQUIRED, 'provider_returned_null', undefined,
+      { nature: FAILURE_NATURE.TRANSIENT, basis: 'provider_returned_no_asset_for_item_query' },
+      { failureKind: 'PROVIDER_RETURNED_NULL' }
+    );
   }
 
   const validation = validateAcquiredAsset(result);
   if (!validation.valid) {
-    logDecision(storage, {
-      runId, subjectType: 'content_version', subjectId: contentVersion.id,
-      decision: DECISION_LOG_DECISION.INVALID_PROVIDER_RESULT, reason: validation.reason
-    }, nowISO);
-    return { outcome: OUTCOME.INVALID_PROVIDER_RESULT, reason: validation.reason, asset: null };
+    return failWith(
+      OUTCOME.INVALID_PROVIDER_RESULT, DECISION_LOG_DECISION.INVALID_PROVIDER_RESULT, validation.reason, validation.reason,
+      { nature: FAILURE_NATURE.TRANSIENT, basis: 'provider_result_failed_validation_for_item' },
+      { failureKind: 'INVALID_PROVIDER_RESULT' }
+    );
   }
 
   // Persist the provider's provenance fields unaltered -- in particular

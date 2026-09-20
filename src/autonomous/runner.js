@@ -60,6 +60,12 @@ import {
 // for Rights Verification, inserted between Asset Provisioning and Media
 // Production per its own frozen contract -- see
 // src/rights-verification/pipeline.js).
+// A4: an item consumes its one automatic retry slot for this invocation only
+// when the stage actually recorded a failed attempt (the stage result carries
+// the recorded `attempt`). Outcomes that record no attempt (excluded outcomes,
+// successes, refusals) never consume the slot, so their behavior is unchanged.
+const recordedFailedAttempt = (result) => Number.isInteger(result?.attempt);
+
 function buildStages(deps, startedMode) {
   const fn = deps.stageFns ?? {};
   return [
@@ -83,6 +89,7 @@ function buildStages(deps, startedMode) {
     {
       name: 'brief',
       select: selectEligibleBriefs,
+      consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn.brief ?? createBrief)({
           storage: deps.storage,
@@ -95,6 +102,7 @@ function buildStages(deps, startedMode) {
     {
       name: 'script',
       select: selectEligibleScripts,
+      consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn.script ?? createScript)({
           storage: deps.storage,
@@ -107,18 +115,21 @@ function buildStages(deps, startedMode) {
     {
       name: 'fact-check',
       select: selectEligibleFactChecks,
+      consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn['fact-check'] ?? runFactCheck)({ storage: deps.storage, contentBriefId: item.contentBriefId, runId })
     },
     {
       name: 'originality',
       select: selectEligibleOriginalityChecks,
+      consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn.originality ?? runOriginalityCheck)({ storage: deps.storage, contentBriefId: item.contentBriefId, runId })
     },
     {
       name: 'quality-gate',
       select: selectEligibleQualityGates,
+      consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn['quality-gate'] ?? runQualityGate)({ storage: deps.storage, contentBriefId: item.contentBriefId, runId })
     },
@@ -140,6 +151,7 @@ function buildStages(deps, startedMode) {
     {
       name: 'asset-provisioning',
       select: selectEligibleAssetProvisioning,
+      consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn['asset-provisioning'] ?? runAssetProvisioning)({
           storage: deps.storage,
@@ -161,6 +173,7 @@ function buildStages(deps, startedMode) {
     {
       name: 'media-production',
       select: selectEligibleMediaProductions,
+      consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn['media-production'] ?? runMediaProduction)({
           storage: deps.storage,
@@ -275,9 +288,10 @@ export async function runAutonomousOperation(deps) {
   // module-global, never persisted): it disappears when this function
   // returns, so the next autonomous invocation starts empty. The durable
   // 3-attempt counter/quarantine (StageRetryPolicy) remains authoritative.
-  // contentBriefId is the runner's item identity; each stage resolves the
-  // single content version for that brief, so it is equivalent to the
-  // counter's content_version_id key.
+  // The runner item identity is contentBriefId for every stage except Brief,
+  // whose items are keyed by researchProjectId (no content brief exists yet).
+  // It is only a pacing key: the durable counter is keyed by each stage's own
+  // (stage, subject_id) identity inside the stage itself.
   const retryConsumed = new Set();
 
   try {
@@ -304,7 +318,7 @@ export async function runAutonomousOperation(deps) {
           // Skip only at execution time; the eligible lists and the
           // signature above are intentionally NOT filtered by this set, so
           // no_work / no_progress semantics are unchanged.
-          const retryKey = `${stage.name}:${item.contentBriefId}`;
+          const retryKey = `${stage.name}:${item.contentBriefId ?? item.researchProjectId}`;
           if (stage.consumedRetryAttempt && retryConsumed.has(retryKey)) continue;
           try {
             const result = await stage.run(item, runId);

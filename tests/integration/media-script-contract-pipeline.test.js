@@ -73,11 +73,17 @@ function makeFakeStorage({ body, imagePath }) {
   const asset = { id: 'asset-1', asset_type: 'image', location: imagePath, checksum: null, verification_status: 'VERIFIED' };
   const decisions = [];
   let mediaArtifact = null;
+  // A4 (bounded-retry governance): Media Production consults and, on its named
+  // failure outcomes, writes stage_retry_state. Modelled minimally here so the
+  // fake keeps whitelisting every query the stage issues.
+  let retryState = null;
 
   const storage = {
     decisions,
     get mediaArtifact() { return mediaArtifact; },
-    get(sql) {
+    get retryState() { return retryState; },
+    get(sql, params = []) {
+      if (/FROM stage_retry_state WHERE subject_id/.test(sql)) return retryState && retryState.subject_id === params[0] && retryState.stage === params[1] ? retryState : undefined;
       if (/FROM content_versions WHERE content_brief_id/.test(sql)) return contentVersion;
       if (/FROM scripts WHERE id/.test(sql)) return script;
       if (/FROM content_briefs WHERE id/.test(sql)) return brief;
@@ -92,6 +98,11 @@ function makeFakeStorage({ body, imagePath }) {
       throw new Error(`fake storage: unexpected all(): ${sql}`);
     },
     run(sql, params = []) {
+      if (/INSERT INTO stage_retry_state/.test(sql)) {
+        const [id, subject_id, stage, last_failure_reason] = params;
+        retryState = { id, subject_id, stage, cycle_number: 1, attempt_count: 1, quarantined_at: null, last_failure_reason };
+        return;
+      }
       if (/INSERT INTO decision_log/.test(sql)) {
         decisions.push({ decision: params[4], reason: params[5], subjectType: params[2], subjectId: params[3] });
         return;
@@ -189,6 +200,13 @@ test('a malformed stored script fails explicitly: nothing is narrated, captioned
     assert.ok(storage.decisions.some(
       (d) => d.decision === 'NARRATION_FAILED' && d.reason === 'script_body_contract_violation_SCRIPT_BODY_MALFORMED_JSON'
     ));
+    // A4: a malformed stored body is deterministic (same body every run), so this named
+    // NARRATION_FAILED outcome consumes NO retry budget and writes no retry state.
+    assert.equal(result.attempt, undefined);
+    assert.deepEqual(result.retryDisposition, {
+      eligible: false, nature: 'DETERMINISTIC', basis: 'script_body_contract_violation_SCRIPT_BODY_MALFORMED_JSON'
+    });
+    assert.equal(storage.retryState, null);
   } finally {
     espeak.restore();
   }

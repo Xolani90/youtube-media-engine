@@ -4,6 +4,7 @@ import { resolveCurrentScript } from './eligibility.js';
 import { parseClaimLinks, resolveResearchProject, resolveClaims, hasApplicableContradiction } from './validate.js';
 import { evaluateDecision } from './decision.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
+import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /**
  * Records a decision_log entry, same shape/discipline as Script's and
@@ -33,17 +34,34 @@ function latestFactCheck(storage, scriptId) {
  * failure (spec §11 / D10), and returns the structured failure the caller
  * is required to receive.
  */
-function structuralFailure(storage, { runId, subjectType, subjectId, reason }, nowISO) {
-  logDecision(storage, {
-    runId,
-    stage: FACT_CHECK_STAGE,
-    subjectType,
-    subjectId,
-    decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE,
-    reason,
-    resultingState: 'SCRIPT_DRAFT'
-  }, nowISO);
-  return { outcome: 'STRUCTURAL_FAILURE', reason, factCheck: null };
+function structuralFailure(storage, { runId, subjectType, subjectId, reason, contentBriefId, evidence }, nowISO) {
+  // A4: STRUCTURAL_FAILURE is a named A4 outcome CLASS, not an automatically
+  // retryable one. It is DETERMINISTIC by default (approved policy): every
+  // current path reports persisted-data state that a re-run cannot change, so
+  // it is logged and returned as before but consumes NO (FACT_CHECK,
+  // content_version_id) budget. A path may only become retryable by passing
+  // `evidence: { nature: 'TRANSIENT', basis }` established by the stage
+  // itself (none does today; formal classification is Slice 3). With no
+  // content_version there is no identity for an attempt, none is fabricated.
+  const contentVersion = storage.get('SELECT id FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+  return storage.transaction(() => {
+    logDecision(storage, {
+      runId,
+      stage: FACT_CHECK_STAGE,
+      subjectType,
+      subjectId,
+      decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE,
+      reason,
+      resultingState: 'SCRIPT_DRAFT'
+    }, nowISO);
+    const result = { outcome: 'STRUCTURAL_FAILURE', reason, factCheck: null };
+    if (!contentVersion) return result;
+    const retry = recordFailedAttemptIfRetryable(storage, {
+      outcome: 'STRUCTURAL_FAILURE', evidence,
+      subjectId: contentVersion.id, stage: RETRY_STAGE.FACT_CHECK, reason: `STRUCTURAL_FAILURE_${reason}`, runId, nowISO
+    });
+    return { ...result, ...retryFields(retry) };
+  });
 }
 
 /**
@@ -62,6 +80,18 @@ function structuralFailure(storage, { runId, subjectType, subjectId, reason }, n
 export function runFactCheck({ storage, contentBriefId, force = false, runId = null }) {
   const nowISO = () => new Date().toISOString();
 
+  // --- A4 bounded-retry governance: a quarantined content version is refused
+  // on direct invocation too (selection filtering is not the only guard).
+  // Owner-only reactivation is the sole way out.
+  const guardCv = storage.get('SELECT id FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+  if (guardCv && isQuarantined(storage, guardCv.id, RETRY_STAGE.FACT_CHECK)) {
+    logDecision(storage, {
+      runId, stage: FACT_CHECK_STAGE, subjectType: 'content_version', subjectId: guardCv.id,
+      decision: 'QUARANTINE_REFUSED', reason: 'fact_check_quarantined_owner_reactivation_required'
+    }, nowISO);
+    return { outcome: 'QUARANTINED', reason: 'FACT_CHECK_QUARANTINED', factCheck: null };
+  }
+
   // --- §4a/§4b: resolve the current Script via content_versions.script_id
   // only. No independent "ORDER BY version DESC" definition of current. ---
   const eligibility = resolveCurrentScript(storage, contentBriefId);
@@ -69,7 +99,7 @@ export function runFactCheck({ storage, contentBriefId, force = false, runId = n
     // No current Script id exists yet to attribute the failure to; log
     // against the content_brief being evaluated instead.
     return structuralFailure(storage, {
-      runId, subjectType: 'content_brief', subjectId: contentBriefId, reason: eligibility.reason
+      runId, subjectType: 'content_brief', subjectId: contentBriefId, reason: eligibility.reason, contentBriefId
     }, nowISO);
   }
   const { script } = eligibility;
@@ -87,7 +117,7 @@ export function runFactCheck({ storage, contentBriefId, force = false, runId = n
   const shape = parseClaimLinks(script);
   if (!shape.valid) {
     return structuralFailure(storage, {
-      runId, subjectType: 'script', subjectId: script.id, reason: shape.reason
+      runId, subjectType: 'script', subjectId: script.id, reason: shape.reason, contentBriefId
     }, nowISO);
   }
 
@@ -96,7 +126,7 @@ export function runFactCheck({ storage, contentBriefId, force = false, runId = n
   const project = resolveResearchProject(storage, script);
   if (!project.resolved) {
     return structuralFailure(storage, {
-      runId, subjectType: 'script', subjectId: script.id, reason: project.reason
+      runId, subjectType: 'script', subjectId: script.id, reason: project.reason, contentBriefId
     }, nowISO);
   }
 
@@ -104,7 +134,7 @@ export function runFactCheck({ storage, contentBriefId, force = false, runId = n
   const claims = resolveClaims(storage, project.researchProjectId, shape.sections);
   if (!claims.valid) {
     return structuralFailure(storage, {
-      runId, subjectType: 'script', subjectId: script.id, reason: claims.reason
+      runId, subjectType: 'script', subjectId: script.id, reason: claims.reason, contentBriefId
     }, nowISO);
   }
 

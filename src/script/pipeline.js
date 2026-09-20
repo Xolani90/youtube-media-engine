@@ -4,6 +4,7 @@ import { checkBriefEligibility } from './eligibility.js';
 import { generateScriptFields, validateGeneratedScript } from './generate.js';
 import { validateScriptClaimReferences, buildClaimLinks } from './claims.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
+import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, FAILURE_NATURE, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /**
  * Records a decision_log entry, same shape/discipline as Brief's and
@@ -58,6 +59,17 @@ export async function createScript({ storage, contentBriefId, llmRouter, policy,
   const existingBeforeGeneration = currentScript(storage, contentBriefId);
   if (existingBeforeGeneration && !regenerate) {
     return { script: existingBeforeGeneration, created: false, regenerated: false, rejected: false };
+  }
+
+  // --- A4 bounded-retry governance: a quarantined brief is refused on direct
+  // invocation too. Identity is (SCRIPT, content_brief_id) - NOT the content
+  // version id. Owner-only reactivation is the sole way out.
+  if (isQuarantined(storage, contentBriefId, RETRY_STAGE.SCRIPT)) {
+    logDecision(storage, {
+      runId, stage: SCRIPT_STAGE.ELIGIBILITY_CHECK, subjectType: 'content_brief',
+      subjectId: contentBriefId, decision: 'QUARANTINE_REFUSED', reason: 'script_quarantined_owner_reactivation_required'
+    });
+    return { outcome: 'QUARANTINED', rejected: true, reason: 'SCRIPT_QUARANTINED', created: false, regenerated: false };
   }
 
   // --- Eligibility gate: Brief must be structurally complete. Script
@@ -117,12 +129,33 @@ export async function createScript({ storage, contentBriefId, llmRouter, policy,
   }
 
   if (!accepted) {
-    logDecision(storage, {
-      runId, stage: SCRIPT_STAGE.GENERATION, subjectType: 'content_brief', subjectId: contentBriefId,
-      decision: 'FAILED', reason: `RETRY_EXHAUSTED_${lastFailureReason}`
+    // A4: this whole createScript() call ending in GENERATION_RETRY_EXHAUSTED is
+    // ONE A4 attempt under (SCRIPT, content_brief_id). A4 is a SEPARATE, autonomous-
+    // invocation-level mechanism: the in-call generation loop above (its own
+    // cap, policy.generation.max_attempts) is UNCHANGED and is neither counted
+    // toward nor reset by A4. Worst case = 3 A4 attempts x the internal cap
+    // (9 provider generations at the default cap of 3): Owner-accepted policy.
+    // Evidence: every internal generation produced output that failed
+    // validation; a later invocation draws fresh generations for this same
+    // item, so the failure is item-specific and recoverable, not deterministic.
+    // Log entry + counter + quarantine commit in ONE transaction.
+    const retry = storage.transaction(() => {
+      logDecision(storage, {
+        runId, stage: SCRIPT_STAGE.GENERATION, subjectType: 'content_brief', subjectId: contentBriefId,
+        decision: 'FAILED', reason: `RETRY_EXHAUSTED_${lastFailureReason}`
+      });
+      return recordFailedAttemptIfRetryable(storage, {
+        outcome: 'GENERATION_RETRY_EXHAUSTED',
+        evidence: { nature: FAILURE_NATURE.TRANSIENT, basis: 'generation_exhausted_output_failed_validation' },
+        subjectId: contentBriefId, stage: RETRY_STAGE.SCRIPT,
+        reason: `GENERATION_RETRY_EXHAUSTED_${lastFailureReason}`, runId
+      });
     });
     // No partial Script, no lifecycle transition, prior Script (if any) untouched.
-    return { rejected: true, reason: `GENERATION_RETRY_EXHAUSTED_${lastFailureReason}`, created: false, regenerated: false, attemptsUsed };
+    return {
+      rejected: true, reason: `GENERATION_RETRY_EXHAUSTED_${lastFailureReason}`, created: false, regenerated: false,
+      attemptsUsed, ...retryFields(retry)
+    };
   }
 
   logDecision(storage, {

@@ -97,7 +97,7 @@ function backgroundWork(storage, count, exclude = []) {
   return { fillers, stageFns, counter, allPublished };
 }
 
-const retryRow = (storage, cv, stage) => storage.get('SELECT * FROM stage_retry_state WHERE content_version_id = ? AND stage = ?', [cv, stage]);
+const retryRow = (storage, cv, stage) => storage.get('SELECT * FROM stage_retry_state WHERE subject_id = ? AND stage = ?', [cv, stage]);
 
 // ---------------------------------------------------------------- Production
 
@@ -324,5 +324,5 @@ test('run-local pacing set is invocation-scoped: not exported, not persisted, no
   assert.match(src, /const retryConsumed = new Set\(\);/);
   assert.equal(/export .*retryConsumed/.test(src), false);
   const migrations = fs.readdirSync('src/db/migrations').filter((f) => f.endsWith('.sql'));
-  assert.equal(migrations.at(-1), '0016_stage_retry_quarantine.sql', 'no new migration was added');
+  assert.equal(migrations.at(-1), '0017_generalize_stage_retry_identity.sql', 'no migration beyond the A4 Slice 1 generalization (0017) was added');
 });

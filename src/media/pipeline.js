@@ -14,6 +14,7 @@ import { validateMediaArtifact } from './validate.js';
 import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
 import { config } from '../config/index.js';
+import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, FAILURE_NATURE, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /** Same shape/discipline as every other stage's local logDecision helper. Media Production never transitions content_versions.state, so resultingState is always null here. */
 function logDecision(storage, { runId = null, subjectType, subjectId, decision, reason }, nowISO = () => new Date().toISOString()) {
@@ -81,6 +82,43 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     return { outcome: OUTCOME.NOT_YET_PRODUCED, reason: contentVersion.state, mediaArtifact: null };
   }
 
+  // A4 bounded-retry governance: a quarantined content version is refused on
+  // direct invocation too (no narration/render work is started). Owner-only
+  // reactivation is the sole way out.
+  if (isQuarantined(storage, contentVersion.id, RETRY_STAGE.MEDIA_PRODUCTION)) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: 'QUARANTINE_REFUSED', reason: 'media_production_quarantined_owner_reactivation_required'
+    }, nowISO);
+    return { outcome: OUTCOME.QUARANTINED, reason: 'MEDIA_PRODUCTION_QUARANTINED', mediaArtifact: null };
+  }
+
+  // A4: NARRATION_FAILED, RENDER_FAILED, VALIDATION_FAILED and
+  // ASSET_CHECKSUM_MISMATCH are the four authorized named outcome CLASSES; they
+  // share ONE budget under (MEDIA_PRODUCTION, content_version_id), but a
+  // failure consumes it only if its evidence establishes a transient,
+  // item-specific cause (see StageRetryPolicy assessRetryEligibility).
+  // ASSET_CHECKSUM_MISMATCH is deterministic by default (stored bytes differ
+  // from the declared checksum: re-checking cannot change that). No site below
+  // currently establishes a transient cause, so every failure is logged and
+  // returned exactly as before, records no attempt, and never quarantines;
+  // formal classification is Slice 3. One invocation ends in at most one
+  // failure and there is no in-invocation retry of any of them. The
+  // decision_log entry and the (eligible-only) counter/quarantine commit in
+  // ONE transaction; a persistence error propagates.
+  const failWith = (outcome, decision, logReason, resultReason, evidence) => {
+    const retry = storage.transaction(() => {
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersion.id, decision, reason: logReason
+      }, nowISO);
+      return recordFailedAttemptIfRetryable(storage, {
+        outcome, evidence,
+        subjectId: contentVersion.id, stage: RETRY_STAGE.MEDIA_PRODUCTION, reason: `${outcome}_${logReason}`, runId, nowISO
+      });
+    });
+    return { outcome, reason: resultReason, mediaArtifact: null, ...retryFields(retry) };
+  };
+
   // Idempotency: one media_artifacts row per content_version (UNIQUE
   // index, mirrors productions' own precedent). Already-rendered ->
   // return the existing record unchanged, never re-render.
@@ -111,12 +149,10 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     if (asset.checksum && fs.existsSync(asset.location)) {
       const actual = sha256File(asset.location);
       if (actual !== asset.checksum) {
-        logDecision(storage, {
-          runId, subjectType: 'content_version', subjectId: contentVersion.id,
-          decision: DECISION_LOG_DECISION.ASSET_CHECKSUM_MISMATCH,
-          reason: `asset_${asset.id}_checksum_mismatch`
-        }, nowISO);
-        return { outcome: OUTCOME.ASSET_CHECKSUM_MISMATCH, reason: `asset_${asset.id}`, mediaArtifact: null };
+        return failWith(
+          OUTCOME.ASSET_CHECKSUM_MISMATCH, DECISION_LOG_DECISION.ASSET_CHECKSUM_MISMATCH,
+          `asset_${asset.id}_checksum_mismatch`, `asset_${asset.id}`
+        );
       }
     }
   }
@@ -131,11 +167,10 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   }
   const missingAsset = visualAssets.find((a) => !fs.existsSync(a.location));
   if (missingAsset) {
-    logDecision(storage, {
-      runId, subjectType: 'content_version', subjectId: contentVersion.id,
-      decision: DECISION_LOG_DECISION.RENDER_FAILED, reason: `missing_asset_file_${missingAsset.id}`
-    }, nowISO);
-    return { outcome: OUTCOME.RENDER_FAILED, reason: `missing_asset_file_${missingAsset.id}`, mediaArtifact: null };
+    return failWith(
+      OUTCOME.RENDER_FAILED, DECISION_LOG_DECISION.RENDER_FAILED,
+      `missing_asset_file_${missingAsset.id}`, `missing_asset_file_${missingAsset.id}`
+    );
   }
 
   // --- Script -> Media contract (B-01 / F-4) ---
@@ -151,11 +186,12 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     narrationText = scriptBodyToNarrationText(script.body);
   } catch (err) {
     if (!(err instanceof ScriptBodyContractError)) throw err;
-    logDecision(storage, {
-      runId, subjectType: 'content_version', subjectId: contentVersion.id,
-      decision: DECISION_LOG_DECISION.NARRATION_FAILED, reason: `script_body_contract_violation_${err.reason}`
-    }, nowISO);
-    return { outcome: OUTCOME.NARRATION_FAILED, reason: err.reason, mediaArtifact: null };
+    return failWith(
+      OUTCOME.NARRATION_FAILED, DECISION_LOG_DECISION.NARRATION_FAILED,
+      `script_body_contract_violation_${err.reason}`, err.reason,
+      // The stored script body is the same on every run: deterministic.
+      { nature: FAILURE_NATURE.DETERMINISTIC, basis: `script_body_contract_violation_${err.reason}` }
+    );
   }
 
   const dir = mediaDir(artifactsDir, contentVersion.id);
@@ -170,11 +206,10 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     narrationDurationSeconds = probeDurationSeconds(narrationPath);
   } catch (err) {
     fs.rmSync(narrationTmpPath, { force: true });
-    logDecision(storage, {
-      runId, subjectType: 'content_version', subjectId: contentVersion.id,
-      decision: DECISION_LOG_DECISION.NARRATION_FAILED, reason: `narration_failed_${err.message}`
-    }, nowISO);
-    return { outcome: OUTCOME.NARRATION_FAILED, reason: err.message, mediaArtifact: null };
+    return failWith(
+      OUTCOME.NARRATION_FAILED, DECISION_LOG_DECISION.NARRATION_FAILED,
+      `narration_failed_${err.message}`, err.message
+    );
   }
 
   // --- Captions (Media Production v1.1) ---
@@ -190,11 +225,10 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     try {
       captionTiming = computeCaptionTiming(captionSegments, narrationDurationSeconds);
     } catch (err) {
-      logDecision(storage, {
-        runId, subjectType: 'content_version', subjectId: contentVersion.id,
-        decision: DECISION_LOG_DECISION.RENDER_FAILED, reason: `caption_timing_failed_${err.message}`
-      }, nowISO);
-      return { outcome: OUTCOME.RENDER_FAILED, reason: err.message, mediaArtifact: null };
+      return failWith(
+        OUTCOME.RENDER_FAILED, DECISION_LOG_DECISION.RENDER_FAILED,
+        `caption_timing_failed_${err.message}`, err.message
+      );
     }
   }
 
@@ -242,11 +276,10 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   } catch (err) {
     fs.rmSync(silentVideoTmpPath, { force: true });
     fs.rmSync(finalVideoTmpPath, { force: true });
-    logDecision(storage, {
-      runId, subjectType: 'content_version', subjectId: contentVersion.id,
-      decision: DECISION_LOG_DECISION.RENDER_FAILED, reason: `render_failed_${err.message}`
-    }, nowISO);
-    return { outcome: OUTCOME.RENDER_FAILED, reason: err.message, mediaArtifact: null };
+    return failWith(
+      OUTCOME.RENDER_FAILED, DECISION_LOG_DECISION.RENDER_FAILED,
+      `render_failed_${err.message}`, err.message
+    );
   } finally {
     fs.rmSync(silentVideoTmpPath, { force: true });
     if (captionsSrtTmpPath) fs.rmSync(captionsSrtTmpPath, { force: true });
@@ -261,11 +294,10 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   });
   if (!validation.valid) {
     fs.rmSync(finalVideoTmpPath, { force: true });
-    logDecision(storage, {
-      runId, subjectType: 'content_version', subjectId: contentVersion.id,
-      decision: DECISION_LOG_DECISION.VALIDATION_FAILED, reason: `validation_failed_${validation.reason}`
-    }, nowISO);
-    return { outcome: OUTCOME.VALIDATION_FAILED, reason: validation.reason, mediaArtifact: null };
+    return failWith(
+      OUTCOME.VALIDATION_FAILED, DECISION_LOG_DECISION.VALIDATION_FAILED,
+      `validation_failed_${validation.reason}`, validation.reason
+    );
   }
 
   // Validated -> promote to the final deterministic path (atomic rename).

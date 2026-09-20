@@ -5,6 +5,7 @@ import { resolveAuthoritativeCoreQuestion } from './coreQuestion.js';
 import { selectEligibleKeyClaims, validateKeyClaimIds } from './claims.js';
 import { generateBriefFields, validateGeneratedBrief } from './generate.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
+import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, FAILURE_NATURE, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /**
  * Records a decision_log entry, same shape/discipline as Research's and
@@ -64,6 +65,18 @@ export async function createBrief({ storage, researchProjectId, llmRouter, polic
   const existing = storage.get('SELECT * FROM content_briefs WHERE research_project_id = ?', [researchProjectId]);
   if (existing && !regenerate) {
     return { brief: existing, created: false, regenerated: false, rejected: false };
+  }
+
+  // --- A4 bounded-retry governance: a quarantined research project is refused
+  // on direct invocation too (selection filtering is not the only guard).
+  // Identity is (BRIEF, research_project_id): no content_version exists yet
+  // and none is ever fabricated. Owner-only reactivation is the sole way out.
+  if (isQuarantined(storage, researchProjectId, RETRY_STAGE.BRIEF)) {
+    logDecision(storage, {
+      runId, stage: BRIEF_STAGE.ELIGIBILITY_CHECK, subjectType: 'research_project',
+      subjectId: researchProjectId, decision: 'QUARANTINE_REFUSED', reason: 'brief_quarantined_owner_reactivation_required'
+    });
+    return { outcome: 'QUARANTINED', rejected: true, reason: 'BRIEF_QUARANTINED', created: false, regenerated: false };
   }
 
   // --- D1: eligibility gate ---
@@ -141,12 +154,33 @@ export async function createBrief({ storage, researchProjectId, llmRouter, polic
   }
 
   if (!accepted) {
-    logDecision(storage, {
-      runId, stage: BRIEF_STAGE.GENERATION, subjectType: 'research_project', subjectId: researchProjectId,
-      decision: 'FAILED', reason: `RETRY_EXHAUSTED_${lastFailureReason}`
+    // A4: this whole createBrief() call ending in GENERATION_RETRY_EXHAUSTED is
+    // ONE A4 attempt under (BRIEF, research_project_id). A4 is a SEPARATE, autonomous-
+    // invocation-level mechanism: the in-call generation loop above (its own
+    // cap, policy.generation.max_attempts) is UNCHANGED and is neither counted
+    // toward nor reset by A4. Worst case = 3 A4 attempts x the internal cap
+    // (9 provider generations at the default cap of 3): Owner-accepted policy.
+    // Evidence: every internal generation produced output that failed
+    // validation; a later invocation draws fresh generations for this same
+    // item, so the failure is item-specific and recoverable, not deterministic.
+    // Log entry + counter + quarantine commit in ONE transaction.
+    const retry = storage.transaction(() => {
+      logDecision(storage, {
+        runId, stage: BRIEF_STAGE.GENERATION, subjectType: 'research_project', subjectId: researchProjectId,
+        decision: 'FAILED', reason: `RETRY_EXHAUSTED_${lastFailureReason}`
+      });
+      return recordFailedAttemptIfRetryable(storage, {
+        outcome: 'GENERATION_RETRY_EXHAUSTED',
+        evidence: { nature: FAILURE_NATURE.TRANSIENT, basis: 'generation_exhausted_output_failed_validation' },
+        subjectId: researchProjectId, stage: RETRY_STAGE.BRIEF,
+        reason: `GENERATION_RETRY_EXHAUSTED_${lastFailureReason}`, runId
+      });
     });
     // No partial Brief, no lifecycle transition, Research state unchanged (D8, D16 failure behavior).
-    return { rejected: true, reason: `GENERATION_RETRY_EXHAUSTED_${lastFailureReason}`, created: false, regenerated: false, attemptsUsed };
+    return {
+      rejected: true, reason: `GENERATION_RETRY_EXHAUSTED_${lastFailureReason}`, created: false, regenerated: false,
+      attemptsUsed, ...retryFields(retry)
+    };
   }
 
   logDecision(storage, {

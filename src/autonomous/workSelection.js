@@ -29,6 +29,15 @@ export function selectEligibleResearch(storage) {
     .map((row) => ({ opportunityId: row.id }));
 }
 
+// A4 bounded-retry governance (Owner-authorized): every A4 selector below
+// additionally skips subjects quarantined for THAT stage only (stage isolation:
+// a quarantine under another stage, or under the same id in another stage,
+// never hides an item). Each stage filters on its own identity - Brief on
+// research_projects.id, Script on content_briefs.id, all others on
+// content_versions.id - matching the (stage, subject_id) retry key. These are
+// pure efficiency pre-filters; every stage also refuses a quarantined subject
+// on direct invocation.
+
 export function selectEligibleBriefs(storage) {
   return storage
     .all(
@@ -37,32 +46,49 @@ export function selectEligibleBriefs(storage) {
        AND id NOT IN (
          SELECT research_project_id FROM content_briefs
          WHERE research_project_id IS NOT NULL
-       )`
+       )
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'BRIEF' AND quarantined_at IS NOT NULL)`
     )
     .map((row) => ({ researchProjectId: row.id }));
 }
 
 export function selectEligibleScripts(storage) {
   return storage
-    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'BRIEF_CREATED'`)
+    .all(
+      `SELECT content_brief_id FROM content_versions
+       WHERE state = 'BRIEF_CREATED'
+       AND content_brief_id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'SCRIPT' AND quarantined_at IS NOT NULL)`
+    )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
 export function selectEligibleFactChecks(storage) {
   return storage
-    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'SCRIPT_DRAFT'`)
+    .all(
+      `SELECT content_brief_id FROM content_versions
+       WHERE state = 'SCRIPT_DRAFT'
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'FACT_CHECK' AND quarantined_at IS NOT NULL)`
+    )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
 export function selectEligibleOriginalityChecks(storage) {
   return storage
-    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'FACT_CHECK'`)
+    .all(
+      `SELECT content_brief_id FROM content_versions
+       WHERE state = 'FACT_CHECK'
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'ORIGINALITY' AND quarantined_at IS NOT NULL)`
+    )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
 export function selectEligibleQualityGates(storage) {
   return storage
-    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'ORIGINALITY_CHECK'`)
+    .all(
+      `SELECT content_brief_id FROM content_versions
+       WHERE state = 'ORIGINALITY_CHECK'
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'QUALITY_GATE' AND quarantined_at IS NOT NULL)`
+    )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
@@ -71,14 +97,18 @@ export function selectEligibleProductions(storage) {
     .all(
       `SELECT content_brief_id FROM content_versions
        WHERE state = 'PRODUCTION_READY'
-       AND id NOT IN (SELECT content_version_id FROM stage_retry_state WHERE stage = 'PRODUCTION' AND quarantined_at IS NOT NULL)`
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'PRODUCTION' AND quarantined_at IS NOT NULL)`
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
 export function selectEligibleMediaProductions(storage) {
   return storage
-    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'PRODUCED'`)
+    .all(
+      `SELECT content_brief_id FROM content_versions
+       WHERE state = 'PRODUCED'
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'MEDIA_PRODUCTION' AND quarantined_at IS NOT NULL)`
+    )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
@@ -94,7 +124,11 @@ export function selectEligibleMediaProductions(storage) {
 // second-guessed here.
 export function selectEligibleAssetProvisioning(storage) {
   return storage
-    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'PRODUCED'`)
+    .all(
+      `SELECT content_brief_id FROM content_versions
+       WHERE state = 'PRODUCED'
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'ASSET_PROVISIONING' AND quarantined_at IS NOT NULL)`
+    )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
@@ -138,7 +172,7 @@ export function selectEligiblePublications(storage) {
       `SELECT content_brief_id FROM content_versions
        WHERE state = 'PRODUCED'
        AND id IN (SELECT content_version_id FROM media_artifacts)
-       AND id NOT IN (SELECT content_version_id FROM stage_retry_state WHERE stage = 'PUBLICATION' AND quarantined_at IS NOT NULL)`
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'PUBLICATION' AND quarantined_at IS NOT NULL)`
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
