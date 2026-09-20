@@ -22,24 +22,32 @@ This file establishes the location going forward: `docs/CHECKPOINTS/`.
 ```
 Repository:  github.com/Xolani90/youtube-media-engine
 Branch:      main
-HEAD:        29cf5cc26cc16ec8a69676211445659616146549
-origin/main: 29cf5cc26cc16ec8a69676211445659616146549
-Commit:      docs(governance): ratify Groq implementation retrospectively
+HEAD:        8e596ecaf9b2af0c6b570169e8478c1243585edf
+origin/main: 8e596ecaf9b2af0c6b570169e8478c1243585edf
+Commit:      docs(governance): reconcile historical provenance and current records
 ```
 
-Verified by direct `git fetch`/`git rev-parse` against the live remote at the
-time this checkpoint was written. The next session MUST re-verify this SHA
+Baseline updated to `8e596ec` by this reconciliation. Previously recorded
+baseline (historical): `29cf5cc26cc16ec8a69676211445659616146549`,
+`docs(governance): ratify Groq implementation retrospectively`. The current
+baseline was verified (HEAD = origin/main, branch `main`, clean working tree,
+`git diff --check` clean) by the post-ADR-0021/0022 audit. The commit that
+carries this checkpoint update will itself follow `8e596ec`.
+
+The previously recorded baseline was verified by direct `git fetch`/`git rev-parse`
+against the live remote at the time this checkpoint was originally written. The next session MUST re-verify this SHA
 before acting on anything below â€” this document records a baseline, it does
 not freeze the remote.
 
 ## 2. Current Architecture State
 
 Autonomous Operation stage order (`src/autonomous/runner.js`,
-`buildStages()`), as of current baseline `699c9b6` (superseding this
-section's prior 9-stage description recorded at the `611abc3` baseline;
-Asset Provisioning and Rights Verification were added via ADR-0013/0014,
-each under separate governance decision, and are not authorized to change
-further without a separate governance decision):
+`buildStages()`), as of current baseline `8e596ec` (previously recorded
+here as `699c9b6`; superseding this section's prior 9-stage description
+recorded at the `611abc3` baseline, which is preserved as ADR-0010's
+historical nine-stage scope; the stage list is not authorized to change
+further without a separate governance decision; see "Authorization
+provenance of the added stages" below):
 
 1. Research
 2. Brief
@@ -52,6 +60,23 @@ further without a separate governance decision):
 9. Rights Verification
 10. Media Production
 11. Publication
+
+Authorization provenance of the added stages (this provenance note was added at
+`8e596ec`; the stages themselves are not claimed to have been added at that
+commit; ADR-0021 and ADR-0022 are the governing records):
+
+- The current runner contains eleven stages in the order listed above.
+  ADR-0010's nine-stage scope remains a historical record and is not rewritten.
+- Rights Verification has surviving authorization through ADR-0013 (sections 4-5),
+  including its insertion between Asset Provisioning and Media Production.
+- Asset Provisioning's original implementation authorization is NOT FOUND in
+  surviving governance records (ADR-0021 sections 3.5 and 4). ADR-0013
+  authorizes Rights Verification only, ADR-0014 retrospectively ratifies
+  `workSelection.js` only, and ADR-0016 covers F5-01 only. The earlier wording
+  that both stages were "added via ADR-0013/0014" is not supported for Asset
+  Provisioning (ADR-0022 section 3.7). "Not found" does not mean "unauthorized".
+- No authorization is inferred from runner presence, source comments, or this
+  checkpoint.
 
 Boundary (Owner-decided, current scope):
 
@@ -77,7 +102,7 @@ config.runMode is LIVE and the action is authorized`):
 - A SIMULATION run cannot reach the external Publication provider even when
   process-global configuration is LIVE.
 
-Test results at this baseline:
+Historical test results recorded at the `9463eb2` baseline (not current verification):
 - Targeted (`autonomous-runner.test.js` + `publication-pipeline.test.js` +
   `side-effect-authorization.test.js`): **46/46 pass**
 - Full suite (`npm test`): **536 tests, 529 pass, 7 fail**
@@ -87,7 +112,7 @@ re-verify the test counts still hold if the baseline SHA has moved.
 
 ## 4. Historical Media Production Failures â€” Reconciled
 
-Seven tests fail at this baseline, all sharing the signature
+Seven tests failed at the historical `9463eb2`-era baseline, all sharing the signature
 `Expected 'RENDERED', got 'NARRATION_FAILED'` (or an equivalent direct
 narration-assertion failure):
 
@@ -99,7 +124,7 @@ narration-assertion failure):
 6. `end-to-end: PRODUCED -> real rendered media artifact -> D-C2 authorized publish -> confirmed PUBLISHED` (fails upstream, before its own Publication/D-C2 assertions are reached)
 7. `synthesizeNarration: produces an audio artifact with a measurable positive duration`
 
-The seven failures recorded at the historical 9463eb2 baseline are retained as historical evidence. They are **not currently reproducible on the current repository state**. Current evidence is **707 tests, 707 pass, 0 fail**, including the narration tests and Media Production integration paths. The `npm test -- --test-name-pattern="synthesizeNarration"` command executed the full suite in this environment rather than reducing the test count. The current `src/media/narration.js` still invokes the intended local narration engine directly, so there is no evidence that the failures were bypassed. The historical root cause therefore remains **inconclusive / not established**. No corrective code change is authorized or warranted from this reconciliation alone. Decision F is satisfied as far as available evidence permits. This does **not** reopen D-C2 and does **not** create an F2 work item.
+The seven failures recorded at the historical 9463eb2 baseline are retained as historical evidence. They were recorded as **not reproducible at the `611abc3`-era reconciliation**, where the recorded evidence was **707 tests, 707 pass, 0 fail**, including the narration tests and Media Production integration paths. That 707/707 figure is preserved as historical evidence and is not a current verification result. The latest audit at `8e596ec` could not re-establish it either way (see section 9.5): the available unit-test execution was 630 tests, 507 passed, 123 environment-level failures, and integration/full-suite verification was not completed in that environment. The `npm test -- --test-name-pattern="synthesizeNarration"` command executed the full suite in this environment rather than reducing the test count. The current `src/media/narration.js` still invokes the intended local narration engine directly, so there is no evidence that the failures were bypassed. The historical root cause therefore remains **inconclusive / not established**. No corrective code change is authorized or warranted from this reconciliation alone. Decision F is satisfied as far as available evidence permits. This does **not** reopen D-C2 and does **not** create an F2 work item.
 
 ## 5. Governance Decisions Already Made (Owner-Confirmed)
 
@@ -110,7 +135,7 @@ The seven failures recorded at the historical 9463eb2 baseline are retained as h
 | C — Discovery specification | C3 — defer reconciliation of missing "v0.6" spec | Complete — `docs/DECISIONS/0010-autonomous-operation-scope-and-discovery-deferral.md` exists | Do not reconstruct v0.6; do not write a replacement spec yet |
 | D — ADR-0005 | D1 — classify `MISSING / UNRECOVERABLE` | Complete — `docs/DECISIONS/0011-adr-0005-provenance-classification.md` exists | Do not reconstruct its contents; must distinguish ADR-0006's summary of outcomes from the actual missing document |
 | E — Publication specification | E3 — defer formal recovery; existing code/tests/ADRs stand as historical evidence only | Complete — `docs/DECISIONS/0012-publication-specification-provenance.md` exists | Do not modify Publication code; do not present inline comments as a reconstructed spec |
-| F — Media Production | RECONCILED — historical failures are not currently reproducible | Historical investigation outcome recorded in §4 | Seven historical failures retained as evidence; current suite is 707/707 pass; root cause remains inconclusive; no corrective implementation is authorized from this reconciliation alone |
+| F — Media Production | RECONCILED — historical failures are not currently reproducible | Historical investigation outcome recorded in §4 | Seven historical failures retained as evidence; the `611abc3`-era reconciliation recorded 707/707 pass (historical, see sections 4 and 9.5); root cause remains inconclusive; no corrective implementation is authorized from this reconciliation alone |
 
 Artifacts 0009â€“0012 already exist in the repository. All four were introduced
 together by commit `cd13085` (`docs: record autonomous operation governance
@@ -142,9 +167,9 @@ checkpoint:
 - Push
 ## 7. Next Session Execution Order
 
-1. The historical `9463eb2` baseline has been reconciled against current repository state `611abc3`; do not treat the historical baseline as the current repository state.
+1. The historical `9463eb2` baseline was reconciled against the then-current repository state `611abc3` (current baseline: `8e596ec`); do not treat the historical baseline as the current repository state.
 2. 0009â€“0012 are already recorded and require no further creation action.
-3. Decision F is satisfied as far as available evidence permits: the seven historical narration/media-production failures are not currently reproducible.
+3. Decision F is satisfied as far as available evidence permits: the seven historical narration/media-production failures were recorded as not reproducible at the `611abc3`-era reconciliation (not re-established by the latest audit's environment; see section 9.5).
 4. Do not reopen those historical failures unless new evidence makes a failure reproducible.
 5. Any future corrective implementation for Media Production requires a separate, explicit Owner authorization based on new evidence.
 
@@ -153,6 +178,64 @@ checkpoint:
 | Category | Items |
 |---|---|
 | **Complete / Closed** | D-C2 mode propagation (`9463eb2`); Publication concurrency/`SQLITE_BUSY_SNAPSHOT` handling; ADRs 0009, 0010, 0011, 0012 (Decisions A, C, D, E); Groq real LLM provider implementation, retrospectively ratified (ADR-0018) |
-| **Historical / reconciled** | Decision F read-only investigation; seven historical narration/media-production failures are not currently reproducible; Groq implementation timing/authorization gap (ADR-0018 â€” implemented before ratification; contemporaneous authorization not established; retrospectively ratified) |
+| **Historical / reconciled** | Decision F read-only investigation; seven historical narration/media-production failures were recorded as not reproducible at `611abc3`; Groq implementation timing/authorization gap (ADR-0018 â€” implemented before ratification; contemporaneous authorization not established; retrospectively ratified) |
 | **Deferred (no timeline set)** | Additional real LLM providers beyond Groq (Gemini, OpenRouter, DeepSeek); `contentId`/cost-identity wiring; `NEEDS_REVIEW` exit transition; performance metrics; learning events; scheduler implementation; Discovery v0.6 spec recovery; Publication v1 spec recovery |
 | **Missing / Unrecoverable** | ADR-0005 (file absent, only ADR-0006's summary of outcomes survives); Discovery "v0.6" spec document; "Autonomous Operation Checkpoint" as previously cited in code comments (this file now fills that role going forward, but does not retroactively reconstruct whatever the code comments originally pointed to) |
+
+## 9. Current Governance State (post-ADR-0022, baseline `8e596ec`)
+
+Sections 1-8 above preserve historical context. This section records the current
+governance state. It is a continuity record and authorizes nothing.
+
+### 9.1 Committed governance records
+
+| Record | Commit | Current status |
+|---|---|---|
+| ADR-0019 - Originality input representation | `506f6f6` | Implementation authorization consumed by `506f6f6`. Its section 6 (Quality Gate version awareness) is CLOSED by ADR-0020. ADR-0019 itself has no back-reference to ADR-0020: a navigational gap only, not a contradiction. ADR-0019 is not edited. |
+| ADR-0020 - Quality Gate Originality version awareness | `a3a33da` (cleanup in `8e596ec`) | Committed. Closes the ADR-0019 section 6 dependency. The Quality Gate implementation is unchanged and version-agnostic: PASS when an `originality_checks` row exists for the Script, BLOCK when none exists; `algorithm_version` is not inspected. |
+| ADR-0021 - Historical implementation authorization provenance reconciliation | `8e596ec` | Committed as a provenance-only record. It does NOT establish authorization for Brief, Script, Quality Gate, Production, Asset Provisioning, Media Production, or the LLM-FIND-01 remediation (`d5b04a9`). It records "authorization evidence not found", not "unauthorized". |
+| ADR-0022 - Current governance record reconciliation | `8e596ec` | Committed as a documentation-only record. It authorizes no implementation. Its section 3.7 lists the stale checkpoint items addressed by this update. |
+
+The in-file Status lines of ADR-0021 and ADR-0022 still read "pending Owner review
+and commit"; they were not edited by this checkpoint update.
+
+### 9.2 Implementation authorization
+
+NO CURRENT IMPLEMENTATION-READY OWNER AUTHORIZATION FOUND.
+
+This checkpoint update is documentation-only and does not authorize implementation.
+
+### 9.3 Open governance items
+
+| Item | Status |
+|---|---|
+| `NEEDS_REVIEW` exit transition | DEFERRED |
+| Gate 2 / `FINAL_COMPLIANCE` | DEFERRED |
+| Scheduler | DEFERRED |
+| Learning / metrics | DEFERRED |
+| Monthly budget | DEFERRED |
+| Discovery | DEFERRED / outside the runner (ADR-0010) |
+| Additional LLM providers | DEFERRED |
+| `contentId` wiring | DEFERRED |
+| Implementation provenance gaps (Brief, Script, Quality Gate, Production, Asset Provisioning, Media Production, LLM-FIND-01 remediation) | GOVERNANCE DECISION REQUIRED for any disposition beyond the recording in ADR-0021 |
+| ADR-0019 -> ADR-0020 back-reference | Navigational gap only |
+| Checkpoint reconciliation (this document) | CURRENT DOCUMENTATION TASK; pending Owner commit/push authorization. Not yet committed. It authorizes no implementation. |
+
+### 9.4 Unrecoverable / not certified (none reconstructed)
+
+- ADR-0005 (see ADR-0011)
+- Research v0.4 (see the Research governance baseline, RG-01)
+- Discovery v0.6 specification (see ADR-0010)
+- Publication v1 specification (see ADR-0012)
+- F2/F2-G original evidence (see ADR-0014 section 7 and ADR-0017 section 7)
+- The original "Autonomous Operation Checkpoint" artifact previously cited in code comments (see section 8)
+
+### 9.5 Latest test evidence (not a full-suite result)
+
+Latest audit at `8e596ec`, run in a Linux environment where the uploaded
+`better-sqlite3` native module is a Windows binary: `node --test tests/unit/*.test.js`
+executed 630 tests, 507 passed, 123 failed. The 123 failures are environment-level:
+122 `better-sqlite3` `invalid ELF header` failures and 1 `espeak-ng` `ENOENT` failure.
+Integration and full-suite verification were not completed in that environment. No
+current full-suite total is asserted here, and this section does not establish or
+refute any historical count recorded above.
