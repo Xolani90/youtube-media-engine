@@ -196,8 +196,7 @@ governance state. It is a continuity record and authorizes nothing.
 | ADR-0021 - Historical implementation authorization provenance reconciliation | `8e596ec` | Committed as a provenance-only record. It does NOT establish authorization for Brief, Script, Quality Gate, Production, Asset Provisioning, Media Production, or the LLM-FIND-01 remediation (`d5b04a9`). It records "authorization evidence not found", not "unauthorized". |
 | ADR-0022 - Current governance record reconciliation | `8e596ec` | Committed as a documentation-only record. It authorizes no implementation. Its section 3.7 lists the stale checkpoint items addressed by this update. |
 
-The in-file Status lines of ADR-0021 and ADR-0022 still read "pending Owner review
-and commit"; they were not edited by this checkpoint update.
+The in-file Status lines of ADR-0021 and ADR-0022 were subsequently reconciled by the documentation-only commit `5317e10`. No implementation authorization was created by that reconciliation.
 
 ### 9.2 Implementation authorization
 
