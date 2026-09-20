@@ -103,6 +103,9 @@ test('5-story feed, topK=2: unselected stories are not re-evaluated inside 24h (
     const first = await h.run({}, T0);
     assert.equal(first.discovery.stats.selected, 2);
     assert.equal(first.discovery.stats.scored, 5);
+    assert.equal(first.discovery.stats.discovered, 5, 'run 1: all 5 observations enter Discovery');
+    const llmAfterRun1 = h.counters.llm;
+    assert.equal(llmAfterRun1, 5, 'run 1: 5 Discovery LLM calls (one per observation)');
     const by = ledgerByGuid(h.storage);
     const outcomes = Object.values(by).map((r) => r.evaluation_outcome).sort();
     assert.deepEqual(outcomes, ['SCORED_NOT_SELECTED', 'SCORED_NOT_SELECTED', 'SCORED_NOT_SELECTED', 'SELECTED', 'SELECTED']);
@@ -114,7 +117,15 @@ test('5-story feed, topK=2: unselected stories are not re-evaluated inside 24h (
 
     // Second run 1h later: only the 3 suppressed identities are out; count evaluation work for the rest.
     const rawBefore = h.counters.rawFeatures;
+    const llmBeforeRun2 = h.counters.llm;
     const second = await h.run({}, T0 + HOUR);
+    assert.equal(second.discovery.stats.discovered, 2, 'run 2: only the 2 previously SELECTED observations are admitted');
+    assert.equal(h.counters.llm - llmBeforeRun2, 2, 'run 2: exactly 2 Discovery LLM calls; the 3 suppressed observations cause none');
+    for (const story of STORIES) {
+      const wasSelected = by[story.guid].evaluation_outcome === 'SELECTED';
+      const rows = h.storage.get('SELECT COUNT(*) n FROM opportunities WHERE title = ?', [story.title]).n;
+      assert.equal(rows, wasSelected ? 2 : 1, `${story.title}: ${wasSelected ? 're-admitted (SELECTED is not suppressed)' : 'suppressed, not re-evaluated'}`);
+    }
     assert.equal(second.discovery.memory.suppressedIdentities, 3);
     assert.equal(second.discovery.stats.discovered, 2, 'only non-suppressed observations enter Discovery');
     assert.equal(h.counters.rawFeatures - rawBefore, 2, 'no feature/LLM work for suppressed stories');
@@ -147,18 +158,37 @@ test('cooldown boundary through the entrypoint: 24h-1ms suppressed, exactly 24h 
   } finally { h.cleanup(); }
 });
 
-test('observations without any deterministic identity pass through every run, unrecorded and unsuppressed', async () => {
+test('observations without any deterministic identity reach Discovery on every run, unsuppressed and unrecorded', async () => {
   const h = harness();
   try {
+    // Blank title, no URL, no sourceId, no feedUrl: deriveIdentity() must return null.
     class NoIdentityFeed extends StaticFeed {
-      normalize() { return { title: '', description: 'a description with enough words to be considered', source: 'test', sourceUrl: null, sourceId: null, discoveredAt: new Date(T0).toISOString() }; }
+      normalize() {
+        return {
+          title: '   ', description: 'A description with enough words to be considered by Discovery.',
+          source: 'test', sourceUrl: null, sourceId: null, discoveredAt: new Date(T0).toISOString()
+        };
+      }
     }
     const src = new NoIdentityFeed([{}]);
-    // may be rejected by Discovery eligibility; the point is that memory neither records nor suppresses it
-    for (const t of [T0, T0 + HOUR]) {
-      try { await h.run({ source: src }, t); } catch { /* Discovery-side outcome is out of scope here */ }
+    const reachedDiscovery = (r) => {
+      const s = r.discovery.stats;
+      return s.dedupRejected + s.eligibilityRejected + s.propositionRejected + s.scored;
+    };
+
+    // No try/catch: any Discovery exception fails the test.
+    for (const t of [T0, T0 + HOUR, T0 + 25 * HOUR]) {
+      const r = await h.run({ source: src }, t);
+      assert.equal(r.discovery.stats.discovered, 1, 'the observation was passed into Discovery');
+      assert.equal(reachedDiscovery(r), 1, 'Discovery processed it to a terminal stage (not silently dropped)');
+      assert.equal(r.discovery.memory.observed, 1);
+      assert.equal(r.discovery.memory.unidentified, 1);
+      assert.equal(r.discovery.memory.identities, 0);
+      assert.equal(r.discovery.memory.suppressedIdentities, 0);
+      assert.equal(r.discovery.memory.suppressedObservations, 0);
+      assert.equal(r.discovery.memory.admittedObservations, 1);
+      assert.equal(count(h.storage, 'discovery_observations'), 0, 'no ledger row is created');
     }
-    assert.equal(count(h.storage, 'discovery_observations'), 0);
   } finally { h.cleanup(); }
 });
 
