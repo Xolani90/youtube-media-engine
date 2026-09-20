@@ -219,7 +219,7 @@ This checkpoint update is documentation-only and does not authorize implementati
 | `contentId` wiring | DEFERRED |
 | Implementation provenance gaps (Brief, Script, Quality Gate, Production, Asset Provisioning, Media Production, LLM-FIND-01 remediation) | GOVERNANCE DECISION REQUIRED for any disposition beyond the recording in ADR-0021 |
 | ADR-0019 -> ADR-0020 back-reference | Navigational gap only |
-| Checkpoint reconciliation (this document) | CURRENT DOCUMENTATION TASK; pending Owner commit/push authorization. Not yet committed. It authorizes no implementation. |
+| Checkpoint reconciliation (this document) | COMPLETED DOCUMENTATION TASK; the checkpoint reconciliation was subsequently committed and pushed at `cb7ec7e`. It was documentation-only, created no implementation authorization, and left the historical authorization state unchanged. |
 
 ### 9.4 Unrecoverable / not certified (none reconstructed)
 

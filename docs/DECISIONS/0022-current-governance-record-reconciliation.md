@@ -1,6 +1,6 @@
 # ADR-0022 — Current Governance Record Reconciliation
 
-**Status:** RECORDED — DOCUMENTATION-ONLY RECONCILIATION RECORD (Owner-authorized documentation task; pending Owner review and commit)
+**Status:** RECORDED — DOCUMENTATION-ONLY RECONCILIATION RECORD (Owner-authorized documentation task; committed at `8e596ec`; does not authorize implementation, does not alter historical records, and infers no missing authorization)
 **Owner:** Xolani Tshabalala
 **Baseline:** `a3a33dac2dc00d53bba94d7954c8f7772bc9d26a`
 **Branch:** `main`
