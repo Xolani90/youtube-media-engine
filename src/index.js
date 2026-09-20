@@ -9,6 +9,7 @@ import { runDiscoveryPipeline } from './discovery/pipeline.js';
 import { runAutonomousOperation } from './autonomous/runner.js';
 import { computeRawFeatures } from './discovery/featureComputation.js';
 import { config } from './config/index.js';
+import { prepareDiscoveryMemory, recordDiscoveryOutcomes } from './autonomous/discoveryMemory.js';
 
 export async function runAutonomousEntrypoint(deps = {}) {
   const ownsStorage = !deps.storage;
@@ -53,19 +54,43 @@ export async function runAutonomousEntrypoint(deps = {}) {
       opportunitySource.normalize(candidate)
     );
 
+    const discoveryPolicy =
+      deps.discovery?.discoveryPolicy ?? config.discoveryPolicy;
+
+    // Discovery Observation Memory Ledger: derive identities, read memory
+    // (fail closed), apply the cooldown policy, and mark admitted
+    // observations NOT_EVALUATED -- BEFORE any Discovery LLM call. Only
+    // currently-eligible observations enter the unmodified pipeline.
+    const memory = prepareDiscoveryMemory({
+      storage,
+      observations,
+      sourceScope: opportunitySource.id ?? null,
+      discoveryPolicy,
+      now: deps.discovery?.now
+    });
+
     const discoveryResult = await runDiscoveryPipeline({
       storage,
       runId: deps.discovery?.runId ?? null,
-      observations,
+      observations: memory.admitted,
       llmRouter,
-      discoveryPolicy:
-        deps.discovery?.discoveryPolicy ?? config.discoveryPolicy,
+      discoveryPolicy,
       scoringWeights:
         deps.discovery?.scoringWeights ?? config.scoringWeights,
       alreadyProducedCorpus:
         deps.discovery?.alreadyProducedCorpus ?? [],
       topK: deps.discovery?.topK ?? config.discoveryTopK,
       rawFeatures
+    });
+
+    // Record outcomes only after Discovery returned successfully. If
+    // Discovery threw, the rows stay NOT_EVALUATED (non-suppressing). A
+    // failed write fails closed: the runner does not start.
+    recordDiscoveryOutcomes({
+      storage,
+      plan: memory.plan,
+      discoveryResult,
+      now: deps.discovery?.now
     });
 
     const runnerResult = await runAutonomousOperation({
@@ -116,6 +141,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
     return {
       discovery: {
         ...discoveryResult,
+        memory: memory.summary,
         failures
       },
       runner: runnerResult

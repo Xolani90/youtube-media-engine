@@ -1,5 +1,8 @@
 {
   "version": "0.1",
+  "reconsideration": {
+    "cooldownHours": 24
+  },
   "thresholds": {
     "dedup": {
       "similarity": {
