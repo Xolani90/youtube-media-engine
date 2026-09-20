@@ -10,6 +10,8 @@ import { runAssetProvisioning } from '../asset-provisioning/pipeline.js';
 import { runRightsVerification } from '../rights-verification/pipeline.js';
 import { runMediaProduction } from '../media/pipeline.js';
 import { runPublication } from '../publication/pipeline.js';
+import { OUTCOME as PRODUCTION_OUTCOME } from '../production/constants.js';
+import { OUTCOME as PUBLICATION_OUTCOME } from '../publication/constants.js';
 import {
   selectEligibleResearch,
   selectEligibleBriefs,
@@ -123,6 +125,10 @@ function buildStages(deps, startedMode) {
     {
       name: 'production',
       select: selectEligibleProductions,
+      // ADR-0023: a Production attempt is one runProduction() call
+      // returning ARTIFACT_WRITE_FAILED; it consumes this item's single
+      // automatic retry slot for the current invocation.
+      consumedRetryAttempt: (result) => result?.outcome === PRODUCTION_OUTCOME.ARTIFACT_WRITE_FAILED,
       run: (item, runId) =>
         (fn.production ?? runProduction)({
           storage: deps.storage,
@@ -175,6 +181,11 @@ function buildStages(deps, startedMode) {
       // run's actual persisted mode (D-C2) instead of silently falling
       // back to process-global config.runMode.
       select: selectEligiblePublications,
+      // ADR-0023: a Publication attempt is one confirmed provider
+      // EXPLICIT_FAILURE persisted as FAILED, surfaced by runPublication()
+      // as OUTCOME.PROVIDER_FAILURE. AMBIGUOUS, AUTHORIZATION_DENIED and
+      // every other outcome deliberately do NOT consume the slot.
+      consumedRetryAttempt: (result) => result?.outcome === PUBLICATION_OUTCOME.PROVIDER_FAILURE,
       run: (item, runId) =>
         (fn.publication ?? runPublication)({
           storage: deps.storage,
@@ -258,6 +269,17 @@ export async function runAutonomousOperation(deps) {
   let sweeps = 0;
   let stopReason = 'no_work';
 
+  // ADR-0023 run-local retry pacing: keys `${stage.name}:${contentBriefId}`
+  // of items that have already consumed their one automatic retry attempt
+  // in THIS invocation. Deliberately in-memory and invocation-scoped (never
+  // module-global, never persisted): it disappears when this function
+  // returns, so the next autonomous invocation starts empty. The durable
+  // 3-attempt counter/quarantine (StageRetryPolicy) remains authoritative.
+  // contentBriefId is the runner's item identity; each stage resolves the
+  // single content version for that brief, so it is equivalent to the
+  // counter's content_version_id key.
+  const retryConsumed = new Set();
+
   try {
     let previousSignature = null;
 
@@ -279,9 +301,15 @@ export async function runAutonomousOperation(deps) {
 
       for (const { stage, items } of sweepEligible) {
         for (const item of items) {
+          // Skip only at execution time; the eligible lists and the
+          // signature above are intentionally NOT filtered by this set, so
+          // no_work / no_progress semantics are unchanged.
+          const retryKey = `${stage.name}:${item.contentBriefId}`;
+          if (stage.consumedRetryAttempt && retryConsumed.has(retryKey)) continue;
           try {
-            await stage.run(item, runId);
+            const result = await stage.run(item, runId);
             processed.set(stage.name, processed.get(stage.name) + 1);
+            if (stage.consumedRetryAttempt?.(result)) retryConsumed.add(retryKey);
           } catch (err) {
             if (onStageError) {
               onStageError(stage.name, item, err);
