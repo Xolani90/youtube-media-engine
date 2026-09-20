@@ -226,7 +226,16 @@ test('ledger write failure after Discovery fails closed: the entrypoint throws a
     h.storage.run(`CREATE TRIGGER fail_outcome BEFORE UPDATE OF evaluation_outcome ON discovery_observations
                     WHEN NEW.evaluation_outcome != 'NOT_EVALUATED' BEGIN SELECT RAISE(ABORT, 'ledger write denied'); END`);
     await assert.rejects(h.run({}, T0), /discovery memory outcomes could not be written/);
-    assert.equal(count(h.storage, 'system_runs'), 0, 'runner did not start');
+    // ADR-0024: the whole-entrypoint single-run guard is acquired BEFORE
+    // Discovery, so the entrypoint's one system_runs row now exists when the
+    // post-Discovery ledger write fails. The original intent -- "the runner
+    // never started" -- is preserved by asserting that the acquired run was
+    // released as FAILED with the ledger error and that no runner work ran.
+    const runs = h.storage.all('SELECT status, stop_reason FROM system_runs');
+    assert.equal(runs.length, 1, 'exactly the entrypoint-acquired run row exists');
+    assert.equal(runs[0].status, 'FAILED', 'the guard is released as FAILED');
+    assert.match(runs[0].stop_reason, /discovery memory outcomes could not be written/);
+    assert.equal(count(h.storage, 'research_projects'), 0, 'runner did not start: no stage work ran');
     assert.ok(h.storage.all('SELECT * FROM discovery_observations').every((r) => r.evaluation_outcome === 'NOT_EVALUATED'));
   } finally { h.cleanup(); }
 });

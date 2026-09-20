@@ -10,13 +10,78 @@ import { runAutonomousOperation } from './autonomous/runner.js';
 import { computeRawFeatures } from './discovery/featureComputation.js';
 import { config } from './config/index.js';
 import { prepareDiscoveryMemory, recordDiscoveryOutcomes } from './autonomous/discoveryMemory.js';
+import { SystemRunRecorder, assertRunAllowed, AUTONOMOUS_RUN_ACTIVE } from './state/SystemRun.js';
 
+/**
+ * Process exit code used when an invocation is REFUSED because another
+ * autonomous invocation holds the single-run guard (ADR-0024). Distinct from
+ * 0 (ran) and 1 (failed); nothing retries automatically.
+ */
+export const REFUSED_EXIT_CODE = 3;
+
+/**
+ * THE canonical autonomous entrypoint and the single-run protection boundary
+ * (ADR-0024). One autonomous invocation may be active at a time:
+ *
+ *   migrate -> ACQUIRE guard (atomic, fail fast) -> Discovery RSS fetch
+ *   -> Discovery Memory Ledger -> Discovery pipeline -> outcome recording
+ *   -> runAutonomousOperation (all sweeps) -> RELEASE (COMPLETED / FAILED)
+ *
+ * The guard is the system_runs RUNNING row. It is acquired before ANY
+ * Discovery/ledger work and released only by finish(). If the guard is held
+ * the invocation is REFUSED: nothing after acquisition executes, no
+ * system_runs row is created, and this function RETURNS
+ * `{ refused: true, reason: 'AUTONOMOUS_RUN_ACTIVE', ... }` (it does not
+ * throw). A crashed run leaves its RUNNING row, which is never inferred
+ * stale; only explicit Owner reclamation (reclaimOrphanedRun) clears it.
+ *
+ * migrate() runs before acquisition because the guard lives in the database
+ * schema. Concurrent FIRST-TIME migrations on a brand-new database are
+ * outside this guard (pre-existing behavior; steady-state migrate is a no-op).
+ *
+ * Direct callers of runAutonomousOperation() (tests/helpers) are outside this
+ * contract and are not protected by it. deps.systemRunRecorder is not honored
+ * here: the entrypoint owns the run lifecycle.
+ */
 export async function runAutonomousEntrypoint(deps = {}) {
   const ownsStorage = !deps.storage;
   const storage = deps.storage ?? createStorage();
+  const recorder = new SystemRunRecorder(storage);
+  let guard = null;
+  let released = false;
 
   try {
     await storage.migrate();
+
+    const acquisition = recorder.acquireExclusive({ mode: deps.mode });
+    if (!acquisition.acquired) {
+      return {
+        refused: true,
+        reason: AUTONOMOUS_RUN_ACTIVE,
+        activeRuns: acquisition.activeRuns,
+        recorded: recorder.recordRefusal(acquisition),
+        discovery: null,
+        runner: null
+      };
+    }
+    guard = acquisition;
+
+    // The runner is handed the ALREADY-ACQUIRED run, so one invocation has
+    // exactly one system_runs row. start() keeps the original Owner-override
+    // ordering (assertRunAllowed at runner start, after Discovery); finish()
+    // is the single release path.
+    const guardedRecorder = {
+      start: () => {
+        assertRunAllowed({ mode: guard.mode });
+        return { id: guard.id, mode: guard.mode };
+      },
+      finish: (runId, opts) => {
+        const changes = recorder.finish(runId, opts);
+        released = true;
+        return changes;
+      },
+      logDecision: (runId, entry) => recorder.logDecision(runId, entry)
+    };
 
     const llmRouter =
       deps.llmRouter ??
@@ -96,6 +161,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
     const runnerResult = await runAutonomousOperation({
       ...deps,
       storage,
+      systemRunRecorder: guardedRecorder,
       llmRouter,
       researchPolicy: deps.researchPolicy ?? config.researchPolicy,
       // RG-02: the production path must actually receive a concrete
@@ -146,6 +212,19 @@ export async function runAutonomousEntrypoint(deps = {}) {
       },
       runner: runnerResult
     };
+  } catch (err) {
+    // Any failure after acquisition (Discovery, ledger, Owner override, the
+    // runner) must release the guard as FAILED. If the runner already
+    // released it, this is skipped. If release itself cannot be written the
+    // RUNNING row remains and the next invocation refuses (fail closed).
+    if (guard && !released) {
+      try {
+        recorder.finish(guard.id, { status: 'FAILED', stopReason: err.message });
+      } catch {
+        // fail closed: RUNNING evidence stays for Owner reclamation
+      }
+    }
+    throw err;
   } finally {
     if (ownsStorage) {
       storage.close();
@@ -157,6 +236,17 @@ async function main() {
   // No deps.discovery.rawFeatures supplied: runAutonomousEntrypoint falls
   // back to the production feature-computation function (M2).
   const result = await runAutonomousEntrypoint({});
+
+  if (result.refused) {
+    const ids = result.activeRuns.map((r) => r.id).join(', ') || 'unknown';
+    console.error(
+      `Autonomous entrypoint REFUSED: ${result.reason} (active run(s): ${ids}). ` +
+      'Nothing was executed. If that run crashed, the Owner may reclaim it with ' +
+      'scripts/reclaim-autonomous-run.js.'
+    );
+    process.exitCode = REFUSED_EXIT_CODE;
+    return;
+  }
 
   console.log(
     `Autonomous entrypoint complete: discovered=${result.discovery.stats.discovered}, ` +

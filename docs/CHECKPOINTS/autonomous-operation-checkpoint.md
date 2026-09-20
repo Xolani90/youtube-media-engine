@@ -238,3 +238,22 @@ executed 630 tests, 507 passed, 123 failed. The 123 failures are environment-lev
 Integration and full-suite verification were not completed in that environment. No
 current full-suite total is asserted here, and this section does not establish or
 refute any historical count recorded above.
+
+### 9.6 Autonomous single-run protection (ADR-0024; baseline `7f96213`)
+
+Update recorded after the Owner-authorized single-run implementation. It records
+status only and authorizes nothing further.
+
+| Item | Status |
+|---|---|
+| Single active autonomous invocation, whole-entrypoint protection, fail-fast refusal | IMPLEMENTED (ADR-0024). Guard is the `system_runs` `RUNNING` row, acquired atomically before Discovery; no migration. |
+| Stale / orphaned runs | Never expired automatically. Cleared only by explicit Owner reclamation (`scripts/reclaim-autonomous-run.js`); evidence preserved. |
+| Supported topology | One host, local SQLite, multiple local processes. Multi-host / distributed locking: OUT OF SCOPE. |
+| Direct `runAutonomousOperation()` callers | Outside the entrypoint guard (documented boundary). |
+| Brief `UNIQUE` on `content_briefs` | NOT added (separate data-integrity workstream; RG-05 Finding 4 unchanged). |
+| Scheduler | Still DEFERRED and NOT authorized; this record does not enable continuous autonomy. |
+| Multi-host support, automatic stale-run recovery, LIVE publication | NOT implemented, NOT enabled. |
+
+The claim in section 9.2 that no implementation-ready authorization existed
+described the state at `8e596ec`; the ADR-0024 authorization is consumed by its
+implementation commit.
