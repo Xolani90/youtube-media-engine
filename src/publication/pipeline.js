@@ -5,7 +5,9 @@ import { resolveMediaForPublication } from './eligibility.js';
 import { buildPublicationRequest } from './PublicationRequest.js';
 import { resolveProvider } from './providerRegistry.js';
 import { assertExternalActionAllowed, SideEffectDeniedError } from '../state/SideEffectAuthorization.js';
-import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
+import { canTransition, transition } from '../state/ContentStateMachine.js';
+import { verifyGate2Pass } from '../compliance/verify.js';
+import { Gate2PolicyLoadError } from '../compliance/policy.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
 import { isQuarantined, recordFailedAttempt, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
@@ -47,8 +49,11 @@ function visibilityMismatchResult(row, reason = 'previously_visibility_mismatch_
  * runner stage order (ADR-0010), with the run's mode (D-C2) propagated
  * into assertExternalActionAllowed() as documented at the call site.
  *
- * This is the ONLY place PRODUCED -> PUBLISHED is transitioned, and only
- * after a confirmed provider SUCCESS result (see step 7 below).
+ * This is the ONLY place FINAL_COMPLIANCE -> PUBLISHED is transitioned, and
+ * only after a confirmed provider SUCCESS result (see step 7 below). There is
+ * no PRODUCED -> PUBLISHED path (ADR-0032): Gate 2 is verified independently
+ * here at the publication boundary (step 4.7) for every attempt that could
+ * reach the provider, so calling this function directly cannot bypass it.
  *
  * Provider-neutral core: this function knows nothing about YouTube. It
  * resolves a PublicationProvider via ../publication/providerRegistry.js
@@ -99,13 +104,17 @@ export async function runPublication({
   }
   const { contentVersion, script, contentBrief, mediaArtifact } = eligibility;
 
-  // --- 2. Lifecycle precondition: the only legal entry state is
-  // PRODUCED (mirrors Production MVP's own "only legal entry point"
-  // check). content_version.state === 'PUBLISHED' already is reported
-  // via the existing-publication check below instead, since a
-  // media_artifacts row + PUBLISHED state is the normal steady state
-  // after a successful prior run, not a structural problem. ---
-  if (contentVersion.state !== 'PRODUCED' && contentVersion.state !== 'PUBLISHED') {
+  // --- 2. Lifecycle precondition. States that could still be relevant to
+  // an existing publication record are let through so the short-circuits
+  // below (PUBLISHED / AMBIGUOUS / VISIBILITY_MISMATCH / PENDING /
+  // quarantine) behave exactly as before: PUBLISHED (a media_artifacts row +
+  // PUBLISHED state is the normal steady state after a successful prior run),
+  // FINAL_COMPLIANCE (ADR-0032: the only state from which an upload may
+  // proceed) and PRODUCED (legacy items whose publication record may already
+  // be AMBIGUOUS / VISIBILITY_MISMATCH / PENDING). Admitting PRODUCED here does
+  // NOT let it publish: step 4.7 (Gate 2) requires FINAL_COMPLIANCE and a
+  // currently valid PASS before authorization, the claim or the provider. ---
+  if (contentVersion.state !== 'PRODUCED' && contentVersion.state !== 'FINAL_COMPLIANCE' && contentVersion.state !== 'PUBLISHED') {
     logDecision(storage, {
       runId, subjectType: 'content_version', subjectId: contentVersion.id,
       decision: DECISION_LOG_DECISION.INELIGIBLE_STATE, reason: `not_eligible_from_state_${contentVersion.state}`
@@ -203,6 +212,37 @@ export async function runPublication({
       reason: `asset_${unsafeAsset.id}_verification_status_${unsafeAsset.verification_status}`
     }, nowISO);
     return { outcome: OUTCOME.ASSET_RIGHTS_BLOCKED, reason: unsafeAsset.verification_status, publication: null };
+  }
+
+  // --- 4.7. ADR-0032 Gate 2 / FINAL_COMPLIANCE publication-boundary
+  // verification. Runs AFTER every existing short-circuit (step 3), the media
+  // file check (step 4) and the publication-time rights re-read (step 4.5), and
+  // BEFORE D-C2 authorization, the durable PENDING claim and any provider call,
+  // so it covers every attempt capable of reaching the provider -- including
+  // reclaim of a FAILED row. It independently re-verifies the newest compliance
+  // record, all bindings, the actual file checksum, the fresh policy pack and
+  // the evidence references (see compliance/verify.js). It is read-only: it
+  // never repairs or regenerates compliance, never transitions state, never
+  // consumes retry budget, and a refusal here is not a BLOCK/NEEDS_REVIEW/FAILED
+  // (a non-authorizing PASS is simply not authorizing). ---
+  let gate2;
+  try {
+    gate2 = verifyGate2Pass(storage, contentVersion.id);
+  } catch (err) {
+    if (!(err instanceof Gate2PolicyLoadError)) throw err;
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.GATE2_POLICY_LOAD_FAILURE, reason: `${err.code}: ${err.message}`
+    }, nowISO);
+    return { outcome: OUTCOME.GATE2_POLICY_LOAD_FAILURE, reason: err.code, publication: null };
+  }
+  if (!gate2.authorizing) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.GATE2_NOT_AUTHORIZING,
+      reason: `gate2_pass_non_authorizing_${gate2.reason}${gate2.detail ? `_${gate2.detail}` : ''}`
+    }, nowISO);
+    return { outcome: OUTCOME.GATE2_NOT_AUTHORIZING, reason: gate2.reason, publication: null };
   }
 
   // --- 5. D-C2 external side-effect authorization. Checked immediately
@@ -460,7 +500,7 @@ export async function runPublication({
   // factual evidence, together with the item id/url so the Owner can
   // reconcile manually. Deliberately NOT done here: no
   // recordFailedAttempt() (no retry budget, no quarantine), no
-  // content_versions transition (stays PRODUCED), no provider_item_id /
+  // content_versions transition (stays FINAL_COMPLIANCE), no provider_item_id /
   // provider_url columns (documented as set only on PUBLISHED), no
   // follow-up call to change visibility, no second upload, no AMBIGUOUS.
   // A missing confirmed visibility fails closed the same way: PUBLIC was
@@ -488,10 +528,15 @@ export async function runPublication({
   const published = storage.transaction(() => {
     const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersion.id]);
     let resultingState = cv.state;
-    if (cv.state === 'PRODUCED') {
-      if (!canTransition(cv.state, 'PUBLISHED')) {
-        throw new InvalidTransitionError(`${cv.state} -> PUBLISHED is not a valid transition`);
-      }
+    // ADR-0032 s16: FINAL_COMPLIANCE -> PUBLISHED is the successful-publication
+    // transition (Gate 2 already verified it above, before the claim). This
+    // block must NEVER throw: the provider has already CONFIRMED the upload, so
+    // a local state-machine rejection here would leave a confirmed upload
+    // unrecorded (the row stuck PENDING). FINAL_COMPLIANCE -> PUBLISHED is
+    // always legal, so the guard below is belt-and-braces; if the state is
+    // anything else (it cannot be, barring an out-of-band state edit) the
+    // external truth is still recorded and the state is left exactly as it is.
+    if (cv.state === 'FINAL_COMPLIANCE' && canTransition(cv.state, 'PUBLISHED')) {
       resultingState = transition(cv.state, 'PUBLISHED');
       storage.run('UPDATE content_versions SET state = ? WHERE id = ?', [resultingState, cv.id]);
     }

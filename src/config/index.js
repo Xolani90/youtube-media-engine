@@ -109,6 +109,12 @@ export const config = {
   // src/state/SideEffectAuthorization.js reads it fresh on every check.
   authorizedExternalActionsPath: path.join(REPO_ROOT, 'config', 'authorized_external_actions.json'),
 
+  // ADR-0032 (Gate 2 / FINAL_COMPLIANCE): path to the versioned Gate 2 policy
+  // pack. Deliberately NOT loaded/cached here -- src/compliance/policy.js reads
+  // it fresh on every Gate 2 evaluation and every publication-boundary
+  // verification (mirrors authorizedExternalActionsPath above).
+  gate2PolicyPath: path.join(REPO_ROOT, 'config', 'gate2_policy.json'),
+
   storageDriver: process.env.STORAGE_DRIVER || 'sqlite',
   sqlitePath: process.env.SQLITE_PATH || path.join(REPO_ROOT, 'data', 'media-engine.db'),
 

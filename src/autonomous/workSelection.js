@@ -149,6 +149,24 @@ export function selectEligibleRightsVerification(storage) {
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
+// ADR-0032 (Gate 2 / FINAL_COMPLIANCE): the final-compliance stage's selection
+// domain -- (A) PRODUCED items that have a media artifact, and (B)
+// FINAL_COMPLIANCE items (whose PASS may have gone stale). This is an
+// efficiency pre-filter ONLY: whether a PASS is currently valid needs a fresh
+// policy read, an actual file checksum and current bindings, so the stage
+// itself (src/compliance/pipeline.js) is the sole authority and returns
+// ALREADY_VALID for a FINAL_COMPLIANCE item that needs nothing. No grandfathering:
+// every qualifying PRODUCED item with a media artifact is selected.
+export function selectEligibleFinalCompliance(storage) {
+  return storage
+    .all(
+      `SELECT content_brief_id FROM content_versions
+       WHERE state IN ('PRODUCED', 'FINAL_COMPLIANCE')
+       AND id IN (SELECT content_version_id FROM media_artifacts)`
+    )
+    .map((row) => ({ contentBriefId: row.content_brief_id }));
+}
+
 export function selectEligiblePublications(storage) {
   // Publication's own structural eligibility (src/publication/eligibility.js,
   // resolveMediaForPublication) additionally requires an existing
@@ -171,10 +189,14 @@ export function selectEligiblePublications(storage) {
   // unchanged. An AMBIGUOUS attempt is also still selected -- Publication's
   // own guard (never auto-retried, §4) is what makes a redundant call
   // safe: it no-ops rather than mis-selecting.
+  //
+  // ADR-0032: publication now selects FINAL_COMPLIANCE items (a Gate 2 PASS
+  // moved them there). A PRODUCED item can never be published: it is not
+  // selected here, and the publication boundary independently rejects it.
   return storage
     .all(
       `SELECT content_brief_id FROM content_versions
-       WHERE state = 'PRODUCED'
+       WHERE state = 'FINAL_COMPLIANCE'
        AND id IN (SELECT content_version_id FROM media_artifacts)
        AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'PUBLICATION' AND quarantined_at IS NOT NULL)
        AND id NOT IN (SELECT content_version_id FROM publications WHERE status = 'FAILED' AND failure_reason = 'VISIBILITY_MISMATCH')`

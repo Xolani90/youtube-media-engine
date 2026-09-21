@@ -1,0 +1,11 @@
+{
+  "policy_id": "gate2-final-compliance",
+  "version": "1.0.0",
+  "rules": [
+    { "id": "GC-001", "name": "FINAL_MEDIA_INTEGRITY" },
+    { "id": "GC-002", "name": "ASSET_RIGHTS" },
+    { "id": "GC-003", "name": "FINAL_METADATA_PRESENCE" },
+    { "id": "GC-004", "name": "SCRIPT_MEDIA_CONSISTENCY" },
+    { "id": "GC-005", "name": "EXISTING_PROVENANCE" }
+  ]
+}

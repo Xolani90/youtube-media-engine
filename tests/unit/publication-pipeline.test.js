@@ -11,6 +11,7 @@ import { PublicationProvider } from '../../src/publication/PublicationProvider.j
 import { PUBLICATION_RESULT_STATUS } from '../../src/publication/constants.js';
 import { AssetProvenanceRepository } from '../../src/state/AssetProvenance.js';
 import { config } from '../../src/config/index.js';
+import { passGate2, prepareGate2Evidence, runGate2, recordVerification } from '../helpers/gate2.js';
 
 /**
  * These tests exercise the provider-neutral core only, via a mock
@@ -41,7 +42,12 @@ function nowISO() {
   return new Date().toISOString();
 }
 
-function seedFullyEligibleContent(storage, { mediaFilePath }) {
+// ADR-0032: by default the fixture is a content item that has already passed
+// Gate 2 through the REAL final-compliance stage (PRODUCED -> FINAL_COMPLIANCE),
+// which is the only state from which publication may proceed. `gate2: false`
+// leaves it PRODUCED with no compliance record (the legacy / not-yet-evaluated
+// shape). Gate 2 needs the artifact file to exist so its checksum can be bound.
+function seedFullyEligibleContent(storage, { mediaFilePath, gate2 = true }) {
   const opportunityId = crypto.randomUUID();
   storage.run(`INSERT INTO opportunities (id, title, source, discovered_at, status) VALUES (?, 'T', 'rss', ?, 'DISCOVERED')`, [opportunityId, nowISO()]);
   const contentBriefId = crypto.randomUUID();
@@ -72,6 +78,7 @@ function seedFullyEligibleContent(storage, { mediaFilePath }) {
      VALUES (?, ?, ?, '{}', 'chk', '/tmp/n.wav', 5.0, ?, 'chk2', 5.0, 1280, 720, 'h264', 'aac', ?)`,
     [mediaArtifactId, productionId, contentVersionId, mediaFilePath, nowISO()]
   );
+  if (gate2 && fs.existsSync(mediaFilePath)) passGate2(storage, contentVersionId);
   return { contentBriefId, contentVersionId, mediaArtifactId };
 }
 
@@ -80,6 +87,10 @@ function seedAsset(storage, contentVersionId, verificationStatus) {
   const repo = new AssetProvenanceRepository(storage);
   const assetId = repo.recordAsset({ assetType: 'image', location: '/tmp/not-read-by-publication.png', verificationStatus });
   repo.recordUsage({ assetId, contentVersionId, usageContext: 'b-roll' });
+  // ADR-0032: Gate 2 GC-002 reads the append-only asset_verifications history,
+  // not the cache column, so a VERIFIED/DISPUTED fixture asset also gets the
+  // matching history row (mirroring what Rights Verification persists).
+  if (verificationStatus === 'VERIFIED' || verificationStatus === 'DISPUTED') recordVerification(storage, assetId, verificationStatus);
   return assetId;
 }
 
@@ -155,7 +166,7 @@ test('AUTHORIZATION_DENIED when D-C2 denies (SIMULATION default) -- adapter neve
   cleanup(storage, dbPath, videoFile);
 });
 
-test('confirmed SUCCESS: persists a PUBLISHED row and transitions PRODUCED -> PUBLISHED', async () => {
+test('confirmed SUCCESS: persists a PUBLISHED row and transitions FINAL_COMPLIANCE -> PUBLISHED', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
   const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
@@ -200,7 +211,7 @@ test('idempotency: a second invocation after confirmed PUBLISHED returns the exi
   cleanup(storage, dbPath, videoFile);
 });
 
-test('explicit provider failure: content_version remains PRODUCED, no lifecycle transition, safe to retry later', async () => {
+test('explicit provider failure: content_version remains FINAL_COMPLIANCE, no lifecycle transition, safe to retry later', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
   const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
@@ -215,7 +226,7 @@ test('explicit provider failure: content_version remains PRODUCED, no lifecycle 
   assert.equal(result.outcome, 'PROVIDER_FAILURE');
   assert.equal(result.publication.status, 'FAILED');
   const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
-  assert.equal(cv.state, 'PRODUCED');
+  assert.equal(cv.state, 'FINAL_COMPLIANCE');
 
   cleanup(storage, dbPath, videoFile);
 });
@@ -233,7 +244,7 @@ test('ambiguous provider result: no transition, never blindly retried on the nex
     assert.equal(first.outcome, 'AMBIGUOUS');
 
     const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
-    assert.equal(cv.state, 'PRODUCED');
+    assert.equal(cv.state, 'FINAL_COMPLIANCE');
 
     const adapter2 = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'x', providerUrl: 'y' });
     const second = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: adapter2 });
@@ -642,7 +653,7 @@ test('FAILED can be retried successfully: same row is reused, provider called ex
   cleanup(storage, dbPath, videoFile);
 });
 
-test('FAILED retry can fail again: status remains FAILED, content_version remains PRODUCED, no duplicate row', async () => {
+test('FAILED retry can fail again: status remains FAILED, content_version remains FINAL_COMPLIANCE, no duplicate row', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
   const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
@@ -670,12 +681,12 @@ test('FAILED retry can fail again: status remains FAILED, content_version remain
   assert.equal(rows[0].attempt_count, 2);
 
   const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
-  assert.equal(cv.state, 'PRODUCED');
+  assert.equal(cv.state, 'FINAL_COMPLIANCE');
 
   cleanup(storage, dbPath, videoFile);
 });
 
-test('FAILED retry can become ambiguous: status becomes AMBIGUOUS, content_version remains PRODUCED, no automatic third attempt', async () => {
+test('FAILED retry can become ambiguous: status becomes AMBIGUOUS, content_version remains FINAL_COMPLIANCE, no automatic third attempt', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
   const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
@@ -710,7 +721,7 @@ test('FAILED retry can become ambiguous: status becomes AMBIGUOUS, content_versi
   assert.equal(rows[0].status, 'AMBIGUOUS');
 
   const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
-  assert.equal(cv.state, 'PRODUCED');
+  assert.equal(cv.state, 'FINAL_COMPLIANCE');
 
   cleanup(storage, dbPath, videoFile);
 });
@@ -878,6 +889,9 @@ test('VERIFIED asset: publication proceeds through to the provider call as befor
   fs.writeFileSync(videoFile, 'fake mp4 bytes');
   const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
   seedAsset(storage, contentVersionId, 'VERIFIED');
+  // The attached asset changes the Gate 2 evidence set, so the earlier PASS is
+  // stale (non-authorizing); the final-compliance stage re-evaluates it.
+  assert.equal(runGate2(storage, contentVersionId).decision, 'PASS');
 
   const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
     const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vid-verified', providerUrl: 'https://youtu.be/vid-verified' });
@@ -913,7 +927,7 @@ test('UNVERIFIED asset: ASSET_RIGHTS_BLOCKED, adapter never called, no publicati
   assert.equal(storage.get('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]), undefined);
 
   const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
-  assert.equal(cv.state, 'PRODUCED', 'content_version.state is left unchanged on a rights block (mirrors Media Production, not Production)');
+  assert.equal(cv.state, 'FINAL_COMPLIANCE', 'content_version.state is left unchanged on a rights block (mirrors Media Production, not Production)');
 
   cleanup(storage, dbPath, videoFile);
 });
@@ -1189,7 +1203,7 @@ for (const [label, confirmed] of [['private', 'private'], ['unlisted', 'unlisted
     assert.equal(result.publication.provider_item_id, null);
 
     // No lifecycle transition, no retry budget, no quarantine, single upload.
-    assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PRODUCED');
+    assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'FINAL_COMPLIANCE');
     assert.deepEqual(publicationRetryRows(storage, contentVersionId), []);
     assert.equal(adapter.calls.length, 1);
 

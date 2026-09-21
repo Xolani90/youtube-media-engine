@@ -54,6 +54,10 @@ export class SqliteStorageDriver extends StorageDriver {
       // A4 Slice 1: rebuilds both retry tables (drops the content_versions FK,
       // renames content_version_id -> subject_id, widens the stage CHECK).
       '0017_generalize_stage_retry_identity.sql',
+      // ADR-0032 (Gate 2): 0018 rebuilds `content_versions` to widen the state
+      // CHECK with FINAL_COMPLIANCE -- the identical rebuild/FK-toggle
+      // convention as 0013. (0019 only creates a new table and needs no toggle.)
+      '0018_content_versions_final_compliance_state.sql',
     ]);
 
     for (const file of files) {

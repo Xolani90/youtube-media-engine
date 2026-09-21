@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { SqliteStorageDriver } from '../../src/storage/SqliteStorageDriver.js';
 import { runAutonomousOperation } from '../../src/autonomous/runner.js';
 import { runProduction } from '../../src/production/pipeline.js';
+import { passGate2 } from '../helpers/gate2.js';
 import { runPublication } from '../../src/publication/pipeline.js';
 import { PublicationProvider } from '../../src/publication/PublicationProvider.js';
 import { PUBLICATION_RESULT_STATUS, publicationActionId } from '../../src/publication/constants.js';
@@ -64,6 +65,9 @@ function seed(storage, { state, mediaFilePath = null }) {
        VALUES (?, ?, ?, '{}', 'chk', '/tmp/n.wav', 5.0, ?, 'chk2', 5.0, 1280, 720, 'h264', 'aac', ?)`,
       [crypto.randomUUID(), productionId, contentVersionId, mediaFilePath, nowISO()]
     );
+    // ADR-0032: a rendered PRODUCED item only becomes publishable by passing
+    // Gate 2 (real final-compliance stage: PRODUCED -> FINAL_COMPLIANCE).
+    if (state === 'PRODUCED' && fs.existsSync(mediaFilePath)) passGate2(storage, contentVersionId);
   }
   return { contentBriefId, contentVersionId };
 }

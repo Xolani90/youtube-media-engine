@@ -11,6 +11,13 @@ export const STATES = Object.freeze([
   'QUALITY_GATE',
   'PRODUCTION_READY',
   'PRODUCED',
+  // ADR-0032: Gate 2 / FINAL_COMPLIANCE sits between PRODUCED and PUBLISHED.
+  // Because canTransition() only permits the immediately-next state, this
+  // placement alone makes PRODUCED -> PUBLISHED illegal (no Gate-2-bypassing
+  // path), FINAL_COMPLIANCE -> PUBLISHED the successful-publication step,
+  // and both FINAL_COMPLIANCE -> FINAL_COMPLIANCE (same-state) and
+  // FINAL_COMPLIANCE -> PRODUCED (backward) illegal.
+  'FINAL_COMPLIANCE',
   'PUBLISHED',
   'ANALYZING',
   'LEARNED'

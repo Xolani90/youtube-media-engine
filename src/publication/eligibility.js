@@ -11,7 +11,7 @@
  * Production's: it requires an existing `media_artifacts` row (Media
  * Production must have already rendered and validated a real .mp4) in
  * addition to a resolvable Script/content_brief. It does NOT require
- * content_version.state === 'PRODUCED' itself here — that is checked
+ * content_version.state === 'FINAL_COMPLIANCE' itself here (ADR-0032) — that is checked
  * separately by the pipeline, because a content_version already in
  * PUBLISHED state (a prior successful publish) is a structurally valid
  * input too and must be reported as ALREADY_PUBLISHED rather than a

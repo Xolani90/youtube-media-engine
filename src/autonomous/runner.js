@@ -9,12 +9,14 @@ import { runProduction } from '../production/pipeline.js';
 import { runAssetProvisioning } from '../asset-provisioning/pipeline.js';
 import { runRightsVerification } from '../rights-verification/pipeline.js';
 import { runMediaProduction } from '../media/pipeline.js';
+import { runFinalCompliance } from '../compliance/pipeline.js';
 import { runPublication } from '../publication/pipeline.js';
 import { OUTCOME as PRODUCTION_OUTCOME } from '../production/constants.js';
 import { OUTCOME as PUBLICATION_OUTCOME } from '../publication/constants.js';
 import { OUTCOME as ASSET_PROVISIONING_OUTCOME } from '../asset-provisioning/constants.js';
 import { OUTCOME as RIGHTS_VERIFICATION_OUTCOME } from '../rights-verification/constants.js';
 import { OUTCOME as MEDIA_OUTCOME } from '../media/constants.js';
+import { OUTCOME as FINAL_COMPLIANCE_OUTCOME } from '../compliance/constants.js';
 import { RESEARCH_PROJECT_STATUS } from '../research/constants.js';
 import { FACT_CHECK_STATUS } from '../fact-check/constants.js';
 import { CHECK_RESULT as QUALITY_GATE_CHECK_RESULT } from '../quality-gate/constants.js';
@@ -29,6 +31,7 @@ import {
   selectEligibleAssetProvisioning,
   selectEligibleRightsVerification,
   selectEligibleMediaProductions,
+  selectEligibleFinalCompliance,
   selectEligiblePublications
 } from './workSelection.js';
 
@@ -59,7 +62,9 @@ import {
  */
 // Stage order: research -> brief -> script -> fact-check -> originality
 // -> quality-gate -> production -> asset-provisioning -> rights-verification
-// -> media-production -> publication (checkpoint §9/§14, extended for
+// -> media-production -> final-compliance -> publication (checkpoint §9/§14,
+// extended per ADR-0032 for the Gate 2 / FINAL_COMPLIANCE stage, inserted
+// between Media Production and Publication; and extended for
 // Milestone D's Asset Provisioning stage, inserted between Production and
 // Media Production per its own frozen contract -- see
 // src/asset-provisioning/pipeline.js -- and further extended per ADR-0013
@@ -222,6 +227,29 @@ function buildStages(deps, startedMode) {
         })
     },
     {
+      name: 'final-compliance',
+      // ADR-0032 (Gate 2). Never publishes and never touches authorization:
+      // it only evaluates Gate 2, persists the compliance record and performs
+      // the authorized state transition. The stage itself decides whether a
+      // PASS is currently valid -- the selector is an efficiency filter.
+      select: selectEligibleFinalCompliance,
+      // A normal, completed Gate 2 evaluation (PASS / REVIEW / BLOCK) or an
+      // item whose PASS is already valid is a normal completion. A policy-load
+      // failure, an ineligible/unrendered item, or a concurrent state change
+      // is a contained non-success.
+      isSuccess: (result) =>
+        result?.outcome === FINAL_COMPLIANCE_OUTCOME.PASS ||
+        result?.outcome === FINAL_COMPLIANCE_OUTCOME.REVIEW ||
+        result?.outcome === FINAL_COMPLIANCE_OUTCOME.BLOCK ||
+        result?.outcome === FINAL_COMPLIANCE_OUTCOME.ALREADY_VALID,
+      run: (item, runId) =>
+        (fn['final-compliance'] ?? runFinalCompliance)({
+          storage: deps.storage,
+          contentBriefId: item.contentBriefId,
+          runId
+        })
+    },
+    {
       name: 'publication',
       // FROZEN -- see checkpoint §3/§13. Called exactly as any other
       // caller would: same function, same parameters, no bypass of
@@ -307,7 +335,7 @@ function eligibilitySignature(sweepEligible) {
  * @param {string} [deps.mode] - 'SIMULATION' | 'LIVE', forwarded to SystemRunRecorder.start(); defaults to config.runMode there
  * @param {SystemRunRecorder} [deps.systemRunRecorder] - injectable for tests; defaults to `new SystemRunRecorder(deps.storage)`
  * @param {(stageName: string, item: object, error: Error) => void} [deps.onStageError] - if provided, a thrown stage error is reported here and swallowed so the sweep continues with the next item; without it, a thrown error aborts the whole run (the system_runs record is marked FAILED) and is rethrown to the caller
- * @param {object} [deps.stageFns] - test-only per-stage function substitutes, keyed by stage name ('research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production', 'asset-provisioning', 'rights-verification', 'media-production', 'publication'). Never used in normal operation.
+ * @param {object} [deps.stageFns] - test-only per-stage function substitutes, keyed by stage name ('research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production', 'asset-provisioning', 'rights-verification', 'media-production', 'final-compliance', 'publication'). Never used in normal operation.
  * @returns {Promise<{ runId: string, mode: string, sweeps: number, processed: Array<{ stage: string, count: number }>, stopReason: 'no_work' | 'no_progress' }>}
  */
 export async function runAutonomousOperation(deps) {

@@ -6,9 +6,10 @@
 // any earlier stage.
 //
 // This is the ONLY stage that transitions content_versions.state from
-// PRODUCED -> PUBLISHED (ContentStateMachine's one legal step past
-// PRODUCED), and only after a confirmed provider result — never on
-// authorization, request construction, or a successful HTTP send alone.
+// FINAL_COMPLIANCE -> PUBLISHED (ContentStateMachine's one legal step past
+// FINAL_COMPLIANCE; ADR-0032 removed the direct PRODUCED -> PUBLISHED step so
+// Gate 2 cannot be bypassed), and only after a confirmed provider result —
+// never on authorization, request construction, or a successful HTTP send alone.
 
 export const PUBLICATION_STAGE = 'PUBLICATION';
 
@@ -49,6 +50,17 @@ export const OUTCOME = Object.freeze({
   // per-stage decoupling convention -- this is not a new value, just
   // this module's own copy of an established cross-stage vocabulary).
   ASSET_RIGHTS_BLOCKED: 'ASSET_RIGHTS_BLOCKED',
+  // ADR-0032 (Gate 2 / FINAL_COMPLIANCE) publication-boundary outcomes.
+  // GATE2_NOT_AUTHORIZING: no currently valid Gate 2 PASS (the newest
+  // compliance record is absent/non-PASS, or any bound value, the file
+  // checksum, the policy version, the rule-ID set or an evidence reference no
+  // longer matches, or the item is not in FINAL_COMPLIANCE). The `reason`
+  // carries a deterministic code from compliance/constants.js NON_AUTHORIZING.
+  // GATE2_POLICY_LOAD_FAILURE: the Gate 2 policy pack is missing/malformed/
+  // wrong, so no PASS can be accepted. Neither outcome changes state, claims
+  // a publication, or reaches authorization or the provider.
+  GATE2_NOT_AUTHORIZING: 'GATE2_NOT_AUTHORIZING',
+  GATE2_POLICY_LOAD_FAILURE: 'GATE2_POLICY_LOAD_FAILURE',
   AUTHORIZATION_DENIED: 'AUTHORIZATION_DENIED',
   PROVIDER_FAILURE: 'PROVIDER_FAILURE',
   // ADR-0030 §8: the upload happened and the provider returned an item id,
@@ -68,6 +80,8 @@ export const DECISION_LOG_DECISION = Object.freeze({
   INELIGIBLE_STATE: 'INELIGIBLE_STATE',
   ARTIFACT_MISSING: 'ARTIFACT_MISSING',
   ASSET_RIGHTS_BLOCKED: 'ASSET_RIGHTS_BLOCKED',
+  GATE2_NOT_AUTHORIZING: 'GATE2_NOT_AUTHORIZING',
+  GATE2_POLICY_LOAD_FAILURE: 'GATE2_POLICY_LOAD_FAILURE',
   AUTHORIZATION_DENIED: 'AUTHORIZATION_DENIED',
   PROVIDER_FAILURE: 'PROVIDER_FAILURE',
   AMBIGUOUS: 'AMBIGUOUS',

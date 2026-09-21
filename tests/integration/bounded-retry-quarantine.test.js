@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { SqliteStorageDriver } from '../../src/storage/SqliteStorageDriver.js';
 import { runProduction } from '../../src/production/pipeline.js';
+import { passGate2 } from '../helpers/gate2.js';
 import { runPublication } from '../../src/publication/pipeline.js';
 import { PublicationProvider } from '../../src/publication/PublicationProvider.js';
 import { PUBLICATION_RESULT_STATUS, publicationActionId } from '../../src/publication/constants.js';
@@ -61,6 +62,9 @@ function seedContent(storage, { state, mediaFilePath = null } = {}) {
        VALUES (?, ?, ?, '{}', 'chk', '/tmp/n.wav', 5.0, ?, 'chk2', 5.0, 1280, 720, 'h264', 'aac', ?)`,
       [crypto.randomUUID(), productionId, contentVersionId, mediaFilePath, nowISO()]
     );
+    // ADR-0032: a rendered PRODUCED item only becomes publishable by passing
+    // Gate 2 (real final-compliance stage: PRODUCED -> FINAL_COMPLIANCE).
+    if (state === 'PRODUCED' && fs.existsSync(mediaFilePath)) passGate2(storage, contentVersionId);
   }
   return { contentBriefId, contentVersionId };
 }
@@ -243,7 +247,7 @@ test('Publication: FAILED attempts 1-3 recorded, 3rd quarantines (status stays F
     // FAILED itself is not reinterpreted; quarantine is the separate record.
     assert.equal(storage.get('SELECT status FROM publications WHERE content_version_id = ?', [contentVersionId]).status, 'FAILED');
     assert.ok(isQuarantined(storage, contentVersionId, 'PUBLICATION'));
-    assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PRODUCED');
+    assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'FINAL_COMPLIANCE');
 
     const callsBefore = adapter.calls;
     assert.equal(selectEligiblePublications(storage).length, 0);
