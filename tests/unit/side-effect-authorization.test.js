@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { config } from '../../src/config/index.js';
 import {
   assertExternalActionAllowed,
@@ -341,6 +342,8 @@ test('ADR-0030: no wildcard/regex/pattern syntax -- ordinary strings stay exact 
 });
 
 test('ADR-0030: the real Owner-controlled config/authorized_external_actions.json remains [] (mechanism is dormant)', () => {
-  const real = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../config/authorized_external_actions.json');
+  // fileURLToPath (not URL.pathname) so this also resolves on Windows: `.pathname` keeps
+  // `/C:/...` and percent-encoding such as `%20`, which breaks for paths with spaces.
+  const real = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../config/authorized_external_actions.json');
   assert.deepEqual(JSON.parse(fs.readFileSync(real, 'utf8')), []);
 });
