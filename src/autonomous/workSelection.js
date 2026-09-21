@@ -192,11 +192,16 @@ export function selectEligiblePublications(storage) {
   //
   // ADR-0032: publication now selects FINAL_COMPLIANCE items (a Gate 2 PASS
   // moved them there). A PRODUCED item can never be published: it is not
-  // selected here, and the publication boundary independently rejects it.
+  // selected here for a NEW attempt, and the publication boundary
+  // independently rejects it (Gate 2 runs before authorization, claim and
+  // provider). The one exception is a PRODUCED item that ALREADY has a
+  // publications row: it is selected only so the pipeline's existing
+  // short-circuit/reconciliation (PENDING -> AMBIGUOUS, etc.) can run.
   return storage
     .all(
       `SELECT content_brief_id FROM content_versions
-       WHERE state = 'FINAL_COMPLIANCE'
+       WHERE (state = 'FINAL_COMPLIANCE'
+              OR (state = 'PRODUCED' AND id IN (SELECT content_version_id FROM publications)))
        AND id IN (SELECT content_version_id FROM media_artifacts)
        AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'PUBLICATION' AND quarantined_at IS NOT NULL)
        AND id NOT IN (SELECT content_version_id FROM publications WHERE status = 'FAILED' AND failure_reason = 'VISIBILITY_MISMATCH')`

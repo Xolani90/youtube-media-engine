@@ -106,6 +106,32 @@ function insertMediaArtifact(storage, contentVersionId, mediaFilePath) {
 }
 
 /**
+ * Makes a PRODUCED+media fixture genuinely Gate-2-passable (ADR-0032) with real
+ * deterministic evidence -- no mocking of Gate 2: the real SHA-256 of the media
+ * bytes, a viewer promise (title already set), and the accepted-generation
+ * decision_log lineage for script and brief. Same-sweep Final Compliance then
+ * PASSes and moves the item PRODUCED -> FINAL_COMPLIANCE.
+ */
+function makeGate2Passable(storage, seeded, mediaBytes) {
+  storage.run('UPDATE media_artifacts SET artifact_checksum = ? WHERE content_version_id = ?', [
+    crypto.createHash('sha256').update(mediaBytes).digest('hex'),
+    seeded.contentVersionId
+  ]);
+  const rpId = insertResearchProject(storage, seeded.opportunityId);
+  storage.run('UPDATE content_briefs SET research_project_id = ?, viewer_promise = ? WHERE id = ?', [rpId, 'A promise.', seeded.contentBriefId]);
+  for (const [subjectType, subjectId, stage] of [
+    ['content_brief', seeded.contentBriefId, 'SCRIPT_GENERATION'],
+    ['research_project', rpId, 'BRIEF_GENERATION']
+  ]) {
+    storage.run(
+      `INSERT INTO decision_log (id, run_id, subject_type, subject_id, decision, reason, provider, config_snapshot, confidence, risk_level, resulting_state, created_at, stage)
+       VALUES (?, NULL, ?, ?, 'ACCEPTED', 'fixture', NULL, NULL, NULL, NULL, NULL, ?, ?)`,
+      [crypto.randomUUID(), subjectType, subjectId, nowISO(), stage]
+    );
+  }
+}
+
+/**
  * Builds a full opportunity -> content_brief -> script -> content_version
  * chain at a given content_versions.state. The opportunity is seeded past
  * 'HANDED_TO_RESEARCH' (an arbitrary later status) precisely so it is
@@ -194,25 +220,56 @@ test('per-content_versions-state work-selection queries return exactly the conte
   cleanup(storage, dbPath);
 });
 
-test('selectEligiblePublications: state=PRODUCED with a media_artifacts row, excluding PRODUCED-without-media and PUBLISHED', async () => {
+test('selectEligiblePublications: FINAL_COMPLIANCE+media (new attempt) and PRODUCED with an existing publication row (reconciliation) only; ADR-0032', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
 
   const videoFile = path.join(os.tmpdir(), `autonomous-pub-${crypto.randomUUID()}.mp4`);
   fs.writeFileSync(videoFile, 'fake mp4 bytes');
 
-  const withMedia = seedChainAtState(storage, 'PRODUCED');
-  insertMediaArtifact(storage, withMedia.contentVersionId, videoFile);
+  function addPublication(seeded, status, failureReason = null) {
+    const mediaId = storage.get('SELECT id FROM media_artifacts WHERE content_version_id = ?', [seeded.contentVersionId]).id;
+    storage.run(
+      `INSERT INTO publications (id, content_version_id, media_artifact_id, provider, status, failure_reason, request_json, attempt_count, created_at, updated_at)
+       VALUES (?, ?, ?, 'mock', ?, ?, '{}', 1, ?, ?)`,
+      [crypto.randomUUID(), seeded.contentVersionId, mediaId, status, failureReason, nowISO(), nowISO()]
+    );
+  }
 
+  // NEW attempt path: only FINAL_COMPLIANCE (a Gate 2 PASS) is selected.
+  const finalCompliance = seedChainAtState(storage, 'FINAL_COMPLIANCE');
+  insertMediaArtifact(storage, finalCompliance.contentVersionId, videoFile);
+
+  // PRODUCED + media + NO publication row is NOT publication-ready.
+  const producedNoRow = seedChainAtState(storage, 'PRODUCED');
+  insertMediaArtifact(storage, producedNoRow.contentVersionId, videoFile);
+
+  // Reconciliation path (D1): PRODUCED + existing PENDING / AMBIGUOUS rows.
+  const producedPending = seedChainAtState(storage, 'PRODUCED');
+  insertMediaArtifact(storage, producedPending.contentVersionId, videoFile);
+  addPublication(producedPending, 'PENDING');
+
+  const producedAmbiguous = seedChainAtState(storage, 'PRODUCED');
+  insertMediaArtifact(storage, producedAmbiguous.contentVersionId, videoFile);
+  addPublication(producedAmbiguous, 'AMBIGUOUS');
+
+  // VISIBILITY_MISMATCH stays excluded (ADR-0030), even from PRODUCED.
+  const producedMismatch = seedChainAtState(storage, 'PRODUCED');
+  insertMediaArtifact(storage, producedMismatch.contentVersionId, videoFile);
+  addPublication(producedMismatch, 'FAILED', 'VISIBILITY_MISMATCH');
+
+  // Other exclusions: PRODUCED without media, PUBLISHED, NEEDS_REVIEW.
   const withoutMedia = seedChainAtState(storage, 'PRODUCED');
-
   const published = seedChainAtState(storage, 'PUBLISHED');
   insertMediaArtifact(storage, published.contentVersionId, videoFile);
+  const needsReview = seedChainAtState(storage, 'NEEDS_REVIEW');
+  insertMediaArtifact(storage, needsReview.contentVersionId, videoFile);
 
-  const result = selectEligiblePublications(storage).map((r) => r.contentBriefId);
-  assert.deepEqual(result, [withMedia.contentBriefId]);
-  assert.ok(!result.includes(withoutMedia.contentBriefId));
-  assert.ok(!result.includes(published.contentBriefId));
+  const result = selectEligiblePublications(storage).map((r) => r.contentBriefId).sort();
+  assert.deepEqual(result, [finalCompliance.contentBriefId, producedPending.contentBriefId, producedAmbiguous.contentBriefId].sort());
+  for (const excluded of [producedNoRow, producedMismatch, withoutMedia, published, needsReview]) {
+    assert.ok(!result.includes(excluded.contentBriefId));
+  }
 
   cleanup(storage, dbPath, videoFile);
 });
@@ -616,6 +673,7 @@ test('two concurrent runner invocations against the same DB file cannot both inv
 
   const seeded = seedChainAtState(storageA, 'PRODUCED');
   insertMediaArtifact(storageA, seeded.contentVersionId, videoFile);
+  makeGate2Passable(storageA, seeded, 'fake mp4 bytes');
 
   const adapterA = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vidA', providerUrl: 'https://x/vidA' });
   const adapterB = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vidB', providerUrl: 'https://x/vidB' });
@@ -677,6 +735,7 @@ test('crash simulation: a runner invocation after an interrupted publication att
   fs.writeFileSync(videoFile, 'fake mp4 bytes');
   const seeded = seedChainAtState(storage, 'PRODUCED');
   insertMediaArtifact(storage, seeded.contentVersionId, videoFile);
+  makeGate2Passable(storage, seeded, 'fake mp4 bytes');
 
   // Simulate a process killed mid-publish: a PENDING publications row
   // with no terminal outcome, matching real interruption (checkpoint
@@ -720,7 +779,8 @@ test('crash simulation: a runner invocation after an interrupted publication att
   assert.equal(rows.length, 1);
   assert.equal(rows[0].status, 'AMBIGUOUS');
   const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [seeded.contentVersionId]);
-  assert.equal(cv.state, 'PRODUCED');
+  // Gate 2 PASS moved it to FINAL_COMPLIANCE in the same sweep (ADR-0032).
+  assert.equal(cv.state, 'FINAL_COMPLIANCE');
 
   cleanup(storage, dbPath, videoFile);
   fs.rmSync(dir, { recursive: true, force: true });
@@ -738,6 +798,7 @@ test('with authorized_external_actions.json empty, the runner reaching Publicati
   fs.writeFileSync(videoFile, 'fake mp4 bytes');
   const seeded = seedChainAtState(storage, 'PRODUCED');
   insertMediaArtifact(storage, seeded.contentVersionId, videoFile);
+  makeGate2Passable(storage, seeded, 'fake mp4 bytes');
 
   const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vid1', providerUrl: 'https://x/vid1' });
 
@@ -767,7 +828,7 @@ test('with authorized_external_actions.json empty, the runner reaching Publicati
   const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [seeded.contentVersionId]);
   assert.equal(rows.length, 0, 'no publications row is created for a denied attempt');
   const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [seeded.contentVersionId]);
-  assert.equal(cv.state, 'PRODUCED', 'content_versions.state is never advanced past PRODUCED without a confirmed publish');
+  assert.equal(cv.state, 'FINAL_COMPLIANCE', 'Gate 2 PASS moved it to FINAL_COMPLIANCE, but it is never advanced to PUBLISHED without a confirmed publish');
   // Publication is reached (it is the only eligible item) but its own
   // AUTHORIZATION_DENIED outcome does not throw -- runPublication
   // returns it as a normal outcome -- so the sweep completes cleanly.
@@ -792,6 +853,7 @@ test('D-C2: a SIMULATION autonomous run does not reach the Publication provider 
   fs.writeFileSync(videoFile, 'fake mp4 bytes');
   const seeded = seedChainAtState(storage, 'PRODUCED');
   insertMediaArtifact(storage, seeded.contentVersionId, videoFile);
+  makeGate2Passable(storage, seeded, 'fake mp4 bytes');
 
   const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vid1', providerUrl: 'https://x/vid1' });
 
@@ -841,7 +903,7 @@ test('D-C2: a SIMULATION autonomous run does not reach the Publication provider 
   const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [seeded.contentVersionId]);
   assert.equal(rows.length, 0, 'no publications row is created when D-C2 denies the action');
   const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [seeded.contentVersionId]);
-  assert.equal(cv.state, 'PRODUCED', 'content_versions.state must never advance to PUBLISHED under SIMULATION');
+  assert.equal(cv.state, 'FINAL_COMPLIANCE', 'content_versions.state must never advance to PUBLISHED under SIMULATION');
 
   // G. The rejection is specifically the D-C2 mode invariant (not a
   // missing-authorization or autonomous-disabled denial, both of which
