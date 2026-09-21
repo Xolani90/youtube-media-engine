@@ -13,6 +13,7 @@ import { PublicationProvider } from '../../src/publication/PublicationProvider.j
 import { PUBLICATION_RESULT_STATUS } from '../../src/publication/constants.js';
 import { AssetProvenanceRepository } from '../../src/state/AssetProvenance.js';
 import { config } from '../../src/config/index.js';
+import { passGate2, recordVerification } from '../helpers/gate2.js';
 
 function freshStorage() {
   const dbPath = path.join(os.tmpdir(), `pub-e2e-${Date.now()}-${Math.random()}.db`);
@@ -134,8 +135,8 @@ test('end-to-end: PRODUCED -> real rendered media artifact -> D-C2 authorized pu
   const { contentBriefId, contentVersionId } = seedContentVersion(storage);
   const imgA = makeFixtureImage(assetsDir, 'a.png', 'blue');
   const imgB = makeFixtureImage(assetsDir, 'b.png', 'red');
-  seedVisualAsset(storage, contentVersionId, imgA);
-  seedVisualAsset(storage, contentVersionId, imgB);
+  const assetA = seedVisualAsset(storage, contentVersionId, imgA);
+  const assetB = seedVisualAsset(storage, contentVersionId, imgB);
 
   const productionResult = runProduction({ storage, contentBriefId, artifactsDir: productionArtifactsDir });
   assert.equal(productionResult.outcome, 'PRODUCED');
@@ -143,15 +144,34 @@ test('end-to-end: PRODUCED -> real rendered media artifact -> D-C2 authorized pu
   const mediaResult = runMediaProduction({ storage, contentBriefId, artifactsDir: mediaArtifactsDir });
   assert.equal(mediaResult.outcome, 'RENDERED');
 
-  // Not yet authorized (SIMULATION default in this test process) -> denied, no upload attempted.
+  // ADR-0032: a PRODUCED item cannot be published directly. Gate 2 is enforced at the
+  // publication boundary before authorization, the PENDING claim and the provider.
+  const producedAdapter = new MockYouTube({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'youtube', providerItemId: 'SHOULD_NOT_BE_USED', providerUrl: 'x' });
+  const gate2Refused = await runPublication({ storage, contentBriefId, provider: 'youtube', adapter: producedAdapter });
+  assert.equal(gate2Refused.outcome, 'GATE2_NOT_AUTHORIZING');
+  assert.equal(producedAdapter.calls.length, 0);
+  assert.equal(storage.get('SELECT COUNT(*) AS n FROM publications WHERE content_version_id = ?', [contentVersionId]).n, 0);
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PRODUCED');
+
+  // Legitimate final-compliance step (real evaluator/persistence): PRODUCED -> FINAL_COMPLIANCE.
+  // It never publishes.
+  // Gate 2 GC-002 reads the append-only asset_verifications history (what rights verification persists).
+  recordVerification(storage, assetA, 'VERIFIED');
+  recordVerification(storage, assetB, 'VERIFIED');
+  passGate2(storage, contentVersionId);
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'FINAL_COMPLIANCE');
+  assert.equal(storage.get('SELECT COUNT(*) AS n FROM publications WHERE content_version_id = ?', [contentVersionId]).n, 0);
+
+  // Gate 2 now passes, so the publication boundary reaches D-C2 authorization: not yet authorized
+  // (SIMULATION default in this test process) -> denied, no upload attempted.
   const preAuthAdapter = new MockYouTube({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'youtube', providerItemId: 'SHOULD_NOT_BE_USED', providerUrl: 'x' });
   const denied = await runPublication({ storage, contentBriefId, provider: 'youtube', adapter: preAuthAdapter });
   assert.equal(denied.outcome, 'AUTHORIZATION_DENIED');
   assert.equal(preAuthAdapter.calls.length, 0);
 
-  // content_version is still PRODUCED, unaffected by the denied attempt.
+  // content_version is still FINAL_COMPLIANCE, unaffected by the denied attempt.
   let cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [contentVersionId]);
-  assert.equal(cv.state, 'PRODUCED');
+  assert.equal(cv.state, 'FINAL_COMPLIANCE');
 
   const published = await withLiveAuthorized([`publish:youtube:${contentVersionId}`], async () => {
     const adapter = new MockYouTube({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'youtube', providerItemId: 'REAL_VIDEO_ID', providerUrl: 'https://youtu.be/REAL_VIDEO_ID' });
