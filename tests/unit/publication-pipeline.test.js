@@ -1412,3 +1412,175 @@ test('ADR-0030 (real YouTubeAdapter + mocked fetch): standing PUBLIC request, Yo
 
   cleanup(storage, dbPath, videoFile);
 });
+
+// ============================================================================
+// ADR-0032 Batch 5 -- B1: direct-invocation anti-bypass at the publication
+// boundary, and B4: publication-success state coupling (section 16).
+//
+// These exercise EXISTING production behavior only; no production code was
+// changed for them. They are placed here rather than in a Gate 2 test file
+// because the behavior under test belongs to the publication boundary.
+// ============================================================================
+
+/** Local row-count helper, same shape as the one used by the integration suites. */
+function count(storage, sql, params = []) {
+  return storage.get(sql, params).n;
+}
+
+/**
+ * A mock adapter that must never be reached. Any call is itself the failure.
+ */
+class ForbiddenAdapter extends MockAdapter {
+  constructor() {
+    super({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'MUST_NOT_HAPPEN', providerUrl: 'x' });
+  }
+}
+
+test('B1a. direct runPublication on a PRODUCED item with NO publication row cannot bypass Gate 2: refused before authorization, claim and provider', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  // gate2: false -> the item stays PRODUCED with no compliance record at all.
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile, gate2: false });
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PRODUCED');
+
+  const adapter = new ForbiddenAdapter();
+  // Deliberately authorize the exact action under LIVE: authorization must NOT
+  // be the reason for refusal. Gate 2 runs first (step 4.7, before step 5), so
+  // the refusal proves the anti-bypass, not a D-C2 denial.
+  const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], () =>
+    runPublication({ storage, contentBriefId, provider: 'mock', adapter })
+  );
+
+  assert.equal(result.outcome, 'GATE2_NOT_AUTHORIZING');
+  assert.equal(result.reason, 'STATE_NOT_FINAL_COMPLIANCE');
+  assert.equal(result.publication, null, 'no publication row is returned');
+  assert.equal(adapter.calls.length, 0, 'the provider adapter was never invoked');
+  // No durable claim was created by the blocked attempt.
+  assert.equal(count(storage, 'SELECT COUNT(*) n FROM publications'), 0, 'no PENDING claim was created');
+  // Nothing was transitioned, and Gate 2 wrote nothing (verification is read-only).
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PRODUCED');
+  assert.equal(count(storage, 'SELECT COUNT(*) n FROM gate2_compliance_records'), 0);
+  // The refusal was recorded, and authorization was never reached.
+  const gate2Log = storage.get(`SELECT reason FROM decision_log WHERE decision = 'GATE2_NOT_AUTHORIZING'`);
+  assert.ok(gate2Log, 'the Gate 2 refusal is recorded in the decision log');
+  assert.match(gate2Log.reason, /STATE_NOT_FINAL_COMPLIANCE/);
+  assert.equal(
+    storage.get(`SELECT id FROM decision_log WHERE decision = 'AUTHORIZATION_GRANTED'`), undefined,
+    'authorization was never reached: Gate 2 refused first'
+  );
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('B1b. direct runPublication on a PRODUCED item WITH a FAILED publication row cannot bypass Gate 2: the row is not reclaimed and the provider is not reached', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId, mediaArtifactId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile, gate2: false });
+
+  // A legacy FAILED attempt: ordinarily reclaimable (step 6 flips it back to
+  // PENDING), which is exactly why Gate 2 must refuse it first.
+  const publicationId = crypto.randomUUID();
+  storage.run(
+    `INSERT INTO publications (id, content_version_id, media_artifact_id, provider, status, request_json, failure_reason, attempt_count, created_at, updated_at)
+     VALUES (?, ?, ?, 'mock', 'FAILED', '{}', 'PROVIDER_FAILURE', 1, ?, ?)`,
+    [publicationId, contentVersionId, mediaArtifactId, nowISO(), nowISO()]
+  );
+
+  const adapter = new ForbiddenAdapter();
+  const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], () =>
+    runPublication({ storage, contentBriefId, provider: 'mock', adapter })
+  );
+
+  assert.equal(result.outcome, 'GATE2_NOT_AUTHORIZING');
+  assert.equal(result.reason, 'STATE_NOT_FINAL_COMPLIANCE');
+  assert.equal(adapter.calls.length, 0, 'the provider adapter was never invoked');
+
+  // The pre-existing row is untouched: not reclaimed to PENDING, no extra
+  // attempt consumed, no second row.
+  const rows = storage.all('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(rows.length, 1, 'no duplicate publication row');
+  assert.equal(rows[0].id, publicationId);
+  assert.equal(rows[0].status, 'FAILED', 'the FAILED row was NOT reclaimed to PENDING');
+  assert.equal(rows[0].attempt_count, 1, 'no attempt was consumed by the blocked attempt');
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PRODUCED');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('B1c. reconciliation for a PRODUCED item with a PENDING publication row is NOT broken by Gate 2: the interrupted attempt is still resolved to AMBIGUOUS', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId, mediaArtifactId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile, gate2: false });
+
+  // A prior run died after claiming but before a provider result was confirmed.
+  const publicationId = crypto.randomUUID();
+  storage.run(
+    `INSERT INTO publications (id, content_version_id, media_artifact_id, provider, status, request_json, attempt_count, created_at, updated_at)
+     VALUES (?, ?, ?, 'mock', 'PENDING', '{}', 1, ?, ?)`,
+    [publicationId, contentVersionId, mediaArtifactId, nowISO(), nowISO()]
+  );
+
+  const adapter = new ForbiddenAdapter();
+  const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], () =>
+    runPublication({ storage, contentBriefId, provider: 'mock', adapter })
+  );
+
+  // The step-3 short-circuit runs BEFORE Gate 2, so reconciliation is preserved
+  // exactly as it was: the interrupted attempt is resolved, not Gate-2-refused.
+  assert.equal(result.outcome, 'AMBIGUOUS');
+  assert.equal(result.reason, 'interrupted_prior_attempt');
+  assert.equal(result.publication.id, publicationId);
+  assert.equal(result.publication.status, 'AMBIGUOUS', 'the interrupted PENDING row was reconciled');
+  assert.equal(adapter.calls.length, 0, 'reconciliation never calls the provider');
+  assert.equal(count(storage, 'SELECT COUNT(*) n FROM publications'), 1, 'no new row was created');
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('B4. ADR-0032 s16: a confirmed provider SUCCESS is never lost when the local transition cannot be made', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'FINAL_COMPLIANCE');
+
+  // The adapter confirms the upload and, while it is "uploading", the
+  // content_version is moved out of FINAL_COMPLIANCE out of band -- so by the
+  // time the success path runs, FINAL_COMPLIANCE -> PUBLISHED is no longer the
+  // transition available. This is the only way to reach that branch without
+  // touching production code.
+  const adapter = new MockAdapter(() => {
+    storage.run(`UPDATE content_versions SET state = 'ANALYZING' WHERE id = ?`, [contentVersionId]);
+    return { status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'vid-confirmed', providerUrl: 'https://youtu.be/vid-confirmed' };
+  });
+
+  const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], () =>
+    runPublication({ storage, contentBriefId, provider: 'mock', adapter })
+  );
+
+  // The external truth is recorded: the confirmed upload is NOT lost, and the
+  // row is NOT left stuck PENDING.
+  assert.equal(adapter.calls.length, 1, 'the provider was called exactly once');
+  assert.equal(result.outcome, 'PUBLISHED');
+  const row = storage.get('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+  assert.equal(row.status, 'PUBLISHED', 'the confirmed publication is durably persisted');
+  assert.equal(row.provider_item_id, 'vid-confirmed', 'the provider item id is preserved');
+  assert.equal(row.provider_url, 'https://youtu.be/vid-confirmed');
+  assert.notEqual(row.status, 'PENDING');
+
+  // The local state is left exactly as it was found -- not forced, not failed.
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'ANALYZING');
+
+  // Exactly one attempt, one row, and no retry budget consumed.
+  assert.equal(count(storage, 'SELECT COUNT(*) n FROM publications'), 1);
+  assert.deepEqual(publicationRetryRows(storage, contentVersionId), []);
+
+  cleanup(storage, dbPath, videoFile);
+});

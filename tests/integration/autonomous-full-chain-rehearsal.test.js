@@ -289,6 +289,14 @@ function assertReachedPublicationBoundary(h, result) {
   for (const stage of ['asset-provisioning', 'rights-verification', 'media-production']) {
     assert.equal(p[stage], 2, `${stage} dispatched twice (real work once, then an idempotent no-op re-dispatch)`);
   }
+  // ADR-0032: the final-compliance stage sits between media-production and
+  // publication. The chain must actually pass through it -- a Gate 2 PASS is
+  // what moves the item to FINAL_COMPLIANCE and makes publication reachable.
+  assert.ok(p['final-compliance'] >= 1, 'final-compliance was dispatched');
+  assert.equal(
+    count(h.storage, `SELECT COUNT(*) n FROM gate2_compliance_records WHERE decision = 'PASS'`), 1,
+    'exactly one Gate 2 PASS compliance record was persisted'
+  );
   assert.equal(p.publication, 1, 'publication was dispatched exactly once');
   assert.deepEqual(h.llmCalls, { research: 1, brief: 1, script: 1, unexpected: 0 }, 'exactly one LLM call per LLM stage');
   assertUpstreamThroughQualityGate(h);
@@ -314,7 +322,7 @@ test('1. SIMULATION: item traverses all stages to the Publication boundary; publ
       assert.equal(result.mode, 'SIMULATION');
       assert.equal(result.stopReason, 'no_progress');
       assertReachedPublicationBoundary(h, result);
-      assert.equal(contentVersion(h).state, 'PRODUCED', 'item stops at PRODUCED');
+      assert.equal(contentVersion(h).state, 'FINAL_COMPLIANCE', 'item stops at FINAL_COMPLIANCE: Gate 2 passed, publication denied (ADR-0032)');
       const denial = h.storage.get(`SELECT reason FROM decision_log WHERE decision = 'AUTHORIZATION_DENIED'`);
       assert.match(denial.reason, /run mode is SIMULATION, not LIVE/);
       assertNoPublicationSideEffects(h);
@@ -337,7 +345,7 @@ test('2. LIVE + empty authorization: reaches Publication, AUTHORIZATION_DENIED, 
       assert.equal(result.stopReason, 'no_progress');
       assertReachedPublicationBoundary(h, result);
       const cv = contentVersion(h);
-      assert.equal(cv.state, 'PRODUCED');
+      assert.equal(cv.state, 'FINAL_COMPLIANCE', 'Gate 2 passed; the item stops at FINAL_COMPLIANCE because authorization was denied');
       const denial = h.storage.get(`SELECT reason FROM decision_log WHERE decision = 'AUTHORIZATION_DENIED'`);
       assert.ok(denial.reason.includes(ACTION(cv.id)), 'denial names the exact runtime action id');
       assert.match(denial.reason, /not present in Owner-controlled/);
@@ -394,7 +402,7 @@ test('3b. Owner workflow across invocations: LIVE run denied -> exact runtime ac
         assert.equal(first.stopReason, 'no_progress');
         assert.equal(h.adapter.calls.length, 0);
         const cv = contentVersion(h);
-        assert.equal(cv.state, 'PRODUCED');
+        assert.equal(cv.state, 'FINAL_COMPLIANCE', 'Gate 2 passed; the item stops at FINAL_COMPLIANCE because authorization was denied');
 
         fs.writeFileSync(auth, JSON.stringify([ACTION(cv.id)]));
         const second = await h.run('LIVE');

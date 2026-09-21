@@ -17,7 +17,8 @@ import {
   selectEligibleProductions,
   selectEligibleAssetProvisioning,
   selectEligibleMediaProductions,
-  selectEligiblePublications
+  selectEligiblePublications,
+  selectEligibleFinalCompliance
 } from '../../src/autonomous/workSelection.js';
 import { runPublication } from '../../src/publication/pipeline.js';
 import { PublicationProvider } from '../../src/publication/PublicationProvider.js';
@@ -270,6 +271,80 @@ test('selectEligiblePublications: FINAL_COMPLIANCE+media (new attempt) and PRODU
   for (const excluded of [producedNoRow, producedMismatch, withoutMedia, published, needsReview]) {
     assert.ok(!result.includes(excluded.contentBriefId));
   }
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+// ADR-0032 Batch 5 (B2): the final-compliance selection domain, and the
+// quarantine exclusion the publication selector must keep. Both exercise the
+// existing selectors only -- neither selector was changed.
+
+test('selectEligibleFinalCompliance: PRODUCED+media and FINAL_COMPLIANCE+media only; no grandfathering, nothing without media, no other state; ADR-0032', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  const videoFile = path.join(os.tmpdir(), `autonomous-fc-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+
+  // INCLUDED: every qualifying PRODUCED item with a media artifact (ADR-0032
+  // s12: no grandfathering), and FINAL_COMPLIANCE items whose PASS may be stale.
+  const produced = seedChainAtState(storage, 'PRODUCED');
+  insertMediaArtifact(storage, produced.contentVersionId, videoFile);
+  const finalCompliance = seedChainAtState(storage, 'FINAL_COMPLIANCE');
+  insertMediaArtifact(storage, finalCompliance.contentVersionId, videoFile);
+
+  // EXCLUDED: no media artifact yet (not rendered), in either eligible state.
+  const producedNoMedia = seedChainAtState(storage, 'PRODUCED');
+  const finalComplianceNoMedia = seedChainAtState(storage, 'FINAL_COMPLIANCE');
+
+  // EXCLUDED: every other state, with media present, including the terminal
+  // outcomes of a prior Gate 2 evaluation (their exit workflows are deferred)
+  // and already-PUBLISHED content (never retroactively evaluated).
+  const otherStates = ['PRODUCTION_READY', 'PUBLISHED', 'NEEDS_REVIEW', 'BLOCKED', 'FAILED'].map((state) => {
+    const seeded = seedChainAtState(storage, state);
+    insertMediaArtifact(storage, seeded.contentVersionId, videoFile);
+    return { state, seeded };
+  });
+
+  const result = selectEligibleFinalCompliance(storage).map((r) => r.contentBriefId).sort();
+  assert.deepEqual(result, [produced.contentBriefId, finalCompliance.contentBriefId].sort());
+  assert.ok(!result.includes(producedNoMedia.contentBriefId), 'PRODUCED without media is not selected');
+  assert.ok(!result.includes(finalComplianceNoMedia.contentBriefId), 'FINAL_COMPLIANCE without media is not selected');
+  for (const { state, seeded } of otherStates) {
+    assert.ok(!result.includes(seeded.contentBriefId), `${state} is not selected for final-compliance`);
+  }
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('selectEligiblePublications: a PUBLICATION-stage quarantine still excludes the item, and a quarantine under another stage does not; ADR-0023/ADR-0032', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  const videoFile = path.join(os.tmpdir(), `autonomous-pub-q-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+
+  const quarantine = (contentVersionId, stage) => storage.run(
+    `INSERT INTO stage_retry_state (id, subject_id, stage, cycle_number, attempt_count, quarantined_at, created_at, updated_at)
+     VALUES (?, ?, ?, 1, 3, ?, ?, ?)`,
+    [crypto.randomUUID(), contentVersionId, stage, nowISO(), nowISO(), nowISO()]
+  );
+
+  const eligible = seedChainAtState(storage, 'FINAL_COMPLIANCE');
+  insertMediaArtifact(storage, eligible.contentVersionId, videoFile);
+
+  const quarantined = seedChainAtState(storage, 'FINAL_COMPLIANCE');
+  insertMediaArtifact(storage, quarantined.contentVersionId, videoFile);
+  quarantine(quarantined.contentVersionId, 'PUBLICATION');
+
+  // Stage isolation: a quarantine under a DIFFERENT stage must not hide the item.
+  const otherStageQuarantine = seedChainAtState(storage, 'FINAL_COMPLIANCE');
+  insertMediaArtifact(storage, otherStageQuarantine.contentVersionId, videoFile);
+  quarantine(otherStageQuarantine.contentVersionId, 'MEDIA_PRODUCTION');
+
+  const result = selectEligiblePublications(storage).map((r) => r.contentBriefId).sort();
+  assert.deepEqual(result, [eligible.contentBriefId, otherStageQuarantine.contentBriefId].sort());
+  assert.ok(!result.includes(quarantined.contentBriefId), 'a PUBLICATION-stage quarantine excludes the item');
 
   cleanup(storage, dbPath, videoFile);
 });

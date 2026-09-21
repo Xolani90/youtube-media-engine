@@ -305,7 +305,15 @@ test('migration 0017: preserves 0016 data 1:1, renames to subject_id, drops the 
   const db = new Database(':memory:');
   const dir = 'src/db/migrations';
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
-  assert.equal(files.at(-1), '0017_generalize_stage_retry_identity.sql');
+  // This test exercises migration 0017 specifically, so it names 0017 explicitly
+  // rather than reaching for "whatever sorts last" -- that index-based form broke
+  // silently when ADR-0032 added 0018/0019, and would break again on 0020.
+  // LATEST_MIGRATION is a deliberate, named expectation: a new migration must be
+  // acknowledged here on purpose, not merely tolerated.
+  const MIGRATION_0017 = '0017_generalize_stage_retry_identity.sql';
+  const LATEST_MIGRATION = '0019_gate2_compliance_records.sql';
+  assert.ok(files.includes(MIGRATION_0017), 'migration 0017 is present');
+  assert.equal(files.at(-1), LATEST_MIGRATION, 'current latest migration (update LATEST_MIGRATION deliberately when one is added)');
   db.pragma('foreign_keys = OFF');
   for (const f of files.filter((x) => x < '0017')) db.exec(fs.readFileSync(path.join(dir, f), 'utf8'));
   // Legacy rows under the 0016 shape.
@@ -313,7 +321,7 @@ test('migration 0017: preserves 0016 data 1:1, renames to subject_id, drops the 
               VALUES ('r1', 'cv-1', 'PRODUCTION', 2, 3, '2026-01-01T00:00:00Z', 'why', 'c', 'u')`).run();
   db.prepare(`INSERT INTO stage_retry_cycle_history (id, content_version_id, stage, cycle_number, attempts_in_cycle, quarantined_at, reactivated_at, owner_reason)
               VALUES ('h1', 'cv-1', 'PRODUCTION', 1, 3, 'q', 'r', 'owner said so')`).run();
-  db.exec(fs.readFileSync(path.join(dir, files.at(-1)), 'utf8'));
+  db.exec(fs.readFileSync(path.join(dir, MIGRATION_0017), 'utf8'));
   db.pragma('foreign_keys = ON');
 
   const cols = db.prepare('PRAGMA table_info(stage_retry_state)').all().map((c) => c.name);

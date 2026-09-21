@@ -40,7 +40,7 @@ import scriptPolicy from '../../config/script_policy.json' with { type: 'json' }
  * WHAT IS REAL: the entrypoint, storage migration, the ADR-0024 guard,
  * Discovery (dedup/proposition/feature computation/scoring/top-K), the
  * Discovery Memory Ledger, the runner, buildStages(), workSelection.js, all
- * eleven stage implementations, D-C2 authorization, real ffmpeg/ffprobe.
+ * twelve stage implementations, D-C2 authorization, real ffmpeg/ffprobe.
  *
  * WHAT IS STUBBED (external/provider boundaries only):
  *   - OpportunitySource (would be RSS over the network)
@@ -69,8 +69,11 @@ const SOURCE_URL = 'https://acme.com/press-release';
 const CLAIM_TEXT = 'Acme reported one billion dollars in Q3 revenue.';
 const WORKING_TITLE = 'Entrypoint Rehearsal Title';
 const ACTION = (contentVersionId) => `publish:youtube:${contentVersionId}`;
+// ADR-0032: the canonical stage sequence is twelve stages -- final-compliance
+// (Gate 2) sits between media-production and publication.
 const STAGES = ['research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate',
-  'production', 'asset-provisioning', 'rights-verification', 'media-production', 'publication'];
+  'production', 'asset-provisioning', 'rights-verification', 'media-production',
+  'final-compliance', 'publication'];
 
 // ---------------------------------------------------------------- narrator
 let restoreNarrator = () => {};
@@ -346,9 +349,10 @@ function assertDiscoveryExecuted(h, result) {
   assert.equal(count(h.storage, 'SELECT COUNT(*) n FROM opportunities'), 1);
 }
 
-function assertAllElevenStagesReachedPublicationBoundary(h, result) {
+function assertAllTwelveStagesReachedPublicationBoundary(h, result) {
   const p = processedOf(result.runner);
-  assert.deepEqual(Object.keys(p).sort(), [...STAGES].sort(), 'all eleven real stages were dispatched');
+  assert.deepEqual(Object.keys(p).sort(), [...STAGES].sort(), 'all twelve real stages were dispatched');
+  assert.equal(STAGES.length, 12, 'the canonical ADR-0032 sequence is twelve stages');
   for (const stage of ['research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production']) {
     assert.equal(p[stage], 1, `${stage} ran exactly once`);
   }
@@ -357,6 +361,12 @@ function assertAllElevenStagesReachedPublicationBoundary(h, result) {
   for (const stage of ['asset-provisioning', 'rights-verification', 'media-production']) {
     assert.equal(p[stage], 2, `${stage} dispatched twice (real work once, idempotent no-op once)`);
   }
+  // ADR-0032: Gate 2 must actually have run and passed before publication was reachable.
+  assert.ok(p['final-compliance'] >= 1, 'final-compliance was dispatched');
+  assert.equal(
+    count(h.storage, `SELECT COUNT(*) n FROM gate2_compliance_records WHERE decision = 'PASS'`), 1,
+    'exactly one Gate 2 PASS compliance record was persisted'
+  );
   assert.equal(p.publication, 1, 'publication dispatched exactly once');
   assert.deepEqual(h.llmCalls, { features: 1, proposition: 1, research: 1, brief: 1, script: 1, unexpected: 0 });
   assert.equal(count(h.storage, 'SELECT COUNT(*) n FROM content_briefs'), 1);
@@ -410,11 +420,11 @@ test('E1. SIMULATION via runAutonomousEntrypoint: Discovery -> ... -> Publicatio
       assert.equal(result.runner.mode, 'SIMULATION');
       assert.equal(result.runner.stopReason, 'no_progress');
       assertDiscoveryExecuted(h, result);
-      assertAllElevenStagesReachedPublicationBoundary(h, result);
+      assertAllTwelveStagesReachedPublicationBoundary(h, result);
 
       // Publication boundary: denied because the run is SIMULATION; adapter never invoked.
       const cv = h.storage.get('SELECT * FROM content_versions');
-      assert.equal(cv.state, 'PRODUCED', 'item stops at PRODUCED');
+      assert.equal(cv.state, 'FINAL_COMPLIANCE', 'item stops at FINAL_COMPLIANCE: Gate 2 passed, publication denied (ADR-0032)');
       const denial = h.storage.get(`SELECT reason FROM decision_log WHERE decision = 'AUTHORIZATION_DENIED'`);
       assert.match(denial.reason, /run mode is SIMULATION, not LIVE/);
       assert.equal(h.adapter.calls.length, 0, 'publication adapter NOT called in SIMULATION');
@@ -437,7 +447,7 @@ test('E2. LIVE (safe mock adapter) via runAutonomousEntrypoint: one invocation r
       assert.equal(result.runner.mode, 'LIVE');
       assert.equal(result.runner.stopReason, 'no_work');
       assertDiscoveryExecuted(h, result);
-      assertAllElevenStagesReachedPublicationBoundary(h, result);
+      assertAllTwelveStagesReachedPublicationBoundary(h, result);
 
       const cv = h.storage.get('SELECT * FROM content_versions');
       assert.equal(cv.state, 'PUBLISHED');

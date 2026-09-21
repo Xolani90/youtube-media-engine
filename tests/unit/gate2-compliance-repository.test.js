@@ -957,4 +957,88 @@ describe('ADR-0032 Gate 2 compliance persistence and exact PASS binding (Batch 4
       });
     }
   });
+
+  // ---------------------------------------------------------------- 16. PRODUCED-origin REVIEW / BLOCK (Batch 5, B3)
+
+  describe('16. a PRODUCED item: REVIEW -> NEEDS_REVIEW and BLOCK -> BLOCKED, persisted and transitioned together (ADR-0032 s11)', () => {
+    test('PRODUCED + overall REVIEW: the compliance record is persisted and the item transitions PRODUCED -> NEEDS_REVIEW', async () => {
+      await withGate2Fixture((fx) => {
+        // The fixture starts at PRODUCED with no compliance history at all.
+        assert.equal(stateOf(fx), 'PRODUCED');
+        assert.equal(rows(fx).length, 0);
+        // GC-002 REVIEW: an applicable asset with no asset_verifications record.
+        fx.addAsset('UNVERIFIED');
+
+        const stage = runGate2(fx.storage, fx.contentVersionId);
+
+        assert.equal(stage.outcome, OUTCOME.REVIEW);
+        assert.equal(stage.decision, RESULT.REVIEW);
+        assert.equal(stage.transitioned, true);
+        assert.equal(stage.resultingState, 'NEEDS_REVIEW');
+        assert.equal(stateOf(fx), 'NEEDS_REVIEW');
+
+        const all = rows(fx);
+        assert.equal(all.length, 1, 'exactly one record was appended');
+        assert.equal(all[0].decision, RESULT.REVIEW);
+        assert.equal(all[0].content_version_id, fx.contentVersionId);
+        // A REVIEW row may carry partial bindings, but never a PASS binding set.
+        assert.equal(repoOf(fx).getNewest(fx.contentVersionId).id, all[0].id);
+        // No PASS exists, so nothing authorizes.
+        assertNonAuthorizing(verify(fx), NON_AUTHORIZING.STATE_NOT_FINAL_COMPLIANCE, 'state_NEEDS_REVIEW');
+      });
+    });
+
+    test('PRODUCED + overall BLOCK: the compliance record is persisted and the item transitions PRODUCED -> BLOCKED', async () => {
+      await withGate2Fixture((fx) => {
+        assert.equal(stateOf(fx), 'PRODUCED');
+        assert.equal(rows(fx).length, 0);
+        // GC-002 BLOCK: the authoritative append-only history says DISPUTED.
+        const assetId = fx.addAsset('UNVERIFIED');
+        recordVerification(fx.storage, assetId, 'DISPUTED');
+
+        const stage = runGate2(fx.storage, fx.contentVersionId);
+
+        assert.equal(stage.outcome, OUTCOME.BLOCK);
+        assert.equal(stage.decision, RESULT.BLOCK);
+        assert.equal(stage.transitioned, true);
+        assert.equal(stage.resultingState, 'BLOCKED');
+        assert.equal(stateOf(fx), 'BLOCKED');
+
+        const all = rows(fx);
+        assert.equal(all.length, 1);
+        assert.equal(all[0].decision, RESULT.BLOCK);
+        assertNonAuthorizing(verify(fx), NON_AUTHORIZING.STATE_NOT_FINAL_COMPLIANCE, 'state_BLOCKED');
+      });
+    });
+
+    test('the compliance record and the state transition commit together: if the transition cannot be written, NO compliance record survives', async () => {
+      await withGate2Fixture((fx) => {
+        fx.addAsset('UNVERIFIED'); // -> overall REVIEW, so a real transition is attempted
+
+        // Test-only guard installed on THIS temporary database: it makes the
+        // content_versions UPDATE inside the stage's transaction fail. Nothing
+        // in production is changed; this only forces the failure branch so the
+        // rollback can be observed.
+        fx.storage.run(`CREATE TRIGGER test_block_cv_update BEFORE UPDATE ON content_versions
+                        BEGIN SELECT RAISE(ABORT, 'test: state transition cannot be written'); END`);
+
+        const countsBefore = tableCounts(fx.storage);
+        assert.throws(() => runGate2(fx.storage, fx.contentVersionId), /state transition cannot be written/);
+
+        // The append happened BEFORE the failing UPDATE inside the same
+        // transaction, so it must have been rolled back with it.
+        assert.equal(rows(fx).length, 0, 'no compliance record survived the failed transition');
+        assert.equal(stateOf(fx), 'PRODUCED', 'the item state is unchanged');
+        assert.deepEqual(tableCounts(fx.storage), countsBefore, 'no table gained or lost a row');
+
+        // With the guard removed, the identical evaluation commits both together.
+        fx.storage.run('DROP TRIGGER test_block_cv_update');
+        const stage = runGate2(fx.storage, fx.contentVersionId);
+        assert.equal(stage.resultingState, 'NEEDS_REVIEW');
+        assert.equal(stateOf(fx), 'NEEDS_REVIEW');
+        assert.equal(rows(fx).length, 1, 'exactly one record -- the rolled-back attempt left nothing behind');
+        assert.equal(rows(fx)[0].decision, RESULT.REVIEW);
+      });
+    });
+  });
 });
