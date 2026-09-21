@@ -179,7 +179,8 @@ Sub-kinds for local filesystem failures inside the download path are an open ite
   one successful item -> COMPLETED.
 - Contained failures with no successful item -> FAILED.
 
-The definition of "successful item" per stage is an open item (U-2).
+The definition of "successful item" per stage (formerly the open item U-2) is
+resolved by ADR-0028, which also records the invocation aggregation rules.
 
 ## 10. D6 Publication, D7 local tools, D8 timing
 
@@ -267,14 +268,14 @@ text and already carries provider, stage and `config_snapshot`.
 
 ## 16. OPEN OWNER QUESTIONS, IMPLEMENTATION BLOCKERS
 
-**Every item below is UNRESOLVED. None is an authorized decision. Nothing in this
-ADR answers any of them, and no implementation audit may treat any of them as
-decided.**
+**Every item below is UNRESOLVED, except U-2, which is RESOLVED by ADR-0028. None
+of the unresolved items is an authorized decision. Nothing in this ADR answers any
+of them, and no implementation audit may treat any of them as decided.**
 
 | # | Unresolved question | Blocks |
 |---|---|---|
 | U-1 | How the normal selector distinguishes an Owner-reactivated RESEARCHING project from a crashed (P1), provider-blocked or single-failure one. These share status and fields. | WS6 |
-| U-2 | The definition of "successful item" and the per-stage mapping of outcomes to success or contained failure (D4). | WS2 |
+| U-2 | RESOLVED by ADR-0028. Original question: the definition of "successful item" and the per-stage mapping of outcomes to success or contained failure (D4). | WS2 (see ADR-0028) |
 | U-3 | What "terminal/exclusion" means for an Asset Provisioning explicit no-hit. Under the existing contract the item stays eligible and is re-called each sweep. Also whether deterministic results consume the pacing slot. | WS3 |
 | U-4 | Whether a structured configuration-failure kind (missing key) is explicit provider-wide or infrastructure evidence on a single item. Not stated. | WS3 |
 | U-5 | Whether Publication `MEDIA_FILE_MISSING` and `CREDENTIALS_UNAVAILABLE` (non-provider or config kinds) participate in D6 repetition. | WS5 |
@@ -302,5 +303,5 @@ specification. WS1 (classification core) depends only on this ADR. WS7
 ```text
 A4 SLICE 3 CLASSIFICATION RECORD: RECORDED, OWNER-FROZEN DECISIONS
 GOVERNANCE ONLY. No implementation authorized by this record.
-U-1 through U-10 remain UNRESOLVED.
+U-1 and U-3 through U-10 remain UNRESOLVED. U-2 is RESOLVED by ADR-0028.
 ```
