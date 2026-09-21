@@ -10,6 +10,7 @@ import { runAutonomousOperation } from './autonomous/runner.js';
 import { computeRawFeatures } from './discovery/featureComputation.js';
 import { config } from './config/index.js';
 import { prepareDiscoveryMemory, recordDiscoveryOutcomes } from './autonomous/discoveryMemory.js';
+import { createDiscoveryEvaluationStore } from './autonomous/discoveryEvaluationStore.js';
 import { SystemRunRecorder, assertRunAllowed, AUTONOMOUS_RUN_ACTIVE } from './state/SystemRun.js';
 
 /**
@@ -134,6 +135,19 @@ export async function runAutonomousEntrypoint(deps = {}) {
       now: deps.discovery?.now
     });
 
+    // ADR-0033: durable per-observation Discovery evaluation state. Always
+    // constructed for the production entrypoint (an evaluationStore override
+    // is honored for tests/controlled callers, mirroring the rawFeatures
+    // pattern above); Discovery itself is never responsible for constructing
+    // it from scratch when a caller does not supply one.
+    const evaluationStore =
+      deps.discovery?.evaluationStore ??
+      createDiscoveryEvaluationStore({
+        storage,
+        sourceScope: opportunitySource.id ?? null,
+        now: deps.discovery?.now
+      });
+
     const discoveryResult = await runDiscoveryPipeline({
       storage,
       runId: deps.discovery?.runId ?? null,
@@ -145,7 +159,8 @@ export async function runAutonomousEntrypoint(deps = {}) {
       alreadyProducedCorpus:
         deps.discovery?.alreadyProducedCorpus ?? [],
       topK: deps.discovery?.topK ?? config.discoveryTopK,
-      rawFeatures
+      rawFeatures,
+      evaluationStore
     });
 
     // Record outcomes only after Discovery returned successfully. If

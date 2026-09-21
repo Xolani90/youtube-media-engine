@@ -336,5 +336,5 @@ test('run-local pacing set is invocation-scoped: not exported, not persisted, no
   assert.equal(retryMigrations.at(-1), '0017_generalize_stage_retry_identity.sql', 'no stage-retry/pacing migration beyond 0017 was added');
   // The current latest migration overall is pinned by name and deliberately
   // acknowledged (ADR-0032 Gate 2 added 0018 and 0019).
-  assert.equal(migrations.at(-1), '0019_gate2_compliance_records.sql', 'current latest migration (update this deliberately when one is added)');
+  assert.equal(migrations.at(-1), '0020_discovery_evaluations.sql', 'current latest migration (update this deliberately when one is added)');
 });

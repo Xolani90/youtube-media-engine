@@ -60,7 +60,7 @@ function insertOpportunity(storage, opp) {
  */
 export async function runDiscoveryPipeline({
   storage, runId, observations, llmRouter, discoveryPolicy, scoringWeights,
-  alreadyProducedCorpus = [], topK, rawFeatures
+  alreadyProducedCorpus = [], topK, rawFeatures, evaluationStore = null
 }) {
   const stats = { discovered: observations.length, dedupRejected: 0, eligibilityRejected: 0, propositionRejected: 0, scored: 0, riskVetoed: 0, selected: 0, diversityExcluded: 0 };
   const accepted = []; // observations that survived dedup + eligibility, carrying underlyingEventId
@@ -123,31 +123,63 @@ export async function runDiscoveryPipeline({
   }
 
   // Proposition generation + validation, scoring, for every eligible candidate.
+  // ADR-0033: when an evaluationStore is supplied and holds a valid durable
+  // record for this observation, reuse it instead of calling the proposition
+  // and feature LLMs again. A missing/invalid record falls through to the
+  // unmodified fresh-evaluation path. Absence of a store is byte-for-byte
+  // the baseline behavior.
   const scoredCandidates = [];
   for (const candidate of accepted) {
-    const genResult = await generateProposition(candidate.observation, llmRouter);
-    logDecision(storage, {
-      runId, stage: STAGE.PROPOSITION_GENERATION, subjectId: candidate.id,
-      decision: 'GENERATED', reason: 'proposition_generation_completed', provider: genResult.providerUsed,
-      configSnapshot: { model: genResult.model, rawOutput: genResult.rawOutput, estimatedCost: genResult.estimatedCost, isPaid: genResult.isPaid }
-    });
+    const reused = evaluationStore ? evaluationStore.lookup(candidate.observation) : null;
+    let proposition;
+    let raw;
 
-    const validation = validateProposition(genResult.proposition);
-    if (!validation.valid) {
-      stats.propositionRejected++;
+    if (reused) {
+      proposition = reused.proposition;
+      raw = reused.raw;
+      logDecision(storage, {
+        runId, stage: STAGE.PROPOSITION_GENERATION, subjectId: candidate.id,
+        decision: 'REUSED', reason: 'durable_evaluation_reused',
+        configSnapshot: { completedAt: reused.completedAt, contractVersion: reused.contractVersion, auditMetadata: reused.auditMetadata }
+      });
       logDecision(storage, {
         runId, stage: STAGE.PROPOSITION_VALIDATION, subjectId: candidate.id,
-        decision: 'REJECTED', reason: REJECTION_REASON.INELIGIBLE_NO_VIABLE_PROPOSITION,
-        resultingState: 'REJECTED', configSnapshot: { validationDetail: validation.reason }
+        decision: 'ACCEPTED', reason: 'proposition_valid', resultingState: 'PROPOSITION_VALID'
       });
-      continue;
-    }
-    logDecision(storage, {
-      runId, stage: STAGE.PROPOSITION_VALIDATION, subjectId: candidate.id,
-      decision: 'ACCEPTED', reason: 'proposition_valid', resultingState: 'PROPOSITION_VALID'
-    });
+    } else {
+      const genResult = await generateProposition(candidate.observation, llmRouter);
+      logDecision(storage, {
+        runId, stage: STAGE.PROPOSITION_GENERATION, subjectId: candidate.id,
+        decision: 'GENERATED', reason: 'proposition_generation_completed', provider: genResult.providerUsed,
+        configSnapshot: { model: genResult.model, rawOutput: genResult.rawOutput, estimatedCost: genResult.estimatedCost, isPaid: genResult.isPaid }
+      });
 
-    const raw = await rawFeatures(candidate.observation);
+      const validation = validateProposition(genResult.proposition);
+      if (!validation.valid) {
+        stats.propositionRejected++;
+        logDecision(storage, {
+          runId, stage: STAGE.PROPOSITION_VALIDATION, subjectId: candidate.id,
+          decision: 'REJECTED', reason: REJECTION_REASON.INELIGIBLE_NO_VIABLE_PROPOSITION,
+          resultingState: 'REJECTED', configSnapshot: { validationDetail: validation.reason }
+        });
+        continue;
+      }
+      logDecision(storage, {
+        runId, stage: STAGE.PROPOSITION_VALIDATION, subjectId: candidate.id,
+        decision: 'ACCEPTED', reason: 'proposition_valid', resultingState: 'PROPOSITION_VALID'
+      });
+
+      proposition = genResult.proposition;
+      raw = await rawFeatures(candidate.observation);
+
+      if (evaluationStore) {
+        evaluationStore.commit(candidate.observation, {
+          proposition,
+          raw,
+          audit: { proposition: { provider: genResult.providerUsed, model: genResult.model } }
+        });
+      }
+    }
     const { overallScore, breakdown } = computeValueScore(
       {
         novelty: raw.novelty, competition: raw.competition, story_potential: raw.story_potential,
@@ -186,7 +218,7 @@ export async function runDiscoveryPipeline({
       raw,
       riskLevel: risk.level,
       vetoed,
-      proposition: genResult.proposition
+      proposition
     });
 
     if (vetoed) stats.riskVetoed++;
