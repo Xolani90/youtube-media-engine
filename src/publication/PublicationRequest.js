@@ -20,9 +20,18 @@
  * @param {object} args.script
  * @param {object} args.contentBrief
  * @param {object} args.mediaArtifact
+ * `requestedVisibility` (ADR-0030) is the authorization-derived visibility
+ * supplied ONLY by the publication pipeline from the grant that actually
+ * authorized the action (SideEffectAuthorization). It is `null` when the
+ * grant supplies none (exact per-item grant: the provider's own default
+ * applies, as at baseline). It is deliberately never read from
+ * `contentVersion`, `script`, `contentBrief` or `mediaArtifact`: a content
+ * item cannot request or override visibility.
+ *
  * @param {string|null} [args.requestedPublishAt] - ISO 8601 timestamp, or null for "publish now"
+ * @param {string|null} [args.requestedVisibility] - authorization-derived visibility ('public'), or null
  */
-export function buildPublicationRequest({ contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt = null }) {
+export function buildPublicationRequest({ contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt = null, requestedVisibility = null }) {
   const title = contentBrief.working_title ?? `Untitled (${contentVersion.id})`;
   // No separate "video description" field exists on content_briefs yet;
   // viewer_promise is the closest existing authoritative field
@@ -40,6 +49,7 @@ export function buildPublicationRequest({ contentVersion, script, contentBrief, 
     mediaFilePath: mediaArtifact.artifact_path,
     mediaChecksum: mediaArtifact.artifact_checksum,
     durationSeconds: mediaArtifact.duration_seconds,
-    requestedPublishAt
+    requestedPublishAt,
+    requestedVisibility
   };
 }

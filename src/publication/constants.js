@@ -51,6 +51,12 @@ export const OUTCOME = Object.freeze({
   ASSET_RIGHTS_BLOCKED: 'ASSET_RIGHTS_BLOCKED',
   AUTHORIZATION_DENIED: 'AUTHORIZATION_DENIED',
   PROVIDER_FAILURE: 'PROVIDER_FAILURE',
+  // ADR-0030 §8: the upload happened and the provider returned an item id,
+  // but the provider-confirmed visibility is not the requested PUBLIC.
+  // Persisted as publications.status='FAILED' + failure_reason
+  // VISIBILITY_MISMATCH (see below). Distinct from PROVIDER_FAILURE so the
+  // runner's PROVIDER_FAILURE-keyed retry accounting is not consumed.
+  VISIBILITY_MISMATCH: 'VISIBILITY_MISMATCH',
   QUARANTINED: 'QUARANTINED',
   AMBIGUOUS: 'AMBIGUOUS',
   PUBLISHED: 'PUBLISHED'
@@ -65,6 +71,8 @@ export const DECISION_LOG_DECISION = Object.freeze({
   AUTHORIZATION_DENIED: 'AUTHORIZATION_DENIED',
   PROVIDER_FAILURE: 'PROVIDER_FAILURE',
   AMBIGUOUS: 'AMBIGUOUS',
+  // ADR-0030 audit: which grant authorized the external action.
+  AUTHORIZATION_GRANTED: 'AUTHORIZATION_GRANTED',
   INTERRUPTED_ATTEMPT: 'INTERRUPTED_ATTEMPT',
   PUBLISHED: 'PUBLISHED'
 });
@@ -79,3 +87,16 @@ export const DECISION_LOG_DECISION = Object.freeze({
 export function publicationActionId(provider, contentVersionId) {
   return `publish:${provider}:${contentVersionId}`;
 }
+
+// ADR-0030 §8 / Owner Open Item 4 decision (Option 2). A confirmed upload
+// whose provider-returned visibility is not the requested PUBLIC is stored
+// as publications.status = FAILED with this failure_reason. This is a
+// NARROW, terminal exception to FAILED's otherwise-reclaimable semantics:
+// the external upload already occurred, so a FAILED row with THIS reason
+// is never reclaimed, re-uploaded, selected for automatic re-publication,
+// or counted against the bounded retry budget. No other failure_reason is
+// affected. No new lifecycle status exists.
+export const VISIBILITY_MISMATCH_FAILURE_REASON = 'VISIBILITY_MISMATCH';
+
+// Visibility values the YouTube adapter supports (ADR-0030 open item 3).
+export const REQUESTED_VISIBILITY_PUBLIC = 'public';

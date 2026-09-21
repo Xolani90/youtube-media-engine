@@ -203,3 +203,105 @@ test('no secrets appear in any normalized result', async () => {
 
   fs.rmSync(request.mediaFilePath, { force: true });
 });
+
+/**
+ * ---------------------------------------------------------------------
+ * ADR-0030 -- requested-visibility validation and provider-confirmed
+ * visibility reporting. No real network: every fetch is a mock.
+ * ---------------------------------------------------------------------
+ */
+
+function uploadFlow({ captured = {}, returnedStatus = { privacyStatus: 'public' } } = {}) {
+  captured.urls = [];
+  return makeFetchMock([
+    ['oauth2.googleapis.com/token', (u) => { captured.urls.push(String(u)); return jsonResponse(200, { access_token: 'tok' }); }],
+    ['upload/youtube/v3/videos', (u, init) => {
+      captured.urls.push(String(u));
+      captured.body = JSON.parse(init.body);
+      return jsonResponse(200, {}, { location: 'https://upload.example.com/session/vis' });
+    }],
+    ['upload.example.com/session/vis', (u) => {
+      captured.urls.push(String(u));
+      return jsonResponse(200, { id: 'VIS1', ...(returnedStatus ? { status: returnedStatus } : {}) });
+    }]
+  ]);
+}
+
+test('ADR-0030: authorization-derived requestedVisibility public/unlisted/private is what is sent to YouTube', async () => {
+  for (const vis of ['public', 'unlisted', 'private']) {
+    const captured = {};
+    const request = baseRequest({ requestedVisibility: vis });
+    const adapter = new YouTubeAdapter({ fetchImpl: uploadFlow({ captured, returnedStatus: { privacyStatus: vis } }), credentialsProvider: fakeCredentials });
+    const result = await adapter.publish(request);
+    assert.equal(result.status, PUBLICATION_RESULT_STATUS.SUCCESS);
+    assert.equal(captured.body.status.privacyStatus, vis);
+    assert.equal(result.confirmedVisibility, vis);
+    fs.rmSync(request.mediaFilePath, { force: true });
+  }
+});
+
+test('ADR-0030: null/absent requestedVisibility keeps the adapter default (private) -- baseline behavior', async () => {
+  for (const overrides of [{}, { requestedVisibility: null }]) {
+    const captured = {};
+    const request = baseRequest(overrides);
+    const adapter = new YouTubeAdapter({ fetchImpl: uploadFlow({ captured, returnedStatus: { privacyStatus: 'private' } }), credentialsProvider: fakeCredentials });
+    await adapter.publish(request);
+    assert.equal(captured.body.status.privacyStatus, 'private');
+    fs.rmSync(request.mediaFilePath, { force: true });
+  }
+});
+
+test('ADR-0030: invalid visibility fails closed BEFORE any network call (not even the token refresh)', async () => {
+  for (const bad of ['PUBLIC', 'Public', 'friends', '', ' public', 'public ', 0, true, {}, ['public']]) {
+    let fetchCalls = 0;
+    const request = baseRequest({ requestedVisibility: bad });
+    const adapter = new YouTubeAdapter({
+      fetchImpl: async () => { fetchCalls += 1; throw new Error('must not be called'); },
+      credentialsProvider: fakeCredentials
+    });
+    const result = await adapter.publish(request);
+    assert.equal(result.status, PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, JSON.stringify(bad));
+    assert.equal(result.errorClass, 'INVALID_VISIBILITY');
+    assert.equal(fetchCalls, 0, `no network for ${JSON.stringify(bad)}`);
+    fs.rmSync(request.mediaFilePath, { force: true });
+  }
+});
+
+test('ADR-0030: an invalid adapter default also fails closed before any network call', async () => {
+  let fetchCalls = 0;
+  const request = baseRequest();
+  const adapter = new YouTubeAdapter({
+    fetchImpl: async () => { fetchCalls += 1; throw new Error('must not be called'); },
+    credentialsProvider: fakeCredentials,
+    defaultPrivacyStatus: 'everyone'
+  });
+  const result = await adapter.publish(request);
+  assert.equal(result.errorClass, 'INVALID_VISIBILITY');
+  assert.equal(fetchCalls, 0);
+  fs.rmSync(request.mediaFilePath, { force: true });
+});
+
+test('ADR-0030: provider-confirmed visibility is reported verbatim (null when absent) and never relabelled', async () => {
+  const cases = [[{ privacyStatus: 'private' }, 'private'], [{ privacyStatus: 'unlisted' }, 'unlisted'], [null, null], [{}, null]];
+  for (const [returnedStatus, expected] of cases) {
+    const request = baseRequest({ requestedVisibility: 'public' });
+    const adapter = new YouTubeAdapter({ fetchImpl: uploadFlow({ returnedStatus }), credentialsProvider: fakeCredentials });
+    const result = await adapter.publish(request);
+    assert.equal(result.status, PUBLICATION_RESULT_STATUS.SUCCESS, 'the adapter reports evidence; the core decides mismatch');
+    assert.equal(result.confirmedVisibility, expected);
+    fs.rmSync(request.mediaFilePath, { force: true });
+  }
+});
+
+test('ADR-0030: no automatic post-upload visibility change -- only token, initiate and file PUT are ever called', async () => {
+  const captured = {};
+  const request = baseRequest({ requestedVisibility: 'public' });
+  const adapter = new YouTubeAdapter({ fetchImpl: uploadFlow({ captured, returnedStatus: { privacyStatus: 'private' } }), credentialsProvider: fakeCredentials });
+  await adapter.publish(request);
+  assert.equal(captured.urls.length, 3);
+  assert.ok(captured.urls[0].includes('oauth2.googleapis.com/token'));
+  assert.ok(captured.urls[1].includes('uploadType=resumable'));
+  assert.ok(captured.urls[2].includes('upload.example.com/session/vis'));
+  assert.ok(!captured.urls.some((u) => /youtube\/v3\/videos\?(?!uploadType)/.test(u) || u.includes('videos.update')));
+  fs.rmSync(request.mediaFilePath, { force: true });
+});

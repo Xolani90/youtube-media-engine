@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { PUBLICATION_STAGE, PUBLICATION_STATUS, PUBLICATION_RESULT_STATUS, OUTCOME, DECISION_LOG_DECISION, publicationActionId } from './constants.js';
+import { PUBLICATION_STAGE, PUBLICATION_STATUS, PUBLICATION_RESULT_STATUS, OUTCOME, DECISION_LOG_DECISION, publicationActionId, VISIBILITY_MISMATCH_FAILURE_REASON, REQUESTED_VISIBILITY_PUBLIC } from './constants.js';
 import { resolveMediaForPublication } from './eligibility.js';
 import { buildPublicationRequest } from './PublicationRequest.js';
 import { resolveProvider } from './providerRegistry.js';
@@ -19,6 +19,22 @@ function logDecision(storage, { runId = null, subjectType, subjectId, decision, 
     [id, runId, subjectType, subjectId, decision, reason, resultingState, nowISO(), PUBLICATION_STAGE]
   );
   return id;
+}
+
+/**
+ * ADR-0030 Open Item 4 (Owner Option 2): a FAILED row whose failure_reason
+ * is VISIBILITY_MISMATCH records an upload that DID happen (the provider
+ * returned an item id) with a provider-confirmed visibility different from
+ * the requested PUBLIC. It is the one narrow exception to FAILED being
+ * reclaimable: it is terminal for the automatic workflow. Every other
+ * FAILED reason keeps its existing reclaim behavior.
+ */
+function isVisibilityMismatchRow(row) {
+  return row?.status === PUBLICATION_STATUS.FAILED && row.failure_reason === VISIBILITY_MISMATCH_FAILURE_REASON;
+}
+
+function visibilityMismatchResult(row, reason = 'previously_visibility_mismatch_not_auto_retried') {
+  return { outcome: OUTCOME.VISIBILITY_MISMATCH, reason, publication: row };
 }
 
 /**
@@ -119,6 +135,13 @@ export async function runPublication({
   if (existing?.status === PUBLICATION_STATUS.AMBIGUOUS) {
     return { outcome: OUTCOME.AMBIGUOUS, reason: 'previously_ambiguous_not_auto_retried', publication: existing };
   }
+  // ADR-0030 Open Item 4: a confirmed visibility mismatch is terminal for
+  // the automatic workflow -- the upload already happened, so it is never
+  // reclaimed, re-uploaded, or re-authorized here. No provider call, no
+  // new claim, no retry-budget consumption.
+  if (isVisibilityMismatchRow(existing)) {
+    return visibilityMismatchResult(existing);
+  }
   if (existing?.status === PUBLICATION_STATUS.PENDING) {
     const interrupted = storage.transaction(() => {
       storage.run(
@@ -190,9 +213,19 @@ export async function runPublication({
   // once (ADR-0008 §3.1). The provider adapter is never invoked before
   // this passes, so a caller cannot bypass D-C2 by reaching the adapter
   // directly through this pipeline. ---
+  //
+  // ADR-0030: assertExternalActionAllowed() also reports WHICH grant
+  // authorized this action (exact per-item, or the dormant standing
+  // YouTube PUBLIC entry) and the authorization-derived requested
+  // visibility. Precedence when both match: the exact per-item grant wins
+  // and supplies no visibility (baseline/private default preserved); the
+  // standing grant supplies 'public'. The grant is chosen solely inside
+  // SideEffectAuthorization from the Owner-controlled file -- nothing
+  // passed to runPublication (caller, runner, content, provider) selects it.
   const action = publicationActionId(provider, contentVersion.id);
+  let grant;
   try {
-    assertExternalActionAllowed({ action, mode });
+    grant = assertExternalActionAllowed({ action, mode });
   } catch (err) {
     if (!(err instanceof SideEffectDeniedError)) throw err;
     logDecision(storage, {
@@ -201,13 +234,23 @@ export async function runPublication({
     }, nowISO);
     return { outcome: OUTCOME.AUTHORIZATION_DENIED, reason: err.message, publication: null };
   }
+  // Audit (ADR-0030): record which mechanism matched. Contains only the
+  // grant name, the action id and the requested visibility -- no secrets.
+  logDecision(storage, {
+    runId, subjectType: 'content_version', subjectId: contentVersion.id,
+    decision: DECISION_LOG_DECISION.AUTHORIZATION_GRANTED,
+    reason: `authorization_grant_${grant.grant}_action_${action}_requested_visibility_${grant.requestedVisibility ?? 'provider_default'}`
+  }, nowISO);
 
   // --- 6. Build the provider-neutral request and durably claim this
   // attempt (PENDING row) BEFORE calling the provider, so a crash
   // between here and the provider result is itself detectable as an
   // interrupted attempt on the next run (step 3 above), rather than
   // leaving no trace at all that an external call may have been made. ---
-  const request = buildPublicationRequest({ contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt });
+  const request = buildPublicationRequest({
+    contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt,
+    requestedVisibility: grant.requestedVisibility
+  });
   const requestJson = JSON.stringify(request);
 
   // Performs the claim attempt (race re-check + INSERT) inside a single
@@ -224,7 +267,10 @@ export async function runPublication({
       [contentVersion.id, provider]
     );
     if (raceExisting) {
-      if (raceExisting.status === PUBLICATION_STATUS.FAILED) {
+      // ADR-0030: a VISIBILITY_MISMATCH FAILED row is deliberately excluded
+      // from reclaim (falls through to `raced` below, never flipped to
+      // PENDING, never re-uploaded). All other FAILED rows are unchanged.
+      if (raceExisting.status === PUBLICATION_STATUS.FAILED && !isVisibilityMismatchRow(raceExisting)) {
         // FAILED is documented (0010_publication.sql, PublicationProvider.js)
         // as safe to retry -- no external side effect occurred. Reuse
         // this exact row (the UNIQUE(content_version_id, provider)
@@ -295,6 +341,9 @@ export async function runPublication({
       if (freshRow.status === PUBLICATION_STATUS.PUBLISHED) {
         return { outcome: OUTCOME.ALREADY_PUBLISHED, publication: freshRow };
       }
+      if (isVisibilityMismatchRow(freshRow)) {
+        return visibilityMismatchResult(freshRow);
+      }
       return { outcome: OUTCOME.AMBIGUOUS, reason: 'concurrent_attempt_in_progress', publication: freshRow };
     }
 
@@ -321,6 +370,9 @@ export async function runPublication({
     // race's current state rather than guessing.
     if (claim.existing.status === PUBLICATION_STATUS.PUBLISHED) {
       return { outcome: OUTCOME.ALREADY_PUBLISHED, publication: claim.existing };
+    }
+    if (isVisibilityMismatchRow(claim.existing)) {
+      return visibilityMismatchResult(claim.existing);
     }
     return { outcome: OUTCOME.AMBIGUOUS, reason: 'concurrent_attempt_in_progress', publication: claim.existing };
   }
@@ -396,6 +448,41 @@ export async function runPublication({
   // hand (Publication v1 spec §13).
   if (result.status !== PUBLICATION_RESULT_STATUS.SUCCESS || !result.providerItemId) {
     throw new Error(`Publication provider "${provider}" returned an unrecognized or incomplete result: ${JSON.stringify(result)}`);
+  }
+
+  // --- 8.5. ADR-0030 §8 / Open Item 4 (Owner Option 2): requested PUBLIC
+  // but the provider did not CONFIRM public. A returned video id alone is
+  // never a successful PUBLIC publication. The upload has already
+  // happened, so this is recorded as FAILED with failure_reason
+  // VISIBILITY_MISMATCH -- a terminal, non-reclaimable exception to FAILED
+  // (see isVisibilityMismatchRow). The provider-confirmed value (or null if
+  // the provider reported none) is preserved verbatim in result_json as
+  // factual evidence, together with the item id/url so the Owner can
+  // reconcile manually. Deliberately NOT done here: no
+  // recordFailedAttempt() (no retry budget, no quarantine), no
+  // content_versions transition (stays PRODUCED), no provider_item_id /
+  // provider_url columns (documented as set only on PUBLISHED), no
+  // follow-up call to change visibility, no second upload, no AMBIGUOUS.
+  // A missing confirmed visibility fails closed the same way: PUBLIC was
+  // not confirmed.
+  if (request.requestedVisibility === REQUESTED_VISIBILITY_PUBLIC && result.confirmedVisibility !== REQUESTED_VISIBILITY_PUBLIC) {
+    const confirmed = result.confirmedVisibility ?? null;
+    const mismatchRow = storage.transaction(() => {
+      storage.run(
+        `UPDATE publications SET status = 'FAILED', result_json = ?, failure_reason = ?, updated_at = ? WHERE id = ?`,
+        [
+          JSON.stringify({ ...result, visibilityMismatch: { requested: request.requestedVisibility, confirmed } }),
+          VISIBILITY_MISMATCH_FAILURE_REASON, nowISO(), claim.publicationId
+        ]
+      );
+      return storage.get('SELECT * FROM publications WHERE id = ?', [claim.publicationId]);
+    });
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.PROVIDER_FAILURE,
+      reason: `publication_${claim.publicationId}_failed_${VISIBILITY_MISMATCH_FAILURE_REASON}_requested_${request.requestedVisibility}_confirmed_${confirmed ?? 'none'}`
+    }, nowISO);
+    return { outcome: OUTCOME.VISIBILITY_MISMATCH, reason: VISIBILITY_MISMATCH_FAILURE_REASON, requestedVisibility: request.requestedVisibility, confirmedVisibility: confirmed, publication: mismatchRow };
   }
 
   const published = storage.transaction(() => {

@@ -2,6 +2,11 @@ import fs from 'node:fs';
 import { PublicationProvider } from '../PublicationProvider.js';
 import { PUBLICATION_RESULT_STATUS } from '../constants.js';
 
+// The only privacyStatus values this adapter will ever send (YouTube Data
+// API v3 status.privacyStatus). Anything else fails closed before any
+// network call (ADR-0030 open item 3).
+const SUPPORTED_PRIVACY_STATUSES = Object.freeze(['private', 'unlisted', 'public']);
+
 /**
  * YouTube Data API v3 first concrete publication provider adapter.
  * Every YouTube-specific concept (endpoints, resumable-upload protocol,
@@ -64,6 +69,23 @@ export class YouTubeAdapter extends PublicationProvider {
   }
 
   async publish(request) {
+    // ADR-0030: resolve and validate the visibility to be requested BEFORE
+    // any network activity (including the OAuth token refresh). The
+    // authorization-derived `request.requestedVisibility` (set only by the
+    // publication pipeline from the grant that authorized this action)
+    // takes precedence; `null`/absent means the adapter default applies,
+    // exactly as at baseline. A value outside private/unlisted/public is a
+    // confirmed local rejection: no external side effect occurred.
+    const privacyStatus = request.requestedVisibility ?? this._defaultPrivacyStatus;
+    if (!SUPPORTED_PRIVACY_STATUSES.includes(privacyStatus)) {
+      return {
+        status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE,
+        provider: this.id,
+        errorClass: 'INVALID_VISIBILITY',
+        retryable: false
+      };
+    }
+
     let accessToken;
     try {
       accessToken = await this._getAccessToken();
@@ -88,7 +110,7 @@ export class YouTubeAdapter extends PublicationProvider {
       };
     }
 
-    const metadata = this._buildMetadata(request);
+    const metadata = this._buildMetadata(request, privacyStatus);
     const fileStat = fs.statSync(request.mediaFilePath);
 
     let sessionUrl;
@@ -151,14 +173,14 @@ export class YouTubeAdapter extends PublicationProvider {
     return body.access_token;
   }
 
-  _buildMetadata(request) {
+  _buildMetadata(request, privacyStatus = this._defaultPrivacyStatus) {
     return {
       snippet: {
         title: request.title,
         description: request.description
       },
       status: {
-        privacyStatus: this._defaultPrivacyStatus,
+        privacyStatus,
         // Scheduling (Publication v1 spec §15): YouTube only honors
         // `publishAt` when privacyStatus is 'private' at upload time.
         // The adapter passes the core's requestedPublishAt through
@@ -254,6 +276,12 @@ export class YouTubeAdapter extends PublicationProvider {
       provider: this.id,
       providerItemId: videoId,
       providerUrl: `https://youtu.be/${videoId}`,
+      // ADR-0030 §8: the provider-CONFIRMED visibility, exactly as YouTube
+      // returned it (null when the response did not include one). The
+      // provider-neutral core compares this to the requested visibility;
+      // this adapter never relabels it and never issues any follow-up call
+      // to change visibility.
+      confirmedVisibility: uploadResult?.status?.privacyStatus ?? null,
       raw: { privacyStatus: uploadResult?.status?.privacyStatus ?? null }
     };
   }

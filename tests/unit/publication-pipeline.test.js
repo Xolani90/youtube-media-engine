@@ -990,3 +990,411 @@ test('no assets attached: existing behavior is unaffected -- publication proceed
 
   cleanup(storage, dbPath, videoFile);
 });
+
+/**
+ * ---------------------------------------------------------------------
+ * ADR-0030 (Model B) -- standing YouTube PUBLIC authorization mechanism,
+ * precedence, visibility propagation, audit, and VISIBILITY_MISMATCH
+ * handling (Owner Open Item 4, Option 2).
+ *
+ * The standing entry is added ONLY to per-test temp authorization files
+ * (never to config/authorized_external_actions.json). The provider is
+ * 'youtube' so the standing grant can match; the adapter is always a mock
+ * -- no real YouTube adapter, network, or credentials.
+ * ---------------------------------------------------------------------
+ */
+
+const STANDING = 'standing:publish:youtube:public';
+
+function yt(status, extra = {}) {
+  return { status, provider: 'youtube', ...extra };
+}
+const successResult = (confirmedVisibility, id = 'yt-vid-1') => yt(PUBLICATION_RESULT_STATUS.SUCCESS, {
+  providerItemId: id, providerUrl: `https://youtu.be/${id}`, confirmedVisibility
+});
+
+function seedYt(storage) {
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  return { videoFile, ...seedFullyEligibleContent(storage, { mediaFilePath: videoFile }) };
+}
+
+function grantLogs(storage, contentVersionId) {
+  return storage.all(`SELECT * FROM decision_log WHERE subject_id = ? AND decision = 'AUTHORIZATION_GRANTED'`, [contentVersionId]);
+}
+
+function publicationRetryRows(storage, contentVersionId) {
+  return storage.all(`SELECT * FROM stage_retry_state WHERE subject_id = ? AND stage = 'PUBLICATION'`, [contentVersionId]);
+}
+
+test('ADR-0030: standing grant authorizes a YouTube publish, supplies PUBLIC, provider confirms public -> normal PUBLISHED', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId, contentVersionId } = seedYt(storage);
+
+  const adapter = new MockAdapter(successResult('public'));
+  const result = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+
+  assert.equal(result.outcome, 'PUBLISHED');
+  assert.equal(result.publication.status, 'PUBLISHED');
+  assert.equal(result.publication.provider_item_id, 'yt-vid-1');
+  assert.equal(adapter.calls.length, 1);
+  assert.equal(adapter.calls[0].requestedVisibility, 'public', 'standing grant supplies PUBLIC');
+  assert.equal(JSON.parse(result.publication.request_json).requestedVisibility, 'public');
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PUBLISHED');
+
+  const logs = grantLogs(storage, contentVersionId);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0].reason, /authorization_grant_STANDING_YOUTUBE_PUBLIC_/);
+  assert.match(logs[0].reason, /requested_visibility_public/);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: exact per-item grant keeps baseline semantics -- no requested visibility (provider default), audit says PER_ITEM', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId, contentVersionId } = seedYt(storage);
+
+  const adapter = new MockAdapter(successResult('private'));
+  const result = await withLiveAuthorized([`publish:youtube:${contentVersionId}`], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+
+  // A private confirmation is NOT a mismatch when PUBLIC was never requested.
+  assert.equal(result.outcome, 'PUBLISHED');
+  assert.equal(adapter.calls[0].requestedVisibility, null);
+  const logs = grantLogs(storage, contentVersionId);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0].reason, /authorization_grant_PER_ITEM_/);
+  assert.match(logs[0].reason, /requested_visibility_provider_default/);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: when both grants match, the exact per-item grant takes precedence (no PUBLIC requested, audit says PER_ITEM)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId, contentVersionId } = seedYt(storage);
+
+  const adapter = new MockAdapter(successResult('private'));
+  const result = await withLiveAuthorized([STANDING, `publish:youtube:${contentVersionId}`], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+
+  assert.equal(result.outcome, 'PUBLISHED');
+  assert.equal(adapter.calls[0].requestedVisibility, null);
+  assert.match(grantLogs(storage, contentVersionId)[0].reason, /authorization_grant_PER_ITEM_/);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: caller-supplied visibility/authorization arguments cannot select the grant or override visibility', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId, contentVersionId } = seedYt(storage);
+
+  // Per-item grant only; caller tries to force PUBLIC and to name a grant.
+  const adapter = new MockAdapter(successResult('private'));
+  await withLiveAuthorized([`publish:youtube:${contentVersionId}`], () => runPublication({
+    storage, contentBriefId, provider: 'youtube', adapter,
+    requestedVisibility: 'public', visibility: 'public', grant: 'STANDING_YOUTUBE_PUBLIC', authorized: true
+  }));
+  assert.equal(adapter.calls[0].requestedVisibility, null, 'runPublication has no visibility parameter; extra args are ignored');
+  assert.match(grantLogs(storage, contentVersionId)[0].reason, /PER_ITEM/);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: caller cannot self-authorize -- no entries means denied even with caller-supplied flags; adapter never called', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId } = seedYt(storage);
+
+  const adapter = new MockAdapter(successResult('public'));
+  const result = await withLiveAuthorized([], () => runPublication({
+    storage, contentBriefId, provider: 'youtube', adapter, authorized: true, requestedVisibility: 'public', grant: 'STANDING_YOUTUBE_PUBLIC'
+  }));
+  assert.equal(result.outcome, 'AUTHORIZATION_DENIED');
+  assert.equal(adapter.calls.length, 0);
+  assert.equal(storage.get('SELECT * FROM publications'), undefined);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: standing grant does not authorize another provider -- adapter never called', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId } = seedYt(storage);
+
+  const adapter = new MockAdapter(successResult('public'));
+  const result = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'mock', adapter }));
+  assert.equal(result.outcome, 'AUTHORIZATION_DENIED');
+  assert.equal(adapter.calls.length, 0);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: SIMULATION and AUTONOMOUS_ENABLED=false still veto a standing grant; removing the entry denies at the next check', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId } = seedYt(storage);
+  const adapter = new MockAdapter(yt(PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, { errorClass: 'X', retryable: false }));
+
+  // SIMULATION veto (mode forwarded exactly as the runner does).
+  const sim = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter, mode: 'SIMULATION' }));
+  assert.equal(sim.outcome, 'AUTHORIZATION_DENIED');
+  assert.match(sim.reason, /not LIVE/);
+
+  // AUTONOMOUS_ENABLED=false veto.
+  const off = await withLiveAuthorized([STANDING], async () => {
+    config.autonomousEnabled = false;
+    return runPublication({ storage, contentBriefId, provider: 'youtube', adapter });
+  });
+  assert.equal(off.outcome, 'AUTHORIZATION_DENIED');
+  assert.match(off.reason, /AUTONOMOUS_ENABLED is false/);
+  assert.equal(adapter.calls.length, 0);
+
+  // Entry present -> a provider EXPLICIT_FAILURE is persisted (FAILED, reclaimable).
+  const first = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(first.outcome, 'PROVIDER_FAILURE');
+  assert.equal(adapter.calls.length, 1);
+  // Entry removed -> the very next authorization check denies; no second provider call.
+  const second = await withLiveAuthorized([], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(second.outcome, 'AUTHORIZATION_DENIED');
+  assert.equal(adapter.calls.length, 1);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+for (const [label, confirmed] of [['private', 'private'], ['unlisted', 'unlisted'], ['no status reported (null)', null], ['unexpected value', 'members_only']]) {
+  test(`ADR-0030: requested PUBLIC + provider-confirmed ${label} -> FAILED/VISIBILITY_MISMATCH, evidence preserved, no retry budget, not AMBIGUOUS`, async () => {
+    const { storage, dbPath } = freshStorage();
+    await storage.migrate();
+    const { videoFile, contentBriefId, contentVersionId } = seedYt(storage);
+
+    const adapter = new MockAdapter(successResult(confirmed, 'yt-mismatch-1'));
+    const result = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+
+    assert.equal(result.outcome, 'VISIBILITY_MISMATCH');
+    assert.notEqual(result.outcome, 'PUBLISHED');
+    assert.notEqual(result.outcome, 'AMBIGUOUS');
+    assert.notEqual(result.outcome, 'PROVIDER_FAILURE');
+    assert.equal(result.publication.status, 'FAILED', 'existing FAILED status; no new lifecycle status');
+    assert.equal(result.publication.failure_reason, 'VISIBILITY_MISMATCH');
+    assert.equal(result.confirmedVisibility, confirmed);
+
+    // Provider-confirmed status preserved verbatim as factual evidence (with the item id, for manual reconciliation).
+    const stored = JSON.parse(result.publication.result_json);
+    assert.equal(stored.confirmedVisibility, confirmed);
+    assert.deepEqual(stored.visibilityMismatch, { requested: 'public', confirmed });
+    assert.equal(stored.providerItemId, 'yt-mismatch-1');
+    // provider_item_id / provider_url stay "PUBLISHED-only" columns.
+    assert.equal(result.publication.provider_item_id, null);
+
+    // No lifecycle transition, no retry budget, no quarantine, single upload.
+    assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PRODUCED');
+    assert.deepEqual(publicationRetryRows(storage, contentVersionId), []);
+    assert.equal(adapter.calls.length, 1);
+
+    // Auditable: decision log carries the requested/confirmed visibility.
+    const mismatchLog = storage.get(`SELECT * FROM decision_log WHERE subject_id = ? AND reason LIKE '%VISIBILITY_MISMATCH%'`, [contentVersionId]);
+    assert.ok(mismatchLog);
+    assert.match(mismatchLog.reason, new RegExp(`requested_public_confirmed_${confirmed ?? 'none'}`));
+
+    cleanup(storage, dbPath, videoFile);
+  });
+}
+
+test('ADR-0030: VISIBILITY_MISMATCH is terminal -- a later run (standing still present) never reclaims, re-uploads, or re-claims; row unchanged', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId, contentVersionId } = seedYt(storage);
+
+  const adapter = new MockAdapter(successResult('private'));
+  const first = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(first.outcome, 'VISIBILITY_MISMATCH');
+  const before = storage.get('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+
+  for (const auth of [[STANDING], [STANDING, `publish:youtube:${contentVersionId}`], []]) {
+    const again = await withLiveAuthorized(auth, () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+    assert.equal(again.outcome, 'VISIBILITY_MISMATCH');
+    assert.equal(again.reason, 'previously_visibility_mismatch_not_auto_retried');
+  }
+  assert.equal(adapter.calls.length, 1, 'exactly one upload ever');
+  const after = storage.get('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
+  assert.deepEqual(after, before, 'row not flipped to PENDING, attempt_count unchanged');
+  assert.equal(storage.all('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]).length, 1);
+  assert.deepEqual(publicationRetryRows(storage, contentVersionId), []);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: BUSY_SNAPSHOT + competing VISIBILITY_MISMATCH row -> VISIBILITY_MISMATCH (not AMBIGUOUS), no provider call', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId, contentVersionId, mediaArtifactId } = seedYt(storage);
+
+  const wrapped = new BusySnapshotStorage(storage, dbPath, {
+    triggers: 1,
+    conflictingWrite: (p) => {
+      const raw = new Database(p);
+      try {
+        const now = nowISO();
+        raw.prepare(
+          `INSERT INTO publications (id, content_version_id, media_artifact_id, provider, status, request_json, failure_reason, attempt_count, created_at, updated_at)
+           VALUES (?, ?, ?, 'youtube', 'FAILED', '{}', 'VISIBILITY_MISMATCH', 1, ?, ?)`
+        ).run(crypto.randomUUID(), contentVersionId, mediaArtifactId, now, now);
+      } finally {
+        raw.close();
+      }
+    }
+  });
+  const adapter = new MockAdapter(successResult('public'));
+  const result = await withLiveAuthorized([STANDING], () => runPublication({ storage: wrapped, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(result.outcome, 'VISIBILITY_MISMATCH');
+  assert.equal(adapter.calls.length, 0);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: every OTHER FAILED reason is unchanged -- still reclaimable and still consumes the retry budget', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId, contentVersionId } = seedYt(storage);
+
+  let n = 0;
+  const adapter = new MockAdapter(() => (n++ === 0
+    ? yt(PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, { errorClass: 'QUOTA', retryable: false })
+    : successResult('public', 'yt-retry-ok')));
+  const first = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(first.outcome, 'PROVIDER_FAILURE');
+  assert.equal(first.publication.failure_reason, 'QUOTA');
+  assert.equal(publicationRetryRows(storage, contentVersionId)[0].attempt_count, 1, 'ordinary failure consumes budget');
+
+  const second = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(second.outcome, 'PUBLISHED', 'ordinary FAILED row reclaimed as before');
+  assert.equal(adapter.calls.length, 2);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: selectEligiblePublications excludes a VISIBILITY_MISMATCH item but still selects other FAILED items', async () => {
+  const { selectEligiblePublications } = await import('../../src/autonomous/workSelection.js');
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const a = seedYt(storage);
+  const b = seedYt(storage);
+
+  // b: ordinary FAILED (stays selected); a: mismatch (excluded).
+  const adapterA = new MockAdapter(successResult('unlisted'));
+  const adapterB = new MockAdapter(yt(PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, { errorClass: 'QUOTA', retryable: false }));
+  await withLiveAuthorized([STANDING], async () => {
+    await runPublication({ storage, contentBriefId: a.contentBriefId, provider: 'youtube', adapter: adapterA });
+    await runPublication({ storage, contentBriefId: b.contentBriefId, provider: 'youtube', adapter: adapterB });
+  });
+
+  const selected = selectEligiblePublications(storage).map((r) => r.contentBriefId);
+  assert.ok(!selected.includes(a.contentBriefId), 'mismatch item not selected for automatic re-publication');
+  assert.ok(selected.includes(b.contentBriefId), 'ordinary FAILED item still selected');
+
+  cleanup(storage, dbPath, a.videoFile, b.videoFile);
+});
+
+test('ADR-0030: standing grant leaves AMBIGUOUS semantics unchanged (AMBIGUOUS row, never auto-retried)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId } = seedYt(storage);
+
+  const adapter = new MockAdapter(yt(PUBLICATION_RESULT_STATUS.AMBIGUOUS, { reconciliationInfo: { note: 'timeout' } }));
+  const first = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(first.outcome, 'AMBIGUOUS');
+  assert.equal(first.publication.status, 'AMBIGUOUS');
+  assert.equal(first.publication.failure_reason, null);
+  const again = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(again.outcome, 'AMBIGUOUS');
+  assert.equal(again.reason, 'previously_ambiguous_not_auto_retried');
+  assert.equal(adapter.calls.length, 1);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: standing grant does not weaken duplicate protection -- second run after PUBLISHED never calls the adapter', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId, contentVersionId } = seedYt(storage);
+
+  const adapter = new MockAdapter(successResult('public'));
+  await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  const again = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(again.outcome, 'ALREADY_PUBLISHED');
+  assert.equal(adapter.calls.length, 1);
+  assert.equal(storage.all('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]).length, 1);
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('ADR-0030: standing grant does not bypass the rights block or PRODUCED eligibility', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const rights = seedYt(storage);
+  seedAsset(storage, rights.contentVersionId, 'DISPUTED');
+  const wrongState = seedYt(storage);
+  storage.run(`UPDATE content_versions SET state = 'QUALITY_GATE' WHERE id = ?`, [wrongState.contentVersionId]);
+
+  const adapter = new MockAdapter(successResult('public'));
+  const r1 = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId: rights.contentBriefId, provider: 'youtube', adapter }));
+  const r2 = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId: wrongState.contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(r1.outcome, 'ASSET_RIGHTS_BLOCKED');
+  assert.equal(r2.outcome, 'INELIGIBLE_STATE');
+  assert.equal(adapter.calls.length, 0);
+  assert.equal(storage.get('SELECT * FROM publications'), undefined);
+
+  cleanup(storage, dbPath, rights.videoFile, wrongState.videoFile);
+});
+
+test('ADR-0030: buildPublicationRequest takes visibility only from its explicit argument, never from content records', async () => {
+  const { buildPublicationRequest } = await import('../../src/publication/PublicationRequest.js');
+  const evil = { requestedVisibility: 'public', requested_visibility: 'public', visibility: 'public', privacyStatus: 'public' };
+  const base = {
+    contentVersion: { id: 'cv', ...evil },
+    script: { id: 's', ...evil },
+    contentBrief: { id: 'b', working_title: 'T', viewer_promise: 'P', ...evil },
+    mediaArtifact: { id: 'm', artifact_path: '/x.mp4', artifact_checksum: 'c', duration_seconds: 1, ...evil }
+  };
+  assert.equal(buildPublicationRequest(base).requestedVisibility, null);
+  assert.equal(buildPublicationRequest({ ...base, requestedVisibility: 'public' }).requestedVisibility, 'public');
+});
+
+test('ADR-0030 (real YouTubeAdapter + mocked fetch): standing PUBLIC request, YouTube confirms private -> VISIBILITY_MISMATCH; exactly one upload, no visibility-change call, no re-upload on the next run', async () => {
+  const { YouTubeAdapter } = await import('../../src/publication/youtube/YouTubeAdapter.js');
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId, contentVersionId } = seedYt(storage);
+
+  const urls = [];
+  let sentPrivacy = null;
+  const jsonRes = (status, body, headers = {}) => ({ ok: status < 300, status, headers: { get: (k) => headers[k] ?? null }, json: async () => body });
+  const fetchImpl = async (url, init) => {
+    urls.push(String(url));
+    if (String(url).includes('oauth2.googleapis.com/token')) return jsonRes(200, { access_token: 'tok' });
+    if (String(url).includes('uploadType=resumable')) {
+      sentPrivacy = JSON.parse(init.body).status.privacyStatus;
+      return jsonRes(200, {}, { location: 'https://upload.example.com/s1' });
+    }
+    if (String(url).includes('upload.example.com/s1')) return jsonRes(200, { id: 'REALYT1', status: { privacyStatus: 'private' } });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const adapter = new YouTubeAdapter({ fetchImpl, credentialsProvider: () => ({ clientId: 'c', clientSecret: 's', refreshToken: 'r' }) });
+
+  const first = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(sentPrivacy, 'public');
+  assert.equal(first.outcome, 'VISIBILITY_MISMATCH');
+  assert.equal(first.publication.failure_reason, 'VISIBILITY_MISMATCH');
+  assert.equal(JSON.parse(first.publication.result_json).confirmedVisibility, 'private');
+  assert.equal(urls.length, 3, 'token + initiate + file PUT only; no visibility-update call');
+
+  const second = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+  assert.equal(second.outcome, 'VISIBILITY_MISMATCH');
+  assert.equal(urls.length, 3, 'no second upload');
+  assert.deepEqual(publicationRetryRows(storage, contentVersionId), []);
+  assert.equal(JSON.stringify(first.publication).includes('tok'), false, 'no access token persisted');
+
+  cleanup(storage, dbPath, videoFile);
+});

@@ -27,10 +27,14 @@ export class PublicationProvider {
    * these.
    *
    * SUCCESS:
-   *   { status: 'SUCCESS', provider, providerItemId, providerUrl, raw? }
+   *   { status: 'SUCCESS', provider, providerItemId, providerUrl, confirmedVisibility?, raw? }
    *   `providerItemId` must be evidence the provider actually confirmed
    *   the publication (e.g. a returned video id) — never something the
    *   adapter constructs itself as a stand-in for confirmation.
+   *   `confirmedVisibility` (ADR-0030) is the visibility the provider
+   *   itself reported for the created item, verbatim, or null when the
+   *   provider did not report one. The core uses it only to compare
+   *   against a requested visibility; it is never inferred or defaulted.
    *
    * EXPLICIT_FAILURE:
    *   { status: 'EXPLICIT_FAILURE', provider, errorClass, retryable, raw? }

@@ -228,3 +228,119 @@ test('requires a non-empty string action identifier', () => {
     /non-empty string/
   );
 });
+
+/**
+ * ---------------------------------------------------------------------
+ * ADR-0030 (Model B) -- dormant standing YouTube PUBLIC authorization.
+ * The standing literal appears ONLY in per-test temp files below; the
+ * real Owner-controlled file must stay `[]` (asserted at the end).
+ * ---------------------------------------------------------------------
+ */
+import { STANDING_YOUTUBE_PUBLIC_ENTRY, AUTHORIZATION_GRANT } from '../../src/state/SideEffectAuthorization.js';
+
+const LIVE = { mode: 'LIVE', autonomousEnabled: true };
+
+test('ADR-0030: the standing literal is exactly standing:publish:youtube:public', () => {
+  assert.equal(STANDING_YOUTUBE_PUBLIC_ENTRY, 'standing:publish:youtube:public');
+});
+
+test('ADR-0030: standing entry authorizes any YouTube publish action and supplies PUBLIC visibility', () => {
+  withTempAuthFile([STANDING_YOUTUBE_PUBLIC_ENTRY], () => {
+    for (const action of ['publish:youtube:abc123', 'publish:youtube:some-other-version']) {
+      const grant = assertExternalActionAllowed({ action, ...LIVE });
+      assert.equal(grant.grant, AUTHORIZATION_GRANT.STANDING_YOUTUBE_PUBLIC);
+      assert.equal(grant.requestedVisibility, 'public');
+      assert.equal(isActionAuthorized(action), true);
+    }
+  });
+});
+
+test('ADR-0030: standing entry does NOT authorize other providers or other external actions', () => {
+  withTempAuthFile([STANDING_YOUTUBE_PUBLIC_ENTRY], () => {
+    for (const action of [
+      'publish:vimeo:abc123',
+      'publish:mock:abc123',
+      'publish:youtube:',                  // no item id
+      'publish:youtubex:abc123',           // prefix lookalike
+      'delete:youtube:abc123',
+      'update-visibility:youtube:abc123',  // post-upload visibility change (ADR-0008 §3.8)
+      'schedule:youtube:abc123',
+      'some-other-action'
+    ]) {
+      assert.throws(() => assertExternalActionAllowed({ action, ...LIVE }), SideEffectDeniedError, action);
+      assert.equal(isActionAuthorized(action), false, action);
+    }
+  });
+});
+
+test('ADR-0030: the standing literal is reserved -- naming it as the action gains nothing', () => {
+  withTempAuthFile([STANDING_YOUTUBE_PUBLIC_ENTRY], () => {
+    assert.throws(() => assertExternalActionAllowed({ action: STANDING_YOUTUBE_PUBLIC_ENTRY, ...LIVE }), SideEffectDeniedError);
+    assert.equal(isActionAuthorized(STANDING_YOUTUBE_PUBLIC_ENTRY), false);
+  });
+});
+
+test('ADR-0030: exact per-item grant still works, supplies no visibility, and does not authorize another content version', () => {
+  withTempAuthFile(['publish:youtube:abc123'], () => {
+    const grant = assertExternalActionAllowed({ action: 'publish:youtube:abc123', ...LIVE });
+    assert.equal(grant.grant, AUTHORIZATION_GRANT.PER_ITEM);
+    assert.equal(grant.requestedVisibility, null);
+    assert.throws(() => assertExternalActionAllowed({ action: 'publish:youtube:different-version', ...LIVE }), SideEffectDeniedError);
+  });
+});
+
+test('ADR-0030: precedence -- when both match, the exact per-item grant wins (no PUBLIC supplied)', () => {
+  withTempAuthFile([STANDING_YOUTUBE_PUBLIC_ENTRY, 'publish:youtube:abc123'], () => {
+    const both = assertExternalActionAllowed({ action: 'publish:youtube:abc123', ...LIVE });
+    assert.equal(both.grant, AUTHORIZATION_GRANT.PER_ITEM);
+    assert.equal(both.requestedVisibility, null);
+    // Another version only matches the standing grant.
+    const other = assertExternalActionAllowed({ action: 'publish:youtube:zzz', ...LIVE });
+    assert.equal(other.grant, AUTHORIZATION_GRANT.STANDING_YOUTUBE_PUBLIC);
+    assert.equal(other.requestedVisibility, 'public');
+  });
+});
+
+test('ADR-0030: SIMULATION and AUTONOMOUS_ENABLED=false remain absolute vetoes over a standing grant', () => {
+  withTempAuthFile([STANDING_YOUTUBE_PUBLIC_ENTRY], () => {
+    assert.throws(() => assertExternalActionAllowed({ action: 'publish:youtube:abc123', mode: 'SIMULATION', autonomousEnabled: true }), /not LIVE/);
+    assert.throws(() => assertExternalActionAllowed({ action: 'publish:youtube:abc123', mode: 'LIVE', autonomousEnabled: false }), /AUTONOMOUS_ENABLED is false/);
+  });
+});
+
+test('ADR-0030: removing the standing entry denies at the very next check (fresh read, no caching)', () => {
+  withTempAuthFile([STANDING_YOUTUBE_PUBLIC_ENTRY], (filePath) => {
+    assert.doesNotThrow(() => assertExternalActionAllowed({ action: 'publish:youtube:abc123', ...LIVE }));
+    fs.writeFileSync(filePath, JSON.stringify([]));
+    assert.throws(() => assertExternalActionAllowed({ action: 'publish:youtube:abc123', ...LIVE }), SideEffectDeniedError);
+  });
+});
+
+test('ADR-0030: caller-supplied grant/authorization/visibility arguments have no effect', () => {
+  withTempAuthFile([], () => {
+    assert.throws(
+      () => assertExternalActionAllowed({
+        action: 'publish:youtube:abc123', ...LIVE,
+        authorized: true, grant: 'STANDING_YOUTUBE_PUBLIC', requestedVisibility: 'public', standing: true
+      }),
+      SideEffectDeniedError
+    );
+  });
+  withTempAuthFile(['publish:youtube:abc123'], () => {
+    const grant = assertExternalActionAllowed({ action: 'publish:youtube:abc123', ...LIVE, requestedVisibility: 'public' });
+    assert.equal(grant.requestedVisibility, null, 'a caller cannot upgrade a per-item grant to PUBLIC');
+    assert.ok(Object.isFrozen(grant));
+  });
+});
+
+test('ADR-0030: no wildcard/regex/pattern syntax -- ordinary strings stay exact strings', () => {
+  withTempAuthFile(['publish:youtube:*', 'publish:youtube:.*', 'standing:publish:youtube:*', 'standing:publish:*'], () => {
+    assert.throws(() => assertExternalActionAllowed({ action: 'publish:youtube:abc123', ...LIVE }), SideEffectDeniedError);
+    assert.equal(isActionAuthorized('publish:youtube:*'), true, 'a literal exact string still matches itself only');
+  });
+});
+
+test('ADR-0030: the real Owner-controlled config/authorized_external_actions.json remains [] (mechanism is dormant)', () => {
+  const real = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../config/authorized_external_actions.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(real, 'utf8')), []);
+});

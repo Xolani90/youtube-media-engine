@@ -164,7 +164,11 @@ export function selectEligiblePublications(storage) {
   // selected here, because FAILED is documented as retryable and
   // Publication v1's own claim logic (frozen, §3/§4) is what performs
   // the actual, safe reclaim -- this query does not need to know FAILED
-  // exists. An AMBIGUOUS attempt is also still selected -- Publication's
+  // exists. The ONE exception is ADR-0030's VISIBILITY_MISMATCH (a FAILED
+  // row recording an upload that already happened with a non-PUBLIC
+  // provider-confirmed visibility): it is terminal for the automatic
+  // workflow and is not selected again. Every other FAILED reason is
+  // unchanged. An AMBIGUOUS attempt is also still selected -- Publication's
   // own guard (never auto-retried, §4) is what makes a redundant call
   // safe: it no-ops rather than mis-selecting.
   return storage
@@ -172,7 +176,8 @@ export function selectEligiblePublications(storage) {
       `SELECT content_brief_id FROM content_versions
        WHERE state = 'PRODUCED'
        AND id IN (SELECT content_version_id FROM media_artifacts)
-       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'PUBLICATION' AND quarantined_at IS NOT NULL)`
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'PUBLICATION' AND quarantined_at IS NOT NULL)
+       AND id NOT IN (SELECT content_version_id FROM publications WHERE status = 'FAILED' AND failure_reason = 'VISIBILITY_MISMATCH')`
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
