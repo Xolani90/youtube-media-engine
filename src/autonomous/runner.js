@@ -12,6 +12,12 @@ import { runMediaProduction } from '../media/pipeline.js';
 import { runPublication } from '../publication/pipeline.js';
 import { OUTCOME as PRODUCTION_OUTCOME } from '../production/constants.js';
 import { OUTCOME as PUBLICATION_OUTCOME } from '../publication/constants.js';
+import { OUTCOME as ASSET_PROVISIONING_OUTCOME } from '../asset-provisioning/constants.js';
+import { OUTCOME as RIGHTS_VERIFICATION_OUTCOME } from '../rights-verification/constants.js';
+import { OUTCOME as MEDIA_OUTCOME } from '../media/constants.js';
+import { RESEARCH_PROJECT_STATUS } from '../research/constants.js';
+import { FACT_CHECK_STATUS } from '../fact-check/constants.js';
+import { CHECK_RESULT as QUALITY_GATE_CHECK_RESULT } from '../quality-gate/constants.js';
 import {
   selectEligibleResearch,
   selectEligibleBriefs,
@@ -66,12 +72,27 @@ import {
 // successes, refusals) never consume the slot, so their behavior is unchanged.
 const recordedFailedAttempt = (result) => Number.isInteger(result?.attempt);
 
+// ADR-0028 (WS2-A) invocation aggregation. Each stage entry exposes its
+// EXISTING success contract as `isSuccess(result)`, evaluated only on a result
+// that stage.run() returned normally. Everything else a stage returns
+// normally (rejections, quarantines, prerequisite/not-ready and other
+// contained outcomes) is a contained non-success. No new outcome vocabulary
+// is introduced here; predicates read each stage's own existing constants.
+
 function buildStages(deps, startedMode) {
   const fn = deps.stageFns ?? {};
   return [
     {
       name: 'research',
       select: selectEligibleResearch,
+      // Normal completion = the pipeline ran through completeness evaluation
+      // (RESEARCH_COMPLETE or INSUFFICIENT_EVIDENCE). A project that ended
+      // FAILED (e.g. SOURCE_DISCOVERY_FAILED returned normally) and an
+      // already-terminal replay are contained non-success.
+      isSuccess: (result) =>
+        result?.alreadyTerminal !== true &&
+        (result?.project?.status === RESEARCH_PROJECT_STATUS.RESEARCH_COMPLETE ||
+          result?.project?.status === RESEARCH_PROJECT_STATUS.INSUFFICIENT_EVIDENCE),
       run: (item, runId) =>
         (fn.research ?? runResearchProject)({
           storage: deps.storage,
@@ -89,6 +110,7 @@ function buildStages(deps, startedMode) {
     {
       name: 'brief',
       select: selectEligibleBriefs,
+      isSuccess: (result) => result?.rejected === false,
       consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn.brief ?? createBrief)({
@@ -102,6 +124,7 @@ function buildStages(deps, startedMode) {
     {
       name: 'script',
       select: selectEligibleScripts,
+      isSuccess: (result) => result?.rejected === false,
       consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn.script ?? createScript)({
@@ -115,6 +138,10 @@ function buildStages(deps, startedMode) {
     {
       name: 'fact-check',
       select: selectEligibleFactChecks,
+      isSuccess: (result) =>
+        result?.outcome === FACT_CHECK_STATUS.PASS ||
+        result?.outcome === FACT_CHECK_STATUS.REVIEW ||
+        result?.outcome === 'EXISTING_RESULT_RETURNED',
       consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn['fact-check'] ?? runFactCheck)({ storage: deps.storage, contentBriefId: item.contentBriefId, runId })
@@ -122,6 +149,8 @@ function buildStages(deps, startedMode) {
     {
       name: 'originality',
       select: selectEligibleOriginalityChecks,
+      isSuccess: (result) =>
+        (result?.outcome === 'EVALUATED' || result?.outcome === 'EMPTY_CORPUS') && result?.transitioned === true,
       consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn.originality ?? runOriginalityCheck)({ storage: deps.storage, contentBriefId: item.contentBriefId, runId })
@@ -129,6 +158,8 @@ function buildStages(deps, startedMode) {
     {
       name: 'quality-gate',
       select: selectEligibleQualityGates,
+      isSuccess: (result) =>
+        result?.aggregate === QUALITY_GATE_CHECK_RESULT.PASS && result?.transitioned === true,
       consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn['quality-gate'] ?? runQualityGate)({ storage: deps.storage, contentBriefId: item.contentBriefId, runId })
@@ -136,6 +167,8 @@ function buildStages(deps, startedMode) {
     {
       name: 'production',
       select: selectEligibleProductions,
+      isSuccess: (result) =>
+        result?.outcome === PRODUCTION_OUTCOME.PRODUCED || result?.outcome === PRODUCTION_OUTCOME.ALREADY_PRODUCED,
       // ADR-0023: a Production attempt is one runProduction() call
       // returning ARTIFACT_WRITE_FAILED; it consumes this item's single
       // automatic retry slot for the current invocation.
@@ -151,6 +184,9 @@ function buildStages(deps, startedMode) {
     {
       name: 'asset-provisioning',
       select: selectEligibleAssetProvisioning,
+      isSuccess: (result) =>
+        result?.outcome === ASSET_PROVISIONING_OUTCOME.PROVISIONED ||
+        result?.outcome === ASSET_PROVISIONING_OUTCOME.ALREADY_PROVISIONED,
       consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn['asset-provisioning'] ?? runAssetProvisioning)({
@@ -163,6 +199,7 @@ function buildStages(deps, startedMode) {
     {
       name: 'rights-verification',
       select: selectEligibleRightsVerification,
+      isSuccess: (result) => result?.outcome === RIGHTS_VERIFICATION_OUTCOME.PROCESSED,
       run: (item, runId) =>
         (fn['rights-verification'] ?? runRightsVerification)({
           storage: deps.storage,
@@ -173,6 +210,8 @@ function buildStages(deps, startedMode) {
     {
       name: 'media-production',
       select: selectEligibleMediaProductions,
+      isSuccess: (result) =>
+        result?.outcome === MEDIA_OUTCOME.RENDERED || result?.outcome === MEDIA_OUTCOME.ALREADY_RENDERED,
       consumedRetryAttempt: recordedFailedAttempt,
       run: (item, runId) =>
         (fn['media-production'] ?? runMediaProduction)({
@@ -194,6 +233,8 @@ function buildStages(deps, startedMode) {
       // run's actual persisted mode (D-C2) instead of silently falling
       // back to process-global config.runMode.
       select: selectEligiblePublications,
+      isSuccess: (result) =>
+        result?.outcome === PUBLICATION_OUTCOME.PUBLISHED || result?.outcome === PUBLICATION_OUTCOME.ALREADY_PUBLISHED,
       // ADR-0023: a Publication attempt is one confirmed provider
       // EXPLICIT_FAILURE persisted as FAILED, surfaced by runPublication()
       // as OUTCOME.PROVIDER_FAILURE. AMBIGUOUS, AUTHORIZATION_DENIED and
@@ -294,6 +335,13 @@ export async function runAutonomousOperation(deps) {
   // (stage, subject_id) identity inside the stage itself.
   const retryConsumed = new Set();
 
+  // ADR-0028 invocation aggregation: counts of stage.run() calls that
+  // returned normally in THIS invocation, and how many of those met the
+  // stage's own success contract. Retry-paced skips, selector absence and
+  // swallowed onStageError throws never reach the increment.
+  let attemptedCount = 0;
+  let successCount = 0;
+
   try {
     let previousSignature = null;
 
@@ -323,6 +371,8 @@ export async function runAutonomousOperation(deps) {
           try {
             const result = await stage.run(item, runId);
             processed.set(stage.name, processed.get(stage.name) + 1);
+            attemptedCount += 1;
+            if (stage.isSuccess(result)) successCount += 1;
             if (stage.consumedRetryAttempt?.(result)) retryConsumed.add(retryKey);
           } catch (err) {
             if (onStageError) {
@@ -337,7 +387,10 @@ export async function runAutonomousOperation(deps) {
       previousSignature = signature;
     }
 
-    recorder.finish(runId, { status: 'COMPLETED', stopReason });
+    // ADR-0028: status comes from the invocation counters, never from
+    // stopReason. Only "work was attempted and none of it succeeded" fails.
+    const status = attemptedCount > 0 && successCount === 0 ? 'FAILED' : 'COMPLETED';
+    recorder.finish(runId, { status, stopReason });
   } catch (err) {
     recorder.finish(runId, { status: 'FAILED', stopReason: err.message });
     throw err;

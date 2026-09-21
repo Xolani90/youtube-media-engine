@@ -858,3 +858,405 @@ test('D-C2: a SIMULATION autonomous run does not reach the Publication provider 
   cleanup(storage, dbPath, videoFile);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------
+// 5. WS2-A / ADR-0028 invocation outcome aggregation
+//
+// system_runs.status is derived from the stage.run() results returned in
+// THIS invocation: any success -> COMPLETED; attempted work with zero
+// successes -> FAILED; nothing attempted -> COMPLETED. stopReason
+// (no_work / no_progress) never decides status.
+// ---------------------------------------------------------------------
+
+function runRow(storage, runId) {
+  return storage.get('SELECT status, stop_reason FROM system_runs WHERE id = ?', [runId]);
+}
+
+function setState(storage, contentBriefId, state) {
+  storage.run('UPDATE content_versions SET state = ? WHERE content_brief_id = ?', [state, contentBriefId]);
+}
+
+// Stage stubs that carry an item BRIEF_CREATED -> ... -> NEEDS_REVIEW (a
+// state no selector picks up), each returning that stage's real success shape.
+function successChainFns(storage, calls = []) {
+  return {
+    script: async ({ contentBriefId }) => {
+      calls.push(['script', contentBriefId]);
+      setState(storage, contentBriefId, 'SCRIPT_DRAFT');
+      return { rejected: false };
+    },
+    'fact-check': async ({ contentBriefId }) => {
+      calls.push(['fact-check', contentBriefId]);
+      setState(storage, contentBriefId, 'FACT_CHECK');
+      return { outcome: 'PASS' };
+    },
+    originality: async ({ contentBriefId }) => {
+      calls.push(['originality', contentBriefId]);
+      setState(storage, contentBriefId, 'ORIGINALITY_CHECK');
+      return { outcome: 'EVALUATED', transitioned: true };
+    },
+    'quality-gate': async ({ contentBriefId }) => {
+      calls.push(['quality-gate', contentBriefId]);
+      setState(storage, contentBriefId, 'NEEDS_REVIEW');
+      return { outcome: 'PASS', aggregate: 'PASS', transitioned: true };
+    }
+  };
+}
+
+test('WS2-A: every attempted item succeeds -> COMPLETED', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  seedChainAtState(storage, 'BRIEF_CREATED');
+
+  const calls = [];
+  const result = await runAutonomousOperation({ storage, stageFns: successChainFns(storage, calls) });
+
+  assert.deepEqual(calls.map((c) => c[0]), ['script', 'fact-check', 'originality', 'quality-gate']);
+  assert.equal(result.stopReason, 'no_work');
+  assert.equal(runRow(storage, result.runId).status, 'COMPLETED');
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: success plus contained non-success in the same invocation -> COMPLETED, no_progress does not cause FAILED', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const good = seedChainAtState(storage, 'BRIEF_CREATED');
+  const stuck = seedChainAtState(storage, 'BRIEF_CREATED');
+
+  const fns = successChainFns(storage);
+  const goodScript = fns.script;
+  fns.script = async (args) =>
+    args.contentBriefId === stuck.contentBriefId ? { rejected: true, reason: 'X' } : goodScript(args);
+
+  const result = await runAutonomousOperation({ storage, stageFns: fns });
+
+  // The stuck item stays eligible, so the runner stops on no_progress...
+  assert.equal(result.stopReason, 'no_progress');
+  // ...but the invocation had real successes, so it is not a failure.
+  const row = runRow(storage, result.runId);
+  assert.equal(row.status, 'COMPLETED');
+  assert.equal(row.stop_reason, 'no_progress');
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE content_brief_id = ?', [good.contentBriefId]).state, 'NEEDS_REVIEW');
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: attempted work with zero successes -> FAILED, driven by counters not by no_progress', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  seedChainAtState(storage, 'BRIEF_CREATED');
+
+  const result = await runAutonomousOperation({
+    storage,
+    stageFns: { script: async () => ({ rejected: true, reason: 'NO_ELIGIBLE_KEY_CLAIMS' }) }
+  });
+
+  assert.equal(result.stopReason, 'no_progress');
+  const row = runRow(storage, result.runId);
+  assert.equal(row.status, 'FAILED');
+  assert.equal(row.stop_reason, 'no_progress');
+  assert.equal(result.processed.find((p) => p.stage === 'script').count, 1);
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: no_work / zero attempted items -> COMPLETED, and no stage function is called', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  const explode = async () => {
+    throw new Error('must not be called');
+  };
+  const result = await runAutonomousOperation({
+    storage,
+    stageFns: { script: explode, brief: explode, research: explode, publication: explode }
+  });
+
+  assert.equal(result.stopReason, 'no_work');
+  assert.ok(result.processed.every((p) => p.count === 0));
+  assert.equal(runRow(storage, result.runId).status, 'COMPLETED');
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: uncaught stage error -> FAILED, rethrown, and later work is not executed (fail fast)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  seedChainAtState(storage, 'BRIEF_CREATED');
+  seedChainAtState(storage, 'BRIEF_CREATED');
+
+  let scriptCalls = 0;
+  let laterStageCalls = 0;
+  await assert.rejects(
+    () =>
+      runAutonomousOperation({
+        storage,
+        stageFns: {
+          script: async () => {
+            scriptCalls += 1;
+            throw new Error('boom');
+          },
+          'fact-check': async () => {
+            laterStageCalls += 1;
+            return { outcome: 'PASS' };
+          }
+        }
+      }),
+    /boom/
+  );
+
+  const { id: runId } = storage.get('SELECT id FROM system_runs ORDER BY started_at DESC LIMIT 1');
+  const row = runRow(storage, runId);
+  assert.equal(row.status, 'FAILED');
+  assert.equal(row.stop_reason, 'boom');
+  assert.equal(scriptCalls, 1, 'second eligible item must not run after the fatal error');
+  assert.equal(laterStageCalls, 0);
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: a swallowed onStageError throw is not an attempt and never becomes an aggregate failure by itself', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  seedChainAtState(storage, 'BRIEF_CREATED');
+
+  const result = await runAutonomousOperation({
+    storage,
+    onStageError: () => {},
+    stageFns: {
+      script: async () => {
+        throw new Error('boom');
+      }
+    }
+  });
+
+  assert.equal(result.stopReason, 'no_progress');
+  assert.equal(runRow(storage, result.runId).status, 'COMPLETED');
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: a retry-paced skip is not an attempt (item is not re-run and is not counted)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const paced = seedChainAtState(storage, 'BRIEF_CREATED');
+  const mover = seedChainAtState(storage, 'BRIEF_CREATED');
+
+  const scriptCalls = [];
+  const result = await runAutonomousOperation({
+    storage,
+    stageFns: {
+      script: async ({ contentBriefId }) => {
+        scriptCalls.push(contentBriefId);
+        if (contentBriefId === paced.contentBriefId) {
+          // Recorded failed attempt: consumes the item's one retry slot
+          // for this invocation; state does not change.
+          return { rejected: true, reason: 'GEN', attempt: 1 };
+        }
+        // Non-success, but the state advances so a second sweep happens.
+        setState(storage, contentBriefId, 'SCRIPT_DRAFT');
+        return { rejected: true, reason: 'GEN' };
+      },
+      'fact-check': async ({ contentBriefId }) => {
+        // Contained non-success that leaves the item at FACT_CHECK-eligible
+        // work for Originality (a state no assertion here depends on).
+        setState(storage, contentBriefId, 'NEEDS_REVIEW');
+        return { outcome: 'REJECT' };
+      }
+    }
+  });
+
+  // Sweep 2 happened (eligibility changed) and the paced item was skipped.
+  assert.ok(result.sweeps >= 2);
+  assert.equal(scriptCalls.filter((id) => id === paced.contentBriefId).length, 1);
+  assert.equal(scriptCalls.filter((id) => id === mover.contentBriefId).length, 1);
+  assert.equal(result.processed.find((p) => p.stage === 'script').count, 2);
+  // Every executed item was a contained non-success -> FAILED.
+  assert.equal(runRow(storage, result.runId).status, 'FAILED');
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: an executed prerequisite/not-ready result counts as a contained attempted non-success', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  seedChainAtState(storage, 'PRODUCED');
+
+  const result = await runAutonomousOperation({
+    storage,
+    stageFns: {
+      'asset-provisioning': async () => ({ outcome: 'NOT_YET_PRODUCED' }),
+      'rights-verification': async () => ({ outcome: 'NOT_YET_PRODUCED' }),
+      'media-production': async () => ({ outcome: 'NOT_YET_PRODUCED' }),
+      publication: async () => ({ outcome: 'NOT_YET_RENDERED' })
+    }
+  });
+
+  assert.ok(result.processed.find((p) => p.stage === 'asset-provisioning').count >= 1);
+  assert.equal(runRow(storage, result.runId).status, 'FAILED');
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: status reflects only the current invocation, not earlier invocations or database history', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  // Invocation 1: a genuinely eligible item is attempted and succeeds.
+  const itemA = seedChainAtState(storage, 'BRIEF_CREATED');
+  const first = await runAutonomousOperation({ storage, stageFns: successChainFns(storage) });
+  assert.equal(runRow(storage, first.runId).status, 'COMPLETED');
+  assert.equal(
+    storage.get('SELECT state FROM content_versions WHERE content_brief_id = ?', [itemA.contentBriefId]).state,
+    'NEEDS_REVIEW'
+  );
+
+  // Invocation 2: a fresh item is attempted and returns a contained
+  // non-success. Item A already succeeded in invocation 1 and is no longer
+  // eligible, so this invocation has exactly one attempt and zero successes.
+  // Invocation 1's success must not rescue it.
+  const itemB = seedChainAtState(storage, 'BRIEF_CREATED');
+  const scriptCalls = [];
+  const second = await runAutonomousOperation({
+    storage,
+    stageFns: {
+      script: async ({ contentBriefId }) => {
+        scriptCalls.push(contentBriefId);
+        return { rejected: true, reason: 'NO_ELIGIBLE_KEY_CLAIMS' };
+      }
+    }
+  });
+  assert.deepEqual(scriptCalls, [itemB.contentBriefId], 'only the fresh item is attempted in invocation 2');
+  assert.equal(runRow(storage, second.runId).status, 'FAILED');
+  assert.equal(runRow(storage, first.runId).status, 'COMPLETED', 'earlier run row is unchanged');
+
+  // Invocation 3: nothing is eligible. The FAILED invocation 2 must not
+  // leak either: zero attempts in this invocation -> COMPLETED.
+  setState(storage, itemB.contentBriefId, 'NEEDS_REVIEW');
+  const third = await runAutonomousOperation({ storage });
+  assert.equal(third.stopReason, 'no_work');
+  assert.equal(runRow(storage, third.runId).status, 'COMPLETED');
+  assert.equal(runRow(storage, second.runId).status, 'FAILED', 'earlier run row is unchanged');
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: Research success (RESEARCH_COMPLETE) is counted as success', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  insertOpportunity(storage, { status: 'HANDED_TO_RESEARCH' });
+
+  const result = await runAutonomousOperation({
+    storage,
+    stageFns: {
+      research: async ({ opportunityId }) => {
+        const id = insertResearchProject(storage, opportunityId, { status: 'RESEARCH_COMPLETE' });
+        // Move the opportunity out of the Research selector, as the real stage does.
+        storage.run(`UPDATE opportunities SET status = 'RESEARCH_HANDED_OFF_TEST_FIXTURE' WHERE id = ?`, [opportunityId]);
+        return { project: storage.get('SELECT * FROM research_projects WHERE id = ?', [id]), created: true };
+      },
+      // Brief is then eligible and returns a contained rejection: one success
+      // (Research) + one contained non-success (Brief) -> COMPLETED.
+      brief: async ({ researchProjectId }) => {
+        storage.run(`UPDATE research_projects SET status = 'INSUFFICIENT_EVIDENCE' WHERE id = ?`, [researchProjectId]);
+        return { rejected: true, reason: 'NO_ELIGIBLE_KEY_CLAIMS' };
+      }
+    }
+  });
+
+  const research = result.processed.find((p) => p.stage === 'research').count;
+  const brief = result.processed.find((p) => p.stage === 'brief').count;
+  assert.equal(research, 1);
+  assert.equal(brief, 1);
+  assert.equal(runRow(storage, result.runId).status, 'COMPLETED');
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: Research normal completion with INSUFFICIENT_EVIDENCE is success (completeness outcome, not a fault)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  insertOpportunity(storage, { status: 'HANDED_TO_RESEARCH' });
+
+  const result = await runAutonomousOperation({
+    storage,
+    stageFns: {
+      research: async ({ opportunityId }) => {
+        const id = insertResearchProject(storage, opportunityId, { status: 'INSUFFICIENT_EVIDENCE' });
+        storage.run(`UPDATE opportunities SET status = 'RESEARCH_HANDED_OFF_TEST_FIXTURE' WHERE id = ?`, [opportunityId]);
+        return {
+          project: storage.get('SELECT * FROM research_projects WHERE id = ?', [id]),
+          stopReason: 'NO_LOAD_BEARING_CLAIMS'
+        };
+      }
+    }
+  });
+
+  assert.equal(result.processed.find((p) => p.stage === 'research').count, 1);
+  assert.equal(runRow(storage, result.runId).status, 'COMPLETED');
+
+  cleanup(storage, dbPath);
+});
+
+test('WS2-A: Research SOURCE_DISCOVERY_FAILED returned normally, and an already-terminal Research result, are non-success', async () => {
+  for (const researchResult of [
+    (project) => ({ project: { ...project, status: 'FAILED' }, stopReason: 'SOURCE_DISCOVERY_FAILED' }),
+    (project) => ({ project: { ...project, status: 'RESEARCH_COMPLETE' }, alreadyTerminal: true })
+  ]) {
+    const { storage, dbPath } = freshStorage();
+    await storage.migrate();
+    insertOpportunity(storage, { status: 'HANDED_TO_RESEARCH' });
+
+    const result = await runAutonomousOperation({
+      storage,
+      stageFns: {
+        research: async ({ opportunityId }) => {
+          const id = insertResearchProject(storage, opportunityId, { status: 'FAILED' });
+          storage.run(`UPDATE opportunities SET status = 'RESEARCH_HANDED_OFF_TEST_FIXTURE' WHERE id = ?`, [opportunityId]);
+          return researchResult({ id });
+        }
+      }
+    });
+
+    assert.equal(result.processed.find((p) => p.stage === 'research').count, 1);
+    assert.equal(runRow(storage, result.runId).status, 'FAILED');
+    cleanup(storage, dbPath);
+  }
+});
+
+test('WS2-A: Rights Verification PROCESSED is success; its normal non-success outcomes are contained', async () => {
+  const cases = [
+    { outcome: 'PROCESSED', expected: 'COMPLETED' },
+    { outcome: 'STRUCTURAL_FAILURE', expected: 'FAILED' },
+    { outcome: 'NO_ASSETS_ATTACHED', expected: 'FAILED' },
+    { outcome: 'NO_ELIGIBLE_ASSETS', expected: 'FAILED' }
+  ];
+  for (const { outcome, expected } of cases) {
+    const { storage, dbPath } = freshStorage();
+    await storage.migrate();
+    seedChainAtState(storage, 'PRODUCED');
+
+    let rvCalls = 0;
+    const result = await runAutonomousOperation({
+      storage,
+      stageFns: {
+        // Every other PRODUCED-state stage is inert (not attempted-success
+        // by accident): they return contained non-success, so the outcome
+        // of Rights Verification alone decides the invocation status.
+        'asset-provisioning': async () => ({ outcome: 'NO_ASSET_ACQUIRED' }),
+        'media-production': async () => ({ outcome: 'NO_VISUAL_ASSETS' }),
+        publication: async () => ({ outcome: 'NOT_YET_RENDERED' }),
+        'rights-verification': async () => {
+          rvCalls += 1;
+          return { outcome };
+        }
+      }
+    });
+
+    assert.equal(rvCalls, 1, `rights-verification called once for ${outcome}`);
+    assert.equal(result.stopReason, 'no_progress');
+    assert.equal(runRow(storage, result.runId).status, expected, `status for RV outcome ${outcome}`);
+    cleanup(storage, dbPath);
+  }
+});
