@@ -257,3 +257,26 @@ status only and authorizes nothing further.
 The claim in section 9.2 that no implementation-ready authorization existed
 described the state at `8e596ec`; the ADR-0024 authorization is consumed by its
 implementation commit.
+
+### 9.7 A4 Slice 3 governance records (baseline `b03b4bb`; WS0 only)
+
+Update recorded by the Owner-authorized WS0 governance commit. It records status
+only and authorizes nothing further. Sections 1-9.6 above are preserved as
+historical context; where they name an older baseline, this section gives the
+current one.
+
+| Item | Status |
+|---|---|
+| Current baseline | HEAD = origin/main = `b03b4bbe43496a4fbfb69d3986374a5641590546` (`feat(autonomous): implement bounded failure containment slices 1-2`) before the WS0 commit. The commit carrying this update follows it. Re-verify before acting. |
+| A4 Slice 1/2 implementation | COMMITTED in `b03b4bb`. |
+| ADR-0025 | Implemented/committed, no longer draft/uncommitted. Amended by the WS0 commit (sections 1, 2, 3, 5) as a documentation change only. |
+| ADR-0026 (Slice 3 failure classification) | RECORDED, OWNER-FROZEN DECISIONS. Governance only. |
+| ADR-0027 (Research F1-C reopening) | RECORDED, OWNER-FROZEN DECISIONS. The separately numbered decision required by ADR-0005 section 8. ADR-0005 is not edited. |
+| Slice 3 runtime implementation | NOT performed. |
+| Authorized completed workstream | WS0 (governance records) only. |
+| WS1-WS7 | Separately gated; each needs its own Owner authorization. Blocked wherever an unresolved U-item is a dependency (ADR-0026 section 16). |
+| Open items U-1 to U-10 | UNRESOLVED. Not decided by any record. |
+| ADR-0005 / ADR-0011 / section 9.4 numbering | INCONSISTENT; documented, not renumbered. See `docs/DECISIONS/ERRATUM-adr-0005-numbering-inconsistency.md`. The section 9.4 line "ADR-0005 (see ADR-0011)" is preserved unedited and is to be read with the erratum. |
+| `a4_slice1_slice2_rev2.patch` | Pre-existing untracked artifact at the repository root; preserved, not staged, not committed. |
+
+No source, test, configuration or migration file was changed by WS0.
