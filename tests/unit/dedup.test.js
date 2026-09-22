@@ -92,3 +92,37 @@ test('malformed LLM output falls back to conservative same-event/no-distinct-ang
   assert.equal(result.eventMatch, DEDUP_RESULT.DUPLICATE);
   assert.equal(result.distinctAngle, false);
 });
+
+// --- ADR-0037: dedup maxTokens ceiling ---
+
+test('ADR-0037: layer3SemanticJudgment supplies maxTokens=250 to llmRouter.complete', async () => {
+  const a = { title: 'New AI model launched for small business automation workflows', description: '' };
+  const b = { title: 'New AI model launched for enterprise automation workflows', description: '' };
+  let capturedRequest = null;
+  const registry = {
+    'capture-stub': () => ({
+      id: 'capture-stub',
+      isPaid: false,
+      async healthCheck() { return true; },
+      async complete(request) {
+        capturedRequest = request;
+        return { text: '{"sameEvent": true, "distinctAngle": false}', model: 'capture-stub', requestId: null, inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false };
+      }
+    })
+  };
+  const router = new LLMRouter({ priority: ['capture-stub'], allowPaidProviders: false, registry });
+  await checkDuplicate(a, b, { thresholds, llmRouter: router });
+  assert.ok(capturedRequest, 'expected layer3 to have made an LLM call');
+  assert.equal(capturedRequest.maxTokens, 250);
+});
+
+test('ADR-0037: a truncated-looking (unparseable) dedup response retains the existing conservative fallback, unaffected by the ceiling', async () => {
+  const a = { title: 'New AI model launched for small business automation workflows', description: '' };
+  const b = { title: 'New AI model launched for enterprise automation workflows', description: '' };
+  // Simulates a response cut off mid-generation, e.g. by a maxTokens ceiling.
+  const truncated = '{"sameEvent": true, "distinctAn';
+  const { router } = countingRouter(truncated);
+  const result = await checkDuplicate(a, b, { thresholds, llmRouter: router });
+  assert.equal(result.eventMatch, DEDUP_RESULT.DUPLICATE);
+  assert.equal(result.distinctAngle, false);
+});

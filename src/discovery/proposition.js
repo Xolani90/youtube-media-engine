@@ -54,7 +54,7 @@ export async function generateProposition(observation, llmRouter) {
     untrustedSourceBlock('CONTENT OBSERVATION', `Title: ${observation.title || ''}\nDescription: ${observation.description || ''}`)
   ].join('\n');
 
-  const { result, providerUsed } = await llmRouter.complete({ prompt });
+  const { result, providerUsed } = await llmRouter.complete({ prompt, maxTokens: 1000 });
 
   let parsed;
   try {

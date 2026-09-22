@@ -191,7 +191,7 @@ export async function computeRawFeatures(observation, llmRouter) {
   const riskFeatures = computeDeterministicRiskFeatures(observation);
 
   const prompt = buildFeaturePrompt(observation);
-  const { result } = await llmRouter.complete({ prompt });
+  const { result } = await llmRouter.complete({ prompt, maxTokens: 800 });
 
   const valueFeatures = parseAndValidateLlmFeatures(result.text);
 

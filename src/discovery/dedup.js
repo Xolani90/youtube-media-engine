@@ -62,7 +62,7 @@ export async function layer3SemanticJudgment(a, b, llmRouter) {
     untrustedSourceBlock('OBSERVATION B', `${b.title} — ${b.description || ''}`)
   ].join('\n');
 
-  const { result, providerUsed } = await llmRouter.complete({ prompt });
+  const { result, providerUsed } = await llmRouter.complete({ prompt, maxTokens: 250 });
 
   let parsed;
   try {

@@ -185,3 +185,33 @@ test('a bare fence with no language tag (``` ... ```) also parses successfully',
   const { proposition } = await generateProposition({ title: 'x' }, router);
   assert.equal(validateProposition(proposition).valid, true);
 });
+
+// --- ADR-0037: proposition maxTokens ceiling ---
+
+test('ADR-0037: generateProposition supplies maxTokens=1000 to llmRouter.complete', async () => {
+  let capturedRequest = null;
+  const registry = {
+    'capture-stub': () => ({
+      id: 'capture-stub', isPaid: false,
+      async healthCheck() { return true; },
+      async complete(request) {
+        capturedRequest = request;
+        return { text: COMPLETE_PROPOSITION, model: 'capture-stub', requestId: null, inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false };
+      }
+    })
+  };
+  const router = new LLMRouter({ priority: ['capture-stub'], allowPaidProviders: false, registry });
+  await generateProposition({ title: 'x', description: 'y' }, router);
+  assert.ok(capturedRequest, 'expected generateProposition to have made an LLM call');
+  assert.equal(capturedRequest.maxTokens, 1000);
+});
+
+test('ADR-0037: a truncated (mid-field, unparseable) proposition response retains the existing rejection behavior, unaffected by the ceiling', async () => {
+  // Simulates a response cut off mid-generation, e.g. by a maxTokens ceiling:
+  // valid JSON syntax up to the point of truncation, then abruptly cut.
+  const truncated = '{"subject": "New AI model launch", "target_audience": "Small busin';
+  const router = stubRouter(truncated);
+  const { proposition } = await generateProposition({ title: 'x' }, router);
+  const validation = validateProposition(proposition);
+  assert.equal(validation.valid, false);
+});

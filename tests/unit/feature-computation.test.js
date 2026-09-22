@@ -116,3 +116,28 @@ test('computeRawFeatures requires an llmRouter to be provided', async () => {
     /requires an llmRouter/
   );
 });
+
+// --- ADR-0037: features maxTokens ceiling ---
+
+test('ADR-0037: computeRawFeatures supplies maxTokens=800 to llmRouter.complete', async () => {
+  let capturedRequest = null;
+  const router = {
+    async complete(request) {
+      capturedRequest = request;
+      return { result: { text: JSON.stringify(VALID_VALUE_FIELDS) } };
+    }
+  };
+  await computeRawFeatures({ title: 't', description: 'd' }, router);
+  assert.ok(capturedRequest, 'expected computeRawFeatures to have made an LLM call');
+  assert.equal(capturedRequest.maxTokens, 800);
+});
+
+test('ADR-0037: a truncated (mid-field, unparseable) features response retains the existing throw behavior, unaffected by the ceiling', async () => {
+  // Simulates a response cut off mid-generation, e.g. by a maxTokens ceiling.
+  const truncated = '{"novelty": 90, "competition": 10, "story_potential":';
+  const router = stubRouter(truncated);
+  await assert.rejects(
+    () => computeRawFeatures({ title: 't', description: 'd' }, router),
+    /not valid JSON/
+  );
+});
