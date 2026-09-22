@@ -1,10 +1,14 @@
 import { LLMProvider } from './LLMProvider.js';
 
 // Mirrors GroqProvider's non-2xx diagnostics and bounded 429 retry, adapted
-// to the Gemini API's error shape (`{ error: { code, message, status } }`)
-// and header names. Gemini does not document a stable set of rate-limit
-// response headers analogous to Groq's x-ratelimit-*, so no header
-// extraction is attempted here; Retry-After (when present) is still honored.
+// to the Gemini API's error shape (`{ error: { code, message, status,
+// details } }`). Gemini does not send a standard Retry-After header; its
+// actual retry guidance instead arrives inside the JSON error body, either
+// as a `type.googleapis.com/google.rpc.RetryInfo` detail entry (e.g.
+// `{ retryDelay: "6.203550290s" }`) or, failing that, embedded in the
+// message text ("...Please retry in 6.203550290s."). Both are parsed below;
+// the Retry-After header is still checked first for forward-compatibility,
+// but in practice it is not what Gemini returns.
 
 // Bounds how much of a non-JSON error body is retained on the thrown error,
 // so an unexpectedly huge provider response can't bloat the exception.
@@ -15,19 +19,23 @@ const MAX_NON_JSON_ERROR_BODY_LENGTH = 2000;
 // immediately non-retryable.
 const MAX_ATTEMPTS_ON_429 = 2;
 
-// Used only when a 429 response has no usable Retry-After value.
+// Used only when a 429 response has no usable retry-delay value from any
+// source (header, RetryInfo detail, or message text).
 const FALLBACK_RETRY_DELAY_MS = 2000;
 
 /**
- * Parses Retry-After's numeric-seconds form. The HTTP-date form is
- * intentionally not handled -- an unparseable or missing value is treated
- * as absent, so the caller falls back to FALLBACK_RETRY_DELAY_MS.
+ * Parses a numeric-seconds value (as used by both the Retry-After header's
+ * numeric-seconds form and Gemini's RetryInfo `retryDelay` field, e.g. "6"
+ * or "6.203550290s"). Trailing non-digit units (like the "s" suffix
+ * RetryInfo always includes) are stripped before parsing. An unparseable
+ * or missing value returns null so the caller can fall through to the next
+ * source.
  */
-function parseRetryAfterMs(retryAfterHeaderValue) {
-  if (retryAfterHeaderValue === null || retryAfterHeaderValue === undefined || retryAfterHeaderValue === '') {
+function parseSecondsToMs(value) {
+  if (value === null || value === undefined || value === '') {
     return null;
   }
-  const seconds = Number(retryAfterHeaderValue);
+  const seconds = Number.parseFloat(String(value));
   if (Number.isFinite(seconds) && seconds >= 0) {
     return seconds * 1000;
   }
@@ -35,12 +43,41 @@ function parseRetryAfterMs(retryAfterHeaderValue) {
 }
 
 /**
- * Builds the Error thrown by complete() for a non-2xx Gemini response.
- * Reads the response body exactly once (as text), then attempts to parse
- * it as JSON to recover a useful provider error message; falls back to a
- * bounded plain-text representation when the body isn't JSON.
+ * Extracts Gemini's own retry-delay guidance from an already-parsed JSON
+ * error body: first from a `google.rpc.RetryInfo` detail entry (the
+ * structured, documented source), then as a fallback from the "Please
+ * retry in <N>s." text Gemini also includes in `error.message`. Returns
+ * milliseconds, or null if neither source yields a usable value.
  */
-async function buildGeminiRequestError(res) {
+function extractGeminiRetryDelayMs(providerBody) {
+  const details = providerBody?.error?.details;
+  if (Array.isArray(details)) {
+    const retryInfo = details.find((d) => d?.['@type']?.includes('RetryInfo') && d?.retryDelay);
+    const fromDetail = parseSecondsToMs(retryInfo?.retryDelay);
+    if (fromDetail !== null) return fromDetail;
+  }
+
+  const message = providerBody?.error?.message;
+  if (typeof message === 'string') {
+    const match = message.match(/retry in\s+([\d.]+)\s*s/i);
+    if (match) {
+      const fromMessage = parseSecondsToMs(match[1]);
+      if (fromMessage !== null) return fromMessage;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Reads and parses a non-2xx Gemini response body exactly once. Returns
+ * `{ providerBody, providerMessage, retryDelayMs }` -- the parsed JSON
+ * body (or a bounded plain-text excerpt if the body wasn't JSON), the
+ * human-readable provider message if present, and Gemini's own retry
+ * delay in milliseconds if either source in extractGeminiRetryDelayMs()
+ * yielded one.
+ */
+async function readGeminiErrorBody(res) {
   let bodyText = '';
   try {
     bodyText = await res.text();
@@ -50,18 +87,29 @@ async function buildGeminiRequestError(res) {
 
   let providerBody;
   let providerMessage = null;
+  let retryDelayMs = null;
   try {
     const parsed = JSON.parse(bodyText);
     providerBody = parsed;
     if (typeof parsed?.error?.message === 'string') {
       providerMessage = parsed.error.message;
     }
+    retryDelayMs = extractGeminiRetryDelayMs(parsed);
   } catch {
     providerBody = bodyText.length > MAX_NON_JSON_ERROR_BODY_LENGTH
       ? `${bodyText.slice(0, MAX_NON_JSON_ERROR_BODY_LENGTH)}...(truncated)`
       : bodyText;
   }
 
+  return { providerBody, providerMessage, retryDelayMs };
+}
+
+/**
+ * Builds the Error thrown by complete() for a non-2xx Gemini response, from
+ * an already-read body (see readGeminiErrorBody -- the body is read at
+ * most once per attempt, whether or not that attempt is retried).
+ */
+function buildGeminiRequestError(res, { providerBody, providerMessage }) {
   const error = new Error(
     `GeminiProvider request failed with HTTP ${res.status}${providerMessage ? `: ${providerMessage}` : ''}`
   );
@@ -89,15 +137,17 @@ async function buildGeminiRequestError(res) {
  * relies on this to fall through to the next provider in priority order).
  *
  * On a non-2xx response, the thrown Error carries error.status (number),
- * error.retryAfter (string|null, from the Retry-After header), and
- * error.providerBody (the parsed JSON error body, or a bounded text
- * excerpt if the body wasn't JSON), in addition to a human-readable
- * error.message. A 429 specifically is retried once (see
- * MAX_ATTEMPTS_ON_429), honoring Retry-After when present and otherwise
- * waiting FALLBACK_RETRY_DELAY_MS; every other non-2xx status remains
- * immediately non-retryable. This is transport-layer resilience only: it
- * does not change provider selection (LLMRouter is untouched), request
- * semantics, or the success/error contract shapes documented above.
+ * error.retryAfter (string|null, from the Retry-After header -- normally
+ * absent for Gemini; see module docstring), and error.providerBody (the
+ * parsed JSON error body, or a bounded text excerpt if the body wasn't
+ * JSON), in addition to a human-readable error.message. A 429 specifically
+ * is retried once (see MAX_ATTEMPTS_ON_429), waiting for whichever of these
+ * yields a value first: the Retry-After header, Gemini's own RetryInfo
+ * detail, the "Please retry in Ns" text in its message, or otherwise
+ * FALLBACK_RETRY_DELAY_MS. Every other non-2xx status remains immediately
+ * non-retryable. This is transport-layer resilience only: it does not
+ * change provider selection (LLMRouter is untouched), request semantics,
+ * or the success/error contract shapes documented above.
  */
 export class GeminiProvider extends LLMProvider {
   /**
@@ -163,14 +213,20 @@ export class GeminiProvider extends LLMProvider {
 
       if (res.ok) break;
 
+      // The body is read at most once per attempt (never again below),
+      // whether this attempt is the final failure or a retryable 429.
+      const errorBody = await readGeminiErrorBody(res);
+
       // Only 429 is retryable, and only up to MAX_ATTEMPTS_ON_429 total
       // attempts -- every other non-2xx status (400/401/403/404/5xx, etc.)
       // and an exhausted 429 retry both throw immediately here.
       if (res.status !== 429 || attempt === MAX_ATTEMPTS_ON_429) {
-        throw await buildGeminiRequestError(res);
+        throw buildGeminiRequestError(res, errorBody);
       }
 
-      const delayMs = parseRetryAfterMs(res.headers?.get?.('retry-after')) ?? FALLBACK_RETRY_DELAY_MS;
+      const delayMs = parseSecondsToMs(res.headers?.get?.('retry-after'))
+        ?? errorBody.retryDelayMs
+        ?? FALLBACK_RETRY_DELAY_MS;
       await this._sleep(delayMs);
     }
 

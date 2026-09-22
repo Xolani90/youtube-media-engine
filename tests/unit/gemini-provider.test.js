@@ -192,6 +192,71 @@ test('complete(): a 429 with no Retry-After header falls back to the fixed bound
   assert.ok(sleepCalls[0] > 0, 'a fixed, positive fallback delay must be used when Retry-After is absent');
 });
 
+// Gemini does not send a Retry-After header (confirmed against a real
+// scheduled-workflow 429: retryAfter came back null). Its actual retry
+// guidance instead arrives as a `google.rpc.RetryInfo` detail entry in the
+// JSON body -- this must be honored so the retry doesn't fire too early
+// and immediately hit the same quota window again.
+test('complete(): a 429 with no Retry-After header uses Gemini\'s own RetryInfo detail, not the fixed fallback', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    if (fetchCalls === 1) {
+      return jsonResponse(429, {
+        error: {
+          code: 429,
+          message: 'You exceeded your current quota, please check your plan and billing details.\n' +
+            '* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, ' +
+            'limit: 15, model: gemini-3.5-flash-lite\nPlease retry in 6.203550290s.',
+          status: 'RESOURCE_EXHAUSTED',
+          details: [
+            { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '6.203550290s' }
+          ]
+        }
+      });
+    }
+    return jsonResponse(200, {
+      candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+      usageMetadata: {}
+    });
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  await provider.complete({ prompt: 'hi' });
+
+  assert.deepEqual(sleepCalls, [6203.55029], 'RetryInfo.retryDelay ("6.203550290s") must produce a ~6203ms delay');
+});
+
+// Fallback within Gemini's own body: no RetryInfo detail at all, only the
+// "Please retry in Ns." text inside error.message.
+test('complete(): a 429 with no RetryInfo detail falls back to parsing "Please retry in Ns" from the message', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    if (fetchCalls === 1) {
+      return jsonResponse(429, {
+        error: {
+          message: 'You exceeded your current quota.\nPlease retry in 9.5s.',
+          status: 'RESOURCE_EXHAUSTED'
+        }
+      });
+    }
+    return jsonResponse(200, {
+      candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+      usageMetadata: {}
+    });
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  await provider.complete({ prompt: 'hi' });
+
+  assert.deepEqual(sleepCalls, [9500], 'the "Please retry in 9.5s" message text must produce a 9500ms delay');
+});
+
 test('complete(): a non-JSON error body is preserved as a bounded text diagnostic, never an enormous exception', async () => {
   const hugeBody = 'x'.repeat(10_000);
   const fetchImpl = async () => textResponse(503, hugeBody);
