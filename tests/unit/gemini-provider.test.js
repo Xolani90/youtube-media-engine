@@ -292,3 +292,108 @@ test('isPaid is false and id is "gemini-free", matching config.llmProviderPriori
   assert.equal(provider.id, 'gemini-free');
   assert.equal(provider.isPaid, false);
 });
+
+// --- Pacing (provider-local rate limiter, ~13 req/min, 4.5s floor) -------
+
+function okResponse(text = 'ok') {
+  return jsonResponse(200, {
+    responseId: 'req-pacing',
+    modelVersion: 'gemini-3.5-flash-lite',
+    candidates: [{ content: { parts: [{ text }] } }],
+    usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 }
+  });
+}
+
+test('pacing: the first request is never delayed', async () => {
+  const fetchImpl = async () => okResponse();
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  // nowImpl is irrelevant for a first call -- fixed value just to make
+  // this deterministic and avoid any dependency on the real clock.
+  const provider = new GeminiProvider({
+    fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl: () => 1_000_000
+  });
+
+  await provider.complete({ prompt: 'hi' });
+
+  assert.equal(sleepCalls.length, 0, 'no pacing delay before the very first request on a fresh instance');
+});
+
+test('pacing: a second request issued immediately after the first waits out the remainder of the 4.5s floor', async () => {
+  const fetchImpl = async () => okResponse();
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  // Simulates the two complete() calls starting 1000ms apart in real time.
+  let now = 1_000_000;
+  const nowImpl = () => now;
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+
+  await provider.complete({ prompt: 'first' });
+  now += 1000; // only 1s has elapsed before the next call starts
+  await provider.complete({ prompt: 'second' });
+
+  assert.equal(sleepCalls.length, 1, 'exactly one pacing delay before the second request');
+  assert.equal(sleepCalls[0], 3500, 'waits the remaining 3.5s of the 4.5s floor (4500 - 1000 elapsed)');
+});
+
+test('pacing: a request issued after the 4.5s floor has already elapsed is not delayed', async () => {
+  const fetchImpl = async () => okResponse();
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  let now = 1_000_000;
+  const nowImpl = () => now;
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+
+  await provider.complete({ prompt: 'first' });
+  now += 5000; // 5s elapsed -- already past the 4.5s minimum interval
+  await provider.complete({ prompt: 'second' });
+
+  assert.equal(sleepCalls.length, 0, 'no pacing delay once the minimum interval has already passed');
+});
+
+test('pacing: three consecutive requests each respect the 4.5s floor relative to the previous request', async () => {
+  const fetchImpl = async () => okResponse();
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  let now = 0;
+  const nowImpl = () => now;
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+
+  await provider.complete({ prompt: 'a' }); // t=0, no wait
+  now += 2000; // t=2000
+  await provider.complete({ prompt: 'b' }); // must wait 2500 to reach t=4500
+  now += 4500; // simulate that the wait elapsed, then more time passes -- t=9000
+  await provider.complete({ prompt: 'c' }); // already past floor since t=4500, no wait
+
+  assert.deepEqual(sleepCalls, [2500], 'only the second request needed to wait; the third was already clear of the floor');
+});
+
+test('pacing: does not interfere with the existing 429 retry -- retry delay and pacing delay are both honored', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    // Call 1 (first complete()) succeeds outright. Call 2 (second
+    // complete()'s first attempt) is a 429; call 3 (its retry) succeeds.
+    if (fetchCalls === 2) {
+      return jsonResponse(429, { error: { message: 'RESOURCE_EXHAUSTED' } }, { 'retry-after': '1' });
+    }
+    return fetchCalls === 1 ? okResponse('ok') : okResponse('Retried successfully.');
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  let now = 0;
+  const nowImpl = () => now;
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+
+  const first = await provider.complete({ prompt: 'a' });
+  assert.equal(first.text, 'ok', 'default okResponse() text');
+  assert.equal(sleepCalls.length, 0, 'first call: no pacing wait, no retry needed');
+
+  now += 4500; // second call starts exactly at the pacing floor -- no pacing wait needed
+  const second = await provider.complete({ prompt: 'b' });
+
+  assert.equal(fetchCalls, 3, 'first call: 1 fetch; second call: 429 then retry = 2 fetches');
+  assert.equal(sleepCalls.length, 1, 'only the 429 retry delay was awaited -- pacing added no extra wait here');
+  assert.equal(sleepCalls[0], 1000, 'the retry delay itself is unchanged: derived from Retry-After, not the pacing floor');
+  assert.equal(second.text, 'Retried successfully.');
+});

@@ -23,6 +23,20 @@ const MAX_ATTEMPTS_ON_429 = 2;
 // source (header, RetryInfo detail, or message text).
 const FALLBACK_RETRY_DELAY_MS = 2000;
 
+// Provider-local pacing floor, added after a real GitHub Actions run hit
+// Gemini's confirmed free-tier limit of 15 requests/minute for
+// gemini-3.5-flash-lite (generate_content_free_tier_requests, HTTP 429
+// RESOURCE_EXHAUSTED). Discovery's LLM calls are already strictly
+// sequential (no concurrency to coordinate here), so a simple minimum
+// gap between the START of one complete() call and the START of the next
+// is sufficient to keep normal, successful traffic under quota. 4.5s
+// targets ~13.3 requests/minute -- under the 15/min limit with a safety
+// margin, without touching Discovery's candidate limits, dedup workload
+// caps, retry count, model, or router priority. This paces the outer
+// complete() call only; the existing bounded 429 retry (and its own,
+// much larger, Gemini-supplied retry delay) is untouched below.
+const MIN_REQUEST_INTERVAL_MS = 4500;
+
 /**
  * Parses a numeric-seconds value (as used by both the Retry-After header's
  * numeric-seconds form and Gemini's RetryInfo `retryDelay` field, e.g. "6"
@@ -158,19 +172,46 @@ export class GeminiProvider extends LLMProvider {
    *   original choice but returns HTTP 404 "no longer available to new users" for keys created after
    *   its cutoff (confirmed against this project's key via the scheduled workflow's first real run);
    *   Google's own error body names gemini-3.5-flash-lite as the replacement, which is what's used here.
-   * @param {(ms: number) => Promise<void>} [opts.sleepImpl] - injectable delay for the 429 retry, so tests never wait in real time.
+   * @param {(ms: number) => Promise<void>} [opts.sleepImpl] - injectable delay for the 429 retry and the pacing floor, so tests never wait in real time.
+   * @param {() => number} [opts.nowImpl] - injectable clock (ms) for the pacing floor, so tests never wait in real time.
    */
   constructor({
     fetchImpl = fetch,
     apiKeyProvider = () => process.env.GEMINI_FREE_API_KEY,
     model = 'gemini-3.5-flash-lite',
-    sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+    sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    nowImpl = () => Date.now()
   } = {}) {
     super();
     this._fetch = fetchImpl;
     this._apiKeyProvider = apiKeyProvider;
     this._model = model;
     this._sleep = sleepImpl;
+    this._now = nowImpl;
+    // Timestamp (per nowImpl) that the most recent complete() call started
+    // its request at. null until the first call. Instance-scoped, so
+    // pacing is per-GeminiProvider-instance -- Groq/OpenRouter, and any
+    // other provider, are entirely unaffected (see module docstring).
+    this._lastRequestStartedAt = null;
+  }
+
+  /**
+   * Blocks (via sleepImpl) only long enough to keep at least
+   * MIN_REQUEST_INTERVAL_MS between the start of consecutive complete()
+   * calls on this instance. The first call is never delayed. Runs once
+   * per complete() call, not per retry attempt -- the 429 retry's own,
+   * larger, Gemini-supplied delay already covers the retry sub-request.
+   */
+  async _waitForPacingSlot() {
+    const now = this._now();
+    if (this._lastRequestStartedAt !== null) {
+      const elapsed = now - this._lastRequestStartedAt;
+      const remaining = MIN_REQUEST_INTERVAL_MS - elapsed;
+      if (remaining > 0) {
+        await this._sleep(remaining);
+      }
+    }
+    this._lastRequestStartedAt = this._now();
   }
 
   get id() {
@@ -199,6 +240,8 @@ export class GeminiProvider extends LLMProvider {
     };
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this._model}:generateContent`;
+
+    await this._waitForPacingSlot();
 
     let res;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_ON_429; attempt++) {
