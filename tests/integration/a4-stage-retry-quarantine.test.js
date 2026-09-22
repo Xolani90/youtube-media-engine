@@ -311,7 +311,7 @@ test('migration 0017: preserves 0016 data 1:1, renames to subject_id, drops the 
   // LATEST_MIGRATION is a deliberate, named expectation: a new migration must be
   // acknowledged here on purpose, not merely tolerated.
   const MIGRATION_0017 = '0017_generalize_stage_retry_identity.sql';
-  const LATEST_MIGRATION = '0021_discovery_evaluation_schedule.sql';
+  const LATEST_MIGRATION = '0022_system_runs_ceiling_summary.sql';
   assert.ok(files.includes(MIGRATION_0017), 'migration 0017 is present');
   assert.equal(files.at(-1), LATEST_MIGRATION, 'current latest migration (update LATEST_MIGRATION deliberately when one is added)');
   db.pragma('foreign_keys = OFF');

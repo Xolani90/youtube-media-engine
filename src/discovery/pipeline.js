@@ -1,11 +1,11 @@
 import crypto from 'node:crypto';
-import { checkDuplicate, DEDUP_RESULT, generateUnderlyingEventId } from './dedup.js';
+import { checkDuplicate, DEDUP_RESULT, generateUnderlyingEventId, createDedupWorkloadBudget } from './dedup.js';
 import { checkHardEligibility } from './eligibility.js';
 import { generateProposition, validateProposition } from './proposition.js';
 import { computeValueScore } from './scoring.js';
 import { evaluateOpportunityRisk } from './riskGate.js';
 import { selectDiversePortfolio } from './diversity.js';
-import { STAGE, REJECTION_REASON } from './constants.js';
+import { STAGE, REJECTION_REASON, DEDUP_WORKLOAD, CEILING_REASON } from './constants.js';
 import { RISK_LEVELS } from '../state/RiskPolicy.js';
 
 /**
@@ -61,7 +61,14 @@ function insertOpportunity(storage, opp) {
 export async function runDiscoveryPipeline({
   storage, runId, observations, llmRouter, discoveryPolicy, scoringWeights,
   alreadyProducedCorpus = [], topK, rawFeatures, evaluationStore = null,
-  evaluationSchedule = null, freshEvaluationBudget = Infinity
+  evaluationSchedule = null, freshEvaluationBudget = Infinity,
+  // ADR-0038: run-scoped, independent L2/L3 dedup workload budget. A caller
+  // override (tests/controlled callers) still wins; the production default
+  // is the frozen 4,950/4,950 ceilings tied to the RSS global admission cap.
+  dedupWorkloadBudget = createDedupWorkloadBudget({
+    l2Cap: DEDUP_WORKLOAD.L2_COMPARISON_CAP,
+    l3Cap: DEDUP_WORKLOAD.L3_SEMANTIC_CALL_CAP
+  })
 }) {
   const stats = {
     discovered: observations.length, dedupRejected: 0, eligibilityRejected: 0, propositionRejected: 0,
@@ -70,20 +77,52 @@ export async function runDiscoveryPipeline({
     // fresh evaluation was durably committed (regardless of later risk-veto
     // or diversity exclusion); budgetSkipped = required a fresh evaluation
     // but the run's freshEvaluationBudget was exhausted first.
-    reused: 0, freshEvaluated: 0, budgetSkipped: 0
+    reused: 0, freshEvaluated: 0, budgetSkipped: 0,
+    // ADR-0038: a candidate whose dedup comparison set was only partially
+    // evaluated because an L2/L3 workload ceiling was reached. Never pushed
+    // into `accepted`, so it is absent from scoredCandidates/selected and
+    // automatically becomes NOT_SCORED_UNRESOLVED via the existing
+    // ADR-0033/0034 ledger classification -- no ledger changes needed.
+    dedupUnresolved: 0
   };
+  // ADR-0038: occurrence-level ceiling booleans for this run's dedup workload.
+  const ceilings = { l2ComparisonCapReached: false, l3SemanticCallCapReached: false };
   const accepted = []; // observations that survived dedup + eligibility, carrying underlyingEventId
 
   for (const observation of observations) {
     let dedupResolvedDuplicate = false;
+    let dedupUnresolved = false;
     let underlyingEventId = null;
     let distinctAngle = null;
 
     for (const existing of accepted) {
       const dedupResult = await checkDuplicate(observation, existing.observation, {
         thresholds: discoveryPolicy.thresholds.dedup.similarity,
-        llmRouter
+        llmRouter,
+        budget: dedupWorkloadBudget
       });
+
+      if (dedupResult.eventMatch === DEDUP_RESULT.UNRESOLVED) {
+        // ADR-0038: an L2/L3 workload ceiling was reached before this pair
+        // could be resolved. Never fabricated as DUPLICATE or DISTINCT --
+        // the candidate is left out of `accepted` entirely so it lands on
+        // NOT_SCORED_UNRESOLVED via the existing ledger classification.
+        dedupUnresolved = true;
+        const ceilingReasonCode = dedupResult.ceilingReason === 'L3'
+          ? CEILING_REASON.DISCOVERY_L3_SEMANTIC_CALL_CAP_REACHED
+          : CEILING_REASON.DISCOVERY_L2_COMPARISON_CAP_REACHED;
+        if (dedupResult.ceilingReason === 'L3') {
+          ceilings.l3SemanticCallCapReached = true;
+        } else {
+          ceilings.l2ComparisonCapReached = true;
+        }
+        logDecision(storage, {
+          runId, stage: STAGE.EVENT_DEDUP, subjectId: observation.sourceId || observation.sourceUrl || 'unknown',
+          decision: 'UNRESOLVED', reason: ceilingReasonCode,
+          resultingState: 'NOT_SCORED_UNRESOLVED', configSnapshot: { layersUsed: dedupResult.layersUsed }
+        });
+        break;
+      }
 
       if (dedupResult.eventMatch === DEDUP_RESULT.DUPLICATE) {
         if (dedupResult.distinctAngle) {
@@ -99,6 +138,11 @@ export async function runDiscoveryPipeline({
           break;
         }
       }
+    }
+
+    if (dedupUnresolved) {
+      stats.dedupUnresolved++;
+      continue;
     }
 
     if (dedupResolvedDuplicate) {
@@ -338,5 +382,5 @@ export async function runDiscoveryPipeline({
     }
   }
 
-  return { stats, selected, scoredCandidates };
+  return { stats, selected, scoredCandidates, ceilings };
 }

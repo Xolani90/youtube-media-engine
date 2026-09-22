@@ -418,7 +418,17 @@ export async function runAutonomousOperation(deps) {
     // ADR-0028: status comes from the invocation counters, never from
     // stopReason. Only "work was attempted and none of it succeeded" fails.
     const status = attemptedCount > 0 && successCount === 0 ? 'FAILED' : 'COMPLETED';
-    recorder.finish(runId, { status, stopReason });
+    // ADR-0038: deps.ceilingSummary, when the caller supplied one (see
+    // src/index.js), is forwarded to finish() so it is persisted on this
+    // run's system_runs row. Not touching the key when the caller never
+    // supplied one keeps every other/test caller of runAutonomousOperation
+    // byte-for-byte unaffected (SystemRunRecorder.finish only writes the
+    // column when the option key is explicitly present).
+    recorder.finish(runId, {
+      status,
+      stopReason,
+      ...(Object.prototype.hasOwnProperty.call(deps, 'ceilingSummary') ? { ceilingSummary: deps.ceilingSummary } : {})
+    });
   } catch (err) {
     recorder.finish(runId, { status: 'FAILED', stopReason: err.message });
     throw err;

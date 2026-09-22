@@ -134,8 +134,21 @@ export class SystemRunRecorder {
    * Releases a run. An Owner-reclaimed row is never overwritten: if a run the
    * Owner reclaimed later tries to finish, its reclaim evidence is preserved.
    * Returns the number of rows updated.
+   *
+   * ADR-0038: `ceilingSummary`, when explicitly passed (any value including
+   * null), is persisted as JSON into system_runs.ceiling_summary. When the
+   * option is omitted entirely, that column is left untouched -- existing
+   * callers that never pass it see byte-for-byte the pre-ADR-0038 behavior.
    */
-  finish(runId, { status = 'COMPLETED', stopReason = null } = {}) {
+  finish(runId, { status = 'COMPLETED', stopReason = null, ...rest } = {}) {
+    if (Object.prototype.hasOwnProperty.call(rest, 'ceilingSummary')) {
+      const info = this.storage.run(
+        `UPDATE system_runs SET finished_at = ?, status = ?, stop_reason = ?, ceiling_summary = ?
+          WHERE id = ? AND (stop_reason IS NULL OR substr(stop_reason, 1, ${OWNER_RECLAIM_PREFIX.length}) <> '${OWNER_RECLAIM_PREFIX}')`,
+        [new Date().toISOString(), status, stopReason, rest.ceilingSummary == null ? null : JSON.stringify(rest.ceilingSummary), runId]
+      );
+      return info.changes;
+    }
     const info = this.storage.run(
       `UPDATE system_runs SET finished_at = ?, status = ?, stop_reason = ?
         WHERE id = ? AND (stop_reason IS NULL OR substr(stop_reason, 1, ${OWNER_RECLAIM_PREFIX.length}) <> '${OWNER_RECLAIM_PREFIX}')`,

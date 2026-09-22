@@ -114,8 +114,28 @@ export async function runAutonomousEntrypoint(deps = {}) {
 
     const {
       candidates,
-      failures
+      failures,
+      ceilings: rssCeilings
     } = await opportunitySource.fetchCandidates();
+
+    // ADR-0038: occurrence-level RSS ceiling events. A run can contain
+    // multiple RSS_PER_FEED_CAP_REACHED occurrences (one per feed that
+    // independently reached its per-feed cap), so each is logged
+    // independently rather than collapsed into a single scalar value.
+    if (rssCeilings) {
+      for (const feedUrl of rssCeilings.perFeedCapReached) {
+        guardedRecorder.logDecision(guard.id, {
+          subjectType: 'rss_feed', subjectId: feedUrl,
+          decision: 'CEILING_REACHED', reason: 'RSS_PER_FEED_CAP_REACHED'
+        });
+      }
+      if (rssCeilings.globalCapReached) {
+        guardedRecorder.logDecision(guard.id, {
+          subjectType: 'rss_feed', subjectId: 'GLOBAL',
+          decision: 'CEILING_REACHED', reason: 'RSS_GLOBAL_CAP_REACHED'
+        });
+      }
+    }
 
     const observations = candidates.map((candidate) =>
       opportunitySource.normalize(candidate)
@@ -189,10 +209,28 @@ export async function runAutonomousEntrypoint(deps = {}) {
       now: deps.discovery?.now
     });
 
+    // ADR-0038: run-level structured ceiling summary combining RSS admission
+    // and Discovery dedup workload ceilings, persisted on this run's
+    // system_runs row (via runAutonomousOperation -> recorder.finish) so the
+    // autonomous orchestration layer can distinguish normal/exhaustive
+    // Discovery completion from workload-bounded Discovery completion. The
+    // exact shape is an implementation detail -- not decided by ADR-0038.
+    const ceilingSummary = {
+      rss: rssCeilings ?? { perFeedCapReached: [], globalCapReached: false },
+      dedup: discoveryResult.ceilings ?? { l2ComparisonCapReached: false, l3SemanticCallCapReached: false },
+      bounded: Boolean(
+        (rssCeilings?.perFeedCapReached?.length > 0) ||
+        rssCeilings?.globalCapReached ||
+        discoveryResult.ceilings?.l2ComparisonCapReached ||
+        discoveryResult.ceilings?.l3SemanticCallCapReached
+      )
+    };
+
     const runnerResult = await runAutonomousOperation({
       ...deps,
       storage,
       systemRunRecorder: guardedRecorder,
+      ceilingSummary,
       llmRouter,
       researchPolicy: deps.researchPolicy ?? config.researchPolicy,
       // RG-02: the production path must actually receive a concrete
@@ -239,7 +277,8 @@ export async function runAutonomousEntrypoint(deps = {}) {
       discovery: {
         ...discoveryResult,
         memory: memory.summary,
-        failures
+        failures,
+        ceilingSummary
       },
       runner: runnerResult
     };

@@ -5,8 +5,21 @@ import { untrustedSourceBlock } from '../providers/llm/promptTrust.js';
 export const DEDUP_RESULT = Object.freeze({
   DISTINCT: 'DISTINCT',
   DUPLICATE: 'DUPLICATE',
-  AMBIGUOUS: 'AMBIGUOUS'
+  AMBIGUOUS: 'AMBIGUOUS',
+  // ADR-0038: a pair whose comparison (L2) or semantic call (L3) could not
+  // be made because the run-scoped workload ceiling was already reached.
+  // Never fabricated as DUPLICATE or DISTINCT.
+  UNRESOLVED: 'UNRESOLVED'
 });
+
+/**
+ * ADR-0038: a run-scoped, independent L2/L3 workload budget. Omitting it
+ * entirely (not passing `budget` to checkDuplicate) is byte-for-byte the
+ * pre-ADR-0038 unbounded behavior -- L2/L3 caps default to Infinity.
+ */
+export function createDedupWorkloadBudget({ l2Cap = Infinity, l3Cap = Infinity } = {}) {
+  return { l2Cap, l3Cap, l2Used: 0, l3Used: 0 };
+}
 
 function canonicalize(url) {
   if (!url) return null;
@@ -88,31 +101,50 @@ export async function layer3SemanticJudgment(a, b, llmRouter) {
 
 /**
  * Full tiered dedup check between two observations.
+ *
+ * ADR-0038: an optional run-scoped `budget` (see createDedupWorkloadBudget)
+ * bounds L2 comparison and L3 semantic-call workload. L1 is never gated by
+ * the budget. When a bound is already exhausted, the corresponding layer is
+ * never entered (no comparison computed, no LLM call made) and the pair is
+ * returned as UNRESOLVED with a `ceilingReason` of 'L2' or 'L3' -- it is
+ * never fabricated as DUPLICATE or DISTINCT. Omitting `budget` entirely is
+ * byte-for-byte the pre-ADR-0038 unbounded behavior.
  */
-export async function checkDuplicate(a, b, { thresholds, llmRouter }) {
+export async function checkDuplicate(a, b, { thresholds, llmRouter, budget = null }) {
   const layersUsed = ['layer1'];
   const layer1 = layer1ExactMatch(a, b);
   if (layer1 === DEDUP_RESULT.DUPLICATE) {
-    return { eventMatch: DEDUP_RESULT.DUPLICATE, distinctAngle: false, layersUsed, llmCallMade: false, llmEvidence: null };
+    return { eventMatch: DEDUP_RESULT.DUPLICATE, distinctAngle: false, layersUsed, llmCallMade: false, llmEvidence: null, ceilingReason: null };
+  }
+
+  if (budget && budget.l2Used >= budget.l2Cap) {
+    return { eventMatch: DEDUP_RESULT.UNRESOLVED, distinctAngle: null, layersUsed, llmCallMade: false, llmEvidence: null, ceilingReason: 'L2' };
   }
 
   layersUsed.push('layer2');
+  if (budget) budget.l2Used += 1;
   const layer2 = layer2Similarity(a, b, thresholds);
   if (layer2.result === DEDUP_RESULT.DUPLICATE) {
-    return { eventMatch: DEDUP_RESULT.DUPLICATE, distinctAngle: false, layersUsed, llmCallMade: false, llmEvidence: { similarity: layer2.score } };
+    return { eventMatch: DEDUP_RESULT.DUPLICATE, distinctAngle: false, layersUsed, llmCallMade: false, llmEvidence: { similarity: layer2.score }, ceilingReason: null };
   }
   if (layer2.result === DEDUP_RESULT.DISTINCT) {
-    return { eventMatch: DEDUP_RESULT.DISTINCT, distinctAngle: null, layersUsed, llmCallMade: false, llmEvidence: { similarity: layer2.score } };
+    return { eventMatch: DEDUP_RESULT.DISTINCT, distinctAngle: null, layersUsed, llmCallMade: false, llmEvidence: { similarity: layer2.score }, ceilingReason: null };
+  }
+
+  if (budget && budget.l3Used >= budget.l3Cap) {
+    return { eventMatch: DEDUP_RESULT.UNRESOLVED, distinctAngle: null, layersUsed, llmCallMade: false, llmEvidence: { similarity: layer2.score }, ceilingReason: 'L3' };
   }
 
   layersUsed.push('layer3');
+  if (budget) budget.l3Used += 1;
   const layer3 = await layer3SemanticJudgment(a, b, llmRouter);
   return {
     eventMatch: layer3.sameEvent ? DEDUP_RESULT.DUPLICATE : DEDUP_RESULT.DISTINCT,
     distinctAngle: layer3.sameEvent ? layer3.distinctAngle : null,
     layersUsed,
     llmCallMade: true,
-    llmEvidence: { similarity: layer2.score, ...layer3 }
+    llmEvidence: { similarity: layer2.score, ...layer3 },
+    ceilingReason: null
   };
 }
 

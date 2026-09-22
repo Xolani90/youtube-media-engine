@@ -29,3 +29,29 @@ export const REJECTION_REASON = Object.freeze({
   HIGH_COPYRIGHT_RISK: 'HIGH_COPYRIGHT_RISK',
   HIGH_REPETITION_RISK: 'HIGH_REPETITION_RISK'
 });
+
+// ADR-0038: Discovery Workload Bounds and Fairness Controls (governance-only
+// decision; these are the frozen values/codes it authorizes).
+export const RSS_ADMISSION = Object.freeze({
+  PER_FEED_CAP: 50,
+  GLOBAL_CAP: 100
+});
+
+// Both tied to the global RSS admission cap via 100 * 99 / 2 = 4,950
+// (maximum pairwise comparisons across a 100-item admitted set). If
+// RSS_ADMISSION.GLOBAL_CAP ever changes, this basis must be reconsidered --
+// ADR-0038 does not pre-authorize any such recalculation.
+export const DEDUP_WORKLOAD = Object.freeze({
+  L2_COMPARISON_CAP: 4950,
+  L3_SEMANTIC_CALL_CAP: 4950
+});
+
+// The four, and only four, machine-readable ceiling reason codes ADR-0038
+// authorizes. No additional ceiling reason codes may be introduced without
+// a separate Owner decision.
+export const CEILING_REASON = Object.freeze({
+  RSS_PER_FEED_CAP_REACHED: 'RSS_PER_FEED_CAP_REACHED',
+  RSS_GLOBAL_CAP_REACHED: 'RSS_GLOBAL_CAP_REACHED',
+  DISCOVERY_L2_COMPARISON_CAP_REACHED: 'DISCOVERY_L2_COMPARISON_CAP_REACHED',
+  DISCOVERY_L3_SEMANTIC_CALL_CAP_REACHED: 'DISCOVERY_L3_SEMANTIC_CALL_CAP_REACHED'
+});

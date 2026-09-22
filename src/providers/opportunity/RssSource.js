@@ -1,5 +1,6 @@
 import { OpportunitySource } from './OpportunitySource.js';
 import { parseFeed } from '../../discovery/rssParser.js';
+import { RSS_ADMISSION } from '../../discovery/constants.js';
 
 /**
  * RssSource is the first production OpportunitySource implementation
@@ -28,14 +29,31 @@ export class RssSource extends OpportunitySource {
 
   /**
    * Fetches every configured feed. Returns:
-   * { candidates: [...raw items with feedUrl attached], failures: [{feedUrl, error}] }
+   * { candidates: [...raw items with feedUrl attached], failures: [{feedUrl, error}],
+   *   ceilings: { perFeedCapReached: [feedUrl, ...], globalCapReached: boolean } }
    * A feed that fails does not prevent others from being processed.
+   *
+   * ADR-0038: RSS admission workload bounds. Per-feed cap (50) and global cap
+   * (100), applied in configured feed order and within-feed parser/document
+   * order; unused per-feed capacity is never redistributed to other feeds.
+   * A cap only reports "reached" when it actually excluded an item (an
+   * exact-fit feed, or a run that ends exactly at a cap with nothing left,
+   * reports no ceiling event for that cap).
    */
   async fetchCandidates() {
     const candidates = [];
     const failures = [];
+    const perFeedCapReached = [];
+    let globalCapReached = false;
+    let globalAdmitted = 0;
 
     for (const feedUrl of this.feedUrls) {
+      if (globalAdmitted >= RSS_ADMISSION.GLOBAL_CAP) {
+        // The global cap was already reached by an earlier configured feed:
+        // this and every remaining configured feed must never be processed.
+        globalCapReached = true;
+        break;
+      }
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -50,15 +68,26 @@ export class RssSource extends OpportunitySource {
           clearTimeout(timer);
         }
         const items = parseFeed(text);
+        let feedAdmitted = 0;
         for (const item of items) {
+          if (feedAdmitted >= RSS_ADMISSION.PER_FEED_CAP) {
+            perFeedCapReached.push(feedUrl);
+            break;
+          }
+          if (globalAdmitted >= RSS_ADMISSION.GLOBAL_CAP) {
+            globalCapReached = true;
+            break;
+          }
           candidates.push({ ...item, feedUrl, retrievedAt: new Date().toISOString() });
+          feedAdmitted++;
+          globalAdmitted++;
         }
       } catch (err) {
         failures.push({ feedUrl, error: err.message });
       }
     }
 
-    return { candidates, failures };
+    return { candidates, failures, ceilings: { perFeedCapReached, globalCapReached } };
   }
 
   /**
