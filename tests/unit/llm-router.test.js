@@ -73,33 +73,39 @@ test('does not silently fall through to paid when free options are exhausted', a
   await assert.rejects(() => router.complete({ prompt: 'hi' }), /No usable LLM provider/);
 });
 
-// F2-L1 regression: an UnconfiguredProvider (gemini-free/openrouter-free/
-// deepseek-paid via the real REGISTRY) must never be selected just because
-// its *_API_KEY env var happens to be set -- it has no live implementation,
-// so complete() always throws. Before the fix, a present env var made
+// F2-L1 regression: an UnconfiguredProvider (openrouter-free/deepseek-paid
+// via the real REGISTRY) must never be selected just because its
+// *_API_KEY env var happens to be set -- it has no live implementation, so
+// complete() always throws. Before the fix, a present env var made
 // healthCheck() return true, so the router would select it and then hard-
 // fail instead of falling through to a genuinely usable provider.
+// (gemini-free was the UnconfiguredProvider this regression test originally
+// exercised; it now has a real GeminiProvider implementation -- see
+// GeminiProvider.js and gemini-provider.test.js -- so this test uses
+// openrouter-free, still an UnconfiguredProvider, to keep covering the
+// same router behavior.)
 test('F2-L1: an unimplemented provider with its API key env var set is NOT selected, and the router falls through to the next eligible provider', async () => {
-  const envKey = 'GEMINI_FREE_API_KEY';
+  const envKey = 'OPENROUTER_FREE_API_KEY';
   const hadKey = Object.prototype.hasOwnProperty.call(process.env, envKey);
   const previousValue = process.env[envKey];
   process.env[envKey] = 'sk-not-a-real-key-just-present';
 
   try {
     const { providerUsed, attempted } = await new LLMRouter({
-      priority: ['gemini-free', 'fake-free'],
+      priority: ['openrouter-free', 'fake-free'],
       allowPaidProviders: false,
       registry: {
-        'gemini-free': REGISTRY['gemini-free'],
+        'openrouter-free': REGISTRY['openrouter-free'],
         'fake-free': () => new FakeHealthyFree()
       }
     }).complete({ prompt: 'hi' });
 
-    // The real, unimplemented gemini-free stub was skipped despite its key
-    // being present, and the router moved on to the next eligible provider.
+    // The real, unimplemented openrouter-free stub was skipped despite its
+    // key being present, and the router moved on to the next eligible
+    // provider.
     assert.equal(providerUsed, 'fake-free');
     assert.deepEqual(attempted, [
-      { id: 'gemini-free', skipped: 'failed health check (missing key or quota exhausted)' }
+      { id: 'openrouter-free', skipped: 'failed health check (missing key or quota exhausted)' }
     ]);
   } finally {
     if (hadKey) {
