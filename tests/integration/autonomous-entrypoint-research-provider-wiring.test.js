@@ -9,6 +9,7 @@ import { SqliteStorageDriver } from '../../src/storage/SqliteStorageDriver.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
 import { OpportunitySource } from '../../src/providers/opportunity/OpportunitySource.js';
 import { TavilySearchProvider } from '../../src/providers/research/TavilySearchProvider.js';
+import { GdeltSearchProvider } from '../../src/providers/research/GdeltSearchProvider.js';
 import { runAutonomousEntrypoint } from '../../src/index.js';
 
 // No Discovery work in these tests -- only the Research stage's
@@ -90,10 +91,12 @@ function baseDeps({ storage, capturedProviders, research }) {
   };
 }
 
-test('autonomous entrypoint supplies a default TavilySearchProvider to the research stage when none is injected', async () => {
+test('autonomous entrypoint supplies a default TavilySearchProvider to the research stage when TAVILY_API_KEY is configured and none is injected', async () => {
   const { dir, dbPath } = tempDbPath();
   const storage = new SqliteStorageDriver({ dbPath });
   const capturedProviders = [];
+  const previousKey = process.env.TAVILY_API_KEY;
+  process.env.TAVILY_API_KEY = 'test-key';
 
   try {
     await storage.migrate();
@@ -106,6 +109,33 @@ test('autonomous entrypoint supplies a default TavilySearchProvider to the resea
     assert.equal(capturedProviders.length, 1);
     assert.ok(capturedProviders[0] instanceof TavilySearchProvider);
   } finally {
+    if (previousKey === undefined) delete process.env.TAVILY_API_KEY;
+    else process.env.TAVILY_API_KEY = previousKey;
+    storage.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('autonomous entrypoint supplies a default GdeltSearchProvider (R0) to the research stage when TAVILY_API_KEY is not configured and none is injected', async () => {
+  const { dir, dbPath } = tempDbPath();
+  const storage = new SqliteStorageDriver({ dbPath });
+  const capturedProviders = [];
+  const previousKey = process.env.TAVILY_API_KEY;
+  delete process.env.TAVILY_API_KEY;
+
+  try {
+    await storage.migrate();
+    seedHandedToResearchOpportunity(storage);
+
+    await runAutonomousEntrypoint(
+      baseDeps({ storage, capturedProviders, research: undefined })
+    );
+
+    assert.equal(capturedProviders.length, 1);
+    assert.ok(capturedProviders[0] instanceof GdeltSearchProvider);
+  } finally {
+    if (previousKey === undefined) delete process.env.TAVILY_API_KEY;
+    else process.env.TAVILY_API_KEY = previousKey;
     storage.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
