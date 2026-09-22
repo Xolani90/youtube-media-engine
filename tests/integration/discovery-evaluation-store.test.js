@@ -316,7 +316,17 @@ test('F. selection equivalence: a reconstructed candidate has the same shape and
     assert.deepEqual(Object.keys(fresh.scoredCandidates[0]).sort(), Object.keys(reused.scoredCandidates[0]).sort());
     assert.deepEqual(strip(reused.scoredCandidates), strip(fresh.scoredCandidates));
     assert.deepEqual(reused.selected.map((c) => c.observation.sourceId), fresh.selected.map((c) => c.observation.sourceId));
-    assert.deepEqual(reused.stats, fresh.stats);
+    // ADR-0034 added observability counters (reused, freshEvaluated,
+    // budgetSkipped) that are EXPECTED to differ between a fresh run and a
+    // reused run by design -- that is what they observe. Test F's purpose is
+    // selection equivalence, not equality of fresh-vs-reused execution
+    // telemetry, so those three are excluded here and compared on their own
+    // terms elsewhere; every other stats field must still match exactly.
+    const selectionRelevantStats = (stats) => {
+      const { reused: _reused, freshEvaluated: _freshEvaluated, budgetSkipped: _budgetSkipped, ...rest } = stats;
+      return rest;
+    };
+    assert.deepEqual(selectionRelevantStats(reused.stats), selectionRelevantStats(fresh.stats));
   });
 });
 

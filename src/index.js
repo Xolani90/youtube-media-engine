@@ -11,6 +11,7 @@ import { computeRawFeatures } from './discovery/featureComputation.js';
 import { config } from './config/index.js';
 import { prepareDiscoveryMemory, recordDiscoveryOutcomes } from './autonomous/discoveryMemory.js';
 import { createDiscoveryEvaluationStore } from './autonomous/discoveryEvaluationStore.js';
+import { createDiscoveryEvaluationSchedule } from './autonomous/discoveryEvaluationSchedule.js';
 import { SystemRunRecorder, assertRunAllowed, AUTONOMOUS_RUN_ACTIVE } from './state/SystemRun.js';
 
 /**
@@ -148,6 +149,19 @@ export async function runAutonomousEntrypoint(deps = {}) {
         now: deps.discovery?.now
       });
 
+    // ADR-0034: fresh-evaluation scheduling/budget state. Mirrors the
+    // evaluationStore construction pattern above -- always built for the
+    // production entrypoint, overridable for tests/controlled callers.
+    const evaluationSchedule =
+      deps.discovery?.evaluationSchedule ??
+      createDiscoveryEvaluationSchedule({
+        storage,
+        sourceScope: opportunitySource.id ?? null
+      });
+
+    const freshEvaluationBudget =
+      deps.discovery?.freshEvaluationBudget ?? config.discoveryFreshEvaluationBudget;
+
     const discoveryResult = await runDiscoveryPipeline({
       storage,
       runId: deps.discovery?.runId ?? null,
@@ -160,7 +174,9 @@ export async function runAutonomousEntrypoint(deps = {}) {
         deps.discovery?.alreadyProducedCorpus ?? [],
       topK: deps.discovery?.topK ?? config.discoveryTopK,
       rawFeatures,
-      evaluationStore
+      evaluationStore,
+      evaluationSchedule,
+      freshEvaluationBudget
     });
 
     // Record outcomes only after Discovery returned successfully. If

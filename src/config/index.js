@@ -156,6 +156,10 @@ export const config = {
   // Top-K per run handed to Research (v0.6 §18). Config-driven, initial value 1-3.
   discoveryTopK: Number(process.env.DISCOVERY_TOP_K ?? 2),
 
+  // ADR-0034: successful fresh Discovery evaluations permitted in a single
+  // Discovery run (durable reuse and budget-skips consume none of it).
+  discoveryFreshEvaluationBudget: Number(process.env.DISCOVERY_FRESH_EVALUATION_BUDGET ?? 25),
+
   repoRoot: REPO_ROOT
 };
 

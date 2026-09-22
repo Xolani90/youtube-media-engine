@@ -60,9 +60,18 @@ function insertOpportunity(storage, opp) {
  */
 export async function runDiscoveryPipeline({
   storage, runId, observations, llmRouter, discoveryPolicy, scoringWeights,
-  alreadyProducedCorpus = [], topK, rawFeatures, evaluationStore = null
+  alreadyProducedCorpus = [], topK, rawFeatures, evaluationStore = null,
+  evaluationSchedule = null, freshEvaluationBudget = Infinity
 }) {
-  const stats = { discovered: observations.length, dedupRejected: 0, eligibilityRejected: 0, propositionRejected: 0, scored: 0, riskVetoed: 0, selected: 0, diversityExcluded: 0 };
+  const stats = {
+    discovered: observations.length, dedupRejected: 0, eligibilityRejected: 0, propositionRejected: 0,
+    scored: 0, riskVetoed: 0, selected: 0, diversityExcluded: 0,
+    // ADR-0034: reused = took the ADR-0033 reuse path; freshEvaluated = a
+    // fresh evaluation was durably committed (regardless of later risk-veto
+    // or diversity exclusion); budgetSkipped = required a fresh evaluation
+    // but the run's freshEvaluationBudget was exhausted first.
+    reused: 0, freshEvaluated: 0, budgetSkipped: 0
+  };
   const accepted = []; // observations that survived dedup + eligibility, carrying underlyingEventId
 
   for (const observation of observations) {
@@ -128,13 +137,63 @@ export async function runDiscoveryPipeline({
   // and feature LLMs again. A missing/invalid record falls through to the
   // unmodified fresh-evaluation path. Absence of a store is byte-for-byte
   // the baseline behavior.
-  const scoredCandidates = [];
+  // ADR-0034: reuse-first, then a per-run budget on fresh evaluations.
+  // Reuse is decided exactly as ADR-0033 always has (evaluationStore.lookup,
+  // unaffected by scheduling). Only candidates that are NOT reusable enter
+  // scheduling: ordered oldest-last-fresh-evaluation-first (never-evaluated
+  // first), the first `freshEvaluationBudget` of them proceed; the rest are
+  // skipped for this run entirely (no LLM calls, no opportunity persisted,
+  // schedule state untouched) and remain eligible in future runs.
+  const reuseByCandidateId = new Map();
+  const needsFresh = [];
   for (const candidate of accepted) {
     const reused = evaluationStore ? evaluationStore.lookup(candidate.observation) : null;
+    if (reused) {
+      reuseByCandidateId.set(candidate.id, reused);
+    } else {
+      needsFresh.push(candidate);
+    }
+  }
+
+  const budgetSkippedIds = new Set();
+  if (evaluationSchedule && Number.isFinite(freshEvaluationBudget) && needsFresh.length > freshEvaluationBudget) {
+    const ordered = needsFresh
+      .map((candidate) => ({
+        candidate,
+        lastFreshEvaluatedAt: evaluationSchedule.lastFreshEvaluatedAt(candidate.observation),
+        identityKey: evaluationSchedule.identityKey(candidate.observation)
+      }))
+      .sort((a, b) => {
+        // last_fresh_evaluation_at ASC NULLS FIRST, identity_key ASC
+        if (a.lastFreshEvaluatedAt === null && b.lastFreshEvaluatedAt !== null) return -1;
+        if (a.lastFreshEvaluatedAt !== null && b.lastFreshEvaluatedAt === null) return 1;
+        if (a.lastFreshEvaluatedAt !== b.lastFreshEvaluatedAt) {
+          return a.lastFreshEvaluatedAt < b.lastFreshEvaluatedAt ? -1 : 1;
+        }
+        return (a.identityKey ?? '').localeCompare(b.identityKey ?? '');
+      });
+    for (const entry of ordered.slice(freshEvaluationBudget)) {
+      budgetSkippedIds.add(entry.candidate.id);
+    }
+  }
+
+  const scoredCandidates = [];
+  for (const candidate of accepted) {
+    if (budgetSkippedIds.has(candidate.id)) {
+      stats.budgetSkipped++;
+      logDecision(storage, {
+        runId, stage: STAGE.PROPOSITION_GENERATION, subjectId: candidate.id,
+        decision: 'SKIPPED', reason: 'fresh_evaluation_budget_exhausted', resultingState: 'SKIPPED'
+      });
+      continue;
+    }
+
+    const reused = reuseByCandidateId.get(candidate.id) ?? null;
     let proposition;
     let raw;
 
     if (reused) {
+      stats.reused++;
       proposition = reused.proposition;
       raw = reused.raw;
       logDecision(storage, {
@@ -173,12 +232,28 @@ export async function runDiscoveryPipeline({
       raw = await rawFeatures(candidate.observation);
 
       if (evaluationStore) {
-        evaluationStore.commit(candidate.observation, {
-          proposition,
-          raw,
-          audit: { proposition: { provider: genResult.providerUsed, model: genResult.model } }
-        });
+        const commitEvaluation = () => {
+          evaluationStore.commit(candidate.observation, {
+            proposition,
+            raw,
+            audit: { proposition: { provider: genResult.providerUsed, model: genResult.model } }
+          });
+          // ADR-0034: the schedule timestamp is written in the SAME
+          // transaction as the discovery_evaluations commit above, and only
+          // once that commit is part of a transaction that will actually
+          // succeed -- never on a partial/failed commit.
+          if (evaluationSchedule) evaluationSchedule.recordFreshEvaluation(candidate.observation);
+        };
+        if (evaluationSchedule) {
+          storage.transaction(commitEvaluation);
+        } else {
+          commitEvaluation();
+        }
       }
+      // A successful fresh evaluation is one whose durable evaluation (and,
+      // when scheduling is active, schedule timestamp) has been persisted --
+      // independent of downstream scoring/risk/diversity outcomes.
+      stats.freshEvaluated++;
     }
     const { overallScore, breakdown } = computeValueScore(
       {
