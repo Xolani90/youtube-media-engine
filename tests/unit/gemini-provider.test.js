@@ -54,7 +54,7 @@ test('complete(): constructs a well-formed request and maps a real-shaped respon
     capturedInit = init;
     return jsonResponse(200, {
       responseId: 'req-abc',
-      modelVersion: 'gemini-2.5-flash-lite',
+      modelVersion: 'gemini-3.5-flash-lite',
       candidates: [{ content: { parts: [{ text: 'Hello from Gemini.' }] } }],
       usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 4 }
     });
@@ -63,7 +63,7 @@ test('complete(): constructs a well-formed request and maps a real-shaped respon
 
   const result = await provider.complete({ prompt: 'hi', system: 'be terse', maxTokens: 50 });
 
-  assert.equal(capturedUrl, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent');
+  assert.equal(capturedUrl, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent');
   assert.equal(capturedInit.headers['x-goog-api-key'], 'key123');
   const sentBody = JSON.parse(capturedInit.body);
   assert.deepEqual(sentBody.contents, [{ role: 'user', parts: [{ text: 'hi' }] }]);
@@ -72,7 +72,7 @@ test('complete(): constructs a well-formed request and maps a real-shaped respon
 
   assert.deepEqual(result, {
     text: 'Hello from Gemini.',
-    model: 'gemini-2.5-flash-lite',
+    model: 'gemini-3.5-flash-lite',
     requestId: 'req-abc',
     inputTokens: 5,
     outputTokens: 4,
@@ -132,7 +132,7 @@ test('complete(): a transient 429 followed by a 200 succeeds on the retry, using
     }
     return jsonResponse(200, {
       responseId: 'req-retry-success',
-      modelVersion: 'gemini-2.5-flash-lite',
+      modelVersion: 'gemini-3.5-flash-lite',
       candidates: [{ content: { parts: [{ text: 'Second attempt succeeded.' }] } }],
       usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 }
     });

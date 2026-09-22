@@ -104,13 +104,16 @@ export class GeminiProvider extends LLMProvider {
    * @param {object} [opts]
    * @param {typeof fetch} [opts.fetchImpl] - injectable for tests; defaults to global fetch.
    * @param {() => string|undefined} [opts.apiKeyProvider] - defaults to reading GEMINI_FREE_API_KEY from process.env.
-   * @param {string} [opts.model] - defaults to 'gemini-2.5-flash-lite' (a current Gemini free-tier model; see report for shutdown-date caveat).
+   * @param {string} [opts.model] - defaults to 'gemini-3.5-flash-lite'. gemini-2.5-flash-lite was the
+   *   original choice but returns HTTP 404 "no longer available to new users" for keys created after
+   *   its cutoff (confirmed against this project's key via the scheduled workflow's first real run);
+   *   Google's own error body names gemini-3.5-flash-lite as the replacement, which is what's used here.
    * @param {(ms: number) => Promise<void>} [opts.sleepImpl] - injectable delay for the 429 retry, so tests never wait in real time.
    */
   constructor({
     fetchImpl = fetch,
     apiKeyProvider = () => process.env.GEMINI_FREE_API_KEY,
-    model = 'gemini-2.5-flash-lite',
+    model = 'gemini-3.5-flash-lite',
     sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   } = {}) {
     super();
