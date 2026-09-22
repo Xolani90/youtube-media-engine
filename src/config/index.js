@@ -22,6 +22,25 @@ function envBool(name, fallback) {
   return v === 'true' || v === '1';
 }
 
+// ADR-0034 §3.2.1: DISCOVERY_FRESH_EVALUATION_BUDGET has exactly two valid
+// states -- absent (use `fallback`), or explicitly supplied and a
+// non-negative integer ("0", "1", "25", ...). Any other explicitly supplied
+// value (negative, fractional, non-numeric, "NaN", "Infinity", "", or
+// whitespace-only) is invalid and MUST fail config load immediately, before
+// any fresh evaluation begins -- never silently coerced to 0, never falling
+// back to `fallback`, never left unbounded.
+function envNonNegativeInt(name, fallback) {
+  const v = process.env[name];
+  if (v === undefined) return fallback;
+  if (!/^\d+$/.test(v)) {
+    throw new Error(
+      `${name} must be a non-negative integer when set (e.g. "0", "1", "25"); ` +
+      `got ${JSON.stringify(v)}. Unset the variable to use the default of ${fallback}. See ADR-0034 §3.2.1.`
+    );
+  }
+  return Number(v);
+}
+
 function envList(name, fallback) {
   const v = process.env[name];
   if (!v) return fallback;
@@ -158,7 +177,7 @@ export const config = {
 
   // ADR-0034: successful fresh Discovery evaluations permitted in a single
   // Discovery run (durable reuse and budget-skips consume none of it).
-  discoveryFreshEvaluationBudget: Number(process.env.DISCOVERY_FRESH_EVALUATION_BUDGET ?? 25),
+  discoveryFreshEvaluationBudget: envNonNegativeInt('DISCOVERY_FRESH_EVALUATION_BUDGET', 25),
 
   repoRoot: REPO_ROOT
 };

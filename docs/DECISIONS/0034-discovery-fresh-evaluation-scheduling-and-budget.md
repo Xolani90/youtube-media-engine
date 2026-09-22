@@ -42,6 +42,34 @@ Discovery pipeline. It is not a count of LLM calls (one evaluation may use
 two), not a monetary budget, not a time-window or daily budget, and not
 scoped per feed or per provider.
 
+### 3.2.1 Configuration validity
+
+`DISCOVERY_FRESH_EVALUATION_BUDGET` has exactly two valid states:
+
+- **Absent.** The effective budget is the documented default, `25`.
+- **Explicitly supplied and a non-negative integer** (in the mathematical
+  sense: a whole number ≥ 0, with no fractional component). `0` is a valid,
+  meaningful value — it means zero successful fresh evaluations are permitted
+  for that Discovery run; all candidates requiring fresh evaluation are
+  budget-skipped.
+
+Any other explicitly supplied value is **invalid**, including but not
+limited to: negative integers, fractional values, non-numeric strings, the
+literal string `"NaN"`, the literal string `"Infinity"`, an empty string, and
+a whitespace-only string.
+
+An invalid explicitly-supplied value MUST cause Discovery run startup to fail
+before any fresh evaluation begins, with an explicit, attributable
+configuration error. Invalid configuration MUST NOT be silently
+reinterpreted as `0`, MUST NOT silently fall back to the default `25`, and
+MUST NOT result in an unbounded (uncapped) fresh-evaluation budget for that
+run.
+
+This subsection defines only the validity and failure contract for the
+configuration value itself. It does not alter this section's default or
+budget size, §3.3's accounting table, §3.4's reuse-first ordering, §3.5's
+scheduling order, §3.6's atomicity/timestamp semantics, or §3.7–§3.9.
+
 ### 3.3 Budget accounting
 
 | Outcome                     | Budget consumed |
