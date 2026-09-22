@@ -38,7 +38,14 @@ function envNonNegativeInt(name, fallback) {
       `got ${JSON.stringify(v)}. Unset the variable to use the default of ${fallback}. See ADR-0034 §3.2.1.`
     );
   }
-  return Number(v);
+  const n = Number(v);
+  if (!Number.isFinite(n)) {
+    throw new Error(
+      `${name} must be a non-negative integer when set (e.g. "0", "1", "25"); ` +
+      `got ${JSON.stringify(v)}, which is not a finite number. Unset the variable to use the default of ${fallback}. See ADR-0034 §3.2.1.`
+    );
+  }
+  return n;
 }
 
 function envList(name, fallback) {

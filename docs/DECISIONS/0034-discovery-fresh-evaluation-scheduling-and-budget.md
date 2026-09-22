@@ -65,6 +65,18 @@ reinterpreted as `0`, MUST NOT silently fall back to the default `25`, and
 MUST NOT result in an unbounded (uncapped) fresh-evaluation budget for that
 run.
 
+A value that is lexically a non-negative integer (per the criterion above)
+but whose parsed numeric result is not a finite JavaScript number —
+including but not limited to any digits-only value whose magnitude exceeds
+what a JavaScript number can represent — is also invalid, for the same
+reason the literal string `"Infinity"` is invalid: it produces the exact
+unbounded fresh-evaluation budget this section prohibits. Lexical validity
+(matching the digit-string form) is necessary but not sufficient; the
+resulting parsed value MUST additionally be finite. This clause states no
+maximum permitted value and makes no claim about integer precision beyond
+finiteness; it closes only the specific case where lexical validity and
+numeric finiteness diverge.
+
 This subsection defines only the validity and failure contract for the
 configuration value itself. It does not alter this section's default or
 budget size, §3.3's accounting table, §3.4's reuse-first ordering, §3.5's

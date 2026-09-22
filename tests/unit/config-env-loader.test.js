@@ -31,7 +31,7 @@ test("ADR-0034 §3.2.1: DISCOVERY_FRESH_EVALUATION_BUDGET absent -> default 25",
 
 test("ADR-0034 §3.2.1: DISCOVERY_FRESH_EVALUATION_BUDGET valid explicit values are accepted as non-negative integers", () => {
  const configUrl = pathToFileURL(path.join(REPO_ROOT, "src", "config", "index.js")).href;
- for (const [raw, expected] of [["0", 0], ["1", 1], ["25", 25]]) {
+ for (const [raw, expected] of [["0", 0], ["1", 1], ["25", 25], ["9007199254740991", 9007199254740991]]) {
   const env = { ...process.env, DISCOVERY_FRESH_EVALUATION_BUDGET: raw };
   const out = execFileSync(process.execPath, ["--input-type=module", "-e", "import(" + JSON.stringify(configUrl) + ").then(({ config }) => console.log(JSON.stringify({ budget: config.discoveryFreshEvaluationBudget })))"], { env, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
   const result = JSON.parse(out);
@@ -49,4 +49,15 @@ test("ADR-0034 §3.2.1: DISCOVERY_FRESH_EVALUATION_BUDGET invalid explicit value
    "DISCOVERY_FRESH_EVALUATION_BUDGET=" + JSON.stringify(raw) + " must fail config load with an explicit, attributable error"
   );
  }
+});
+
+test("ADR-0034 §3.2.1: DISCOVERY_FRESH_EVALUATION_BUDGET rejects a digits-only value whose parsed number is non-finite (overflow to Infinity)", () => {
+ const configUrl = pathToFileURL(path.join(REPO_ROOT, "src", "config", "index.js")).href;
+ const raw = "9".repeat(309);
+ const env = { ...process.env, DISCOVERY_FRESH_EVALUATION_BUDGET: raw };
+ assert.throws(
+  () => execFileSync(process.execPath, ["--input-type=module", "-e", "import(" + JSON.stringify(configUrl) + ")"], { env, stdio: ["ignore", "pipe", "pipe"] }),
+  /must be a non-negative integer/,
+  "a digits-only DISCOVERY_FRESH_EVALUATION_BUDGET that overflows to Infinity must fail config load with an explicit, attributable error"
+ );
 });
