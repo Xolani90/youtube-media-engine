@@ -26,10 +26,21 @@ const PROPOSITION_JSON = JSON.stringify({
   core_question_type: 'FACTUAL'
 });
 
+// Genuinely distinct topics, not just a number swapped into an otherwise
+// identical template -- near-identical text trips Discovery's own (correct,
+// pre-existing) dedup layer before a candidate ever reaches scheduling.
+const TOPICS = [
+  { title: 'Solar storage breakthrough', description: 'The grid batteries reach a record capacity in the quarter.' },
+  { title: 'Rail freight reform passes', description: 'Lawmakers approve overhaul of cargo scheduling rules.' },
+  { title: 'Ocean sensor network expands', description: 'Researchers deploy hundreds of new buoys worldwide.' },
+  { title: 'Vertical farming pilot opens', description: 'A warehouse district hosts a new hydroponic growing facility.' },
+  { title: 'Municipal bond rating upgraded', description: 'Analysts cite improved reserves after years of deficits.' }
+];
+
 function obs(n) {
-  return Array.from({ length: n }, (_, i) => ({
-    title: `Story ${i}`, description: `Description body number ${i} with enough distinct text.`,
-    sourceUrl: `https://n.test/${i}`, sourceId: `g${i}`, feedUrl: FEED, sourceType: 'rss',
+  if (n > TOPICS.length) throw new Error(`obs(${n}) exceeds the distinct-topic pool (${TOPICS.length})`);
+  return TOPICS.slice(0, n).map((t, i) => ({
+    ...t, sourceUrl: `https://n.test/${i}`, sourceId: `g${i}`, feedUrl: FEED, sourceType: 'rss',
     discoveredAt: '2026-03-01T00:00:00.000Z'
   }));
 }
