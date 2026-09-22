@@ -1,0 +1,81 @@
+# Scheduled autonomous media-engine invocation.
+#
+# Authorized by ADR-0035 (docs/DECISIONS/0035-github-actions-scheduled-trigger-authorization.md).
+# Governing ADRs:
+#   - ADR-0001: GitHub Actions selected as the scheduler driver architecture.
+#   - ADR-0024: single-run protection / overlap prevention (enforced by the
+#     entrypoint itself, not by this workflow; a REFUSED invocation exits 3
+#     and is treated as a non-failure below).
+#   - ADR-0035: authorizes this concrete scheduled trigger, in
+#     SIMULATION-only, non-autonomous-publish operation, at a cadence of
+#     four runs per day (~every 6 hours).
+#
+# This workflow does NOT authorize LIVE mode, real external publication, or
+# any change to pipeline-stage semantics. It only triggers the existing,
+# already-governed entrypoint on a schedule. See ADR-0035 §4 for the full
+# authorization boundary.
+
+name: Scheduled Autonomous Run
+
+on:
+  schedule:
+    # Four invocations per day, approximately every 6 hours (ADR-0035 §7).
+    - cron: '0 0,6,12,18 * * *'
+  # Allows an Owner to trigger a run manually from the Actions tab for
+  # verification purposes, without changing the automatic cadence above.
+  workflow_dispatch: {}
+
+# Only one scheduled run should be in flight from this workflow at a time.
+# This is a GitHub-Actions-level concurrency guard and is independent of,
+# and in addition to, the application-level single-run protection in
+# ADR-0024 (the entrypoint's own system_runs guard). Neither replaces the
+# other.
+concurrency:
+  group: autonomous-scheduled-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # ADR-0035 §4.1: execution is explicitly pinned to the safe operating
+    # configuration. These are set here, not left to defaults, so the safe
+    # configuration is visible in the workflow file itself.
+    env:
+      RUN_MODE: SIMULATION
+      AUTONOMOUS_ENABLED: 'false'
+      # Optional provider credentials (ADR-0035 §6). The engine's default
+      # R0 operating mode (ADR-0001) does not require any of these to run;
+      # if a secret is not configured, the corresponding provider is simply
+      # unavailable and the pipeline continues without it. YouTube OAuth
+      # credentials are deliberately never referenced here — real
+      # publication is not authorized by ADR-0035.
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      GROQ_FREE_API_KEY: ${{ secrets.GROQ_FREE_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run autonomous entrypoint (SIMULATION)
+        # Exit code 3 (REFUSED_EXIT_CODE, src/index.js) means another
+        # invocation already holds the ADR-0024 single-run guard. That is
+        # expected, safe behavior under this cadence — the guard correctly
+        # doing its job — not a workflow failure, so it is not treated as
+        # one. Any other non-zero exit is a genuine failure and fails the
+        # step normally.
+        run: |
+          node src/index.js
+          code=$?
+          if [ "$code" -eq 3 ]; then
+            echo "Invocation refused: another run already holds the ADR-0024 single-run guard. Treating as expected, not a failure."
+            exit 0
+          fi
+          exit "$code"
