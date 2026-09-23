@@ -5,7 +5,7 @@ import { detectContradiction as detectContradictionProd } from './research/contr
 import { RssSource } from './providers/opportunity/RssSource.js';
 import { PixabayAssetSourceProvider } from './providers/asset/PixabayAssetSourceProvider.js';
 import { TavilySearchProvider } from './providers/research/TavilySearchProvider.js';
-import { GdeltSearchProvider } from './providers/research/GdeltSearchProvider.js';
+import { GoogleNewsRssSearchProvider } from './providers/research/GoogleNewsRssSearchProvider.js';
 import { runDiscoveryPipeline } from './discovery/pipeline.js';
 import { runAutonomousOperation } from './autonomous/runner.js';
 import { computeRawFeatures } from './discovery/featureComputation.js';
@@ -26,15 +26,18 @@ export const REFUSED_EXIT_CODE = 3;
  * Default Research sourceProvider selection (R0). TavilySearchProvider is
  * preferred only when TAVILY_API_KEY is actually configured (it still has
  * a real, if generous, free allocation with a plan-limit surface). Absent
- * that key, GdeltSearchProvider -- a fully unauthenticated public endpoint
- * with no plan/billing surface at all -- is the R0 default, so a fresh
- * checkout with no Tavily key still gets a working Research source
- * provider instead of crashing on `provider.discoverCandidates` the way
- * an undefined sourceProvider did before ADR-0015's TavilySearchProvider
- * wiring. Exported for tests; not part of the public module surface.
+ * that key, GoogleNewsRssSearchProvider -- a fully unauthenticated public
+ * search-feed endpoint with no plan/billing surface at all -- is the R0
+ * default, so a fresh checkout with no Tavily key still gets a working
+ * Research source provider instead of crashing on
+ * `provider.discoverCandidates` the way an undefined sourceProvider did
+ * before ADR-0015's TavilySearchProvider wiring. GdeltSearchProvider
+ * remains available (unchanged) as a separate, explicitly-selected
+ * provider; it is simply no longer the no-key default. Exported for
+ * tests; not part of the public module surface.
  */
 export function selectDefaultResearchSourceProvider() {
-  return process.env.TAVILY_API_KEY ? new TavilySearchProvider() : new GdeltSearchProvider();
+  return process.env.TAVILY_API_KEY ? new TavilySearchProvider() : new GoogleNewsRssSearchProvider();
 }
 
 /**
@@ -260,7 +263,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
       // always undefined here, so SOURCE_DISCOVERY crashed on
       // `provider.discoverCandidates` in every real run that reached
       // Research. Default to TavilySearchProvider when TAVILY_API_KEY is
-      // configured, else fall back to the unauthenticated R0 GdeltSearchProvider
+      // configured, else fall back to the unauthenticated R0 GoogleNewsRssSearchProvider
       // (no key, no plan/billing surface to exceed) so Research remains R0
       // in the common case where no paid-adjacent key has been set up; a
       // caller-supplied override (tests, controlled callers) still takes

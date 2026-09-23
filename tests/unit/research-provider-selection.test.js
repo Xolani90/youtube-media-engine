@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { selectDefaultResearchSourceProvider } from '../../src/index.js';
 import { TavilySearchProvider } from '../../src/providers/research/TavilySearchProvider.js';
-import { GdeltSearchProvider } from '../../src/providers/research/GdeltSearchProvider.js';
+import { GoogleNewsRssSearchProvider } from '../../src/providers/research/GoogleNewsRssSearchProvider.js';
 
 function withTavilyKey(value, fn) {
   const previous = process.env.TAVILY_API_KEY;
@@ -16,10 +16,10 @@ function withTavilyKey(value, fn) {
   }
 }
 
-test('selects GdeltSearchProvider (R0 default) when TAVILY_API_KEY is not configured', () => {
+test('selects GoogleNewsRssSearchProvider (R0 default) when TAVILY_API_KEY is not configured', () => {
   withTavilyKey(undefined, () => {
     const provider = selectDefaultResearchSourceProvider();
-    assert.ok(provider instanceof GdeltSearchProvider);
+    assert.ok(provider instanceof GoogleNewsRssSearchProvider);
   });
 });
 
