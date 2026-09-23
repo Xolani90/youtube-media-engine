@@ -362,6 +362,7 @@ async function main() {
       dedupRejected: result.discovery.stats.dedupRejected,
       eligibilityRejected: result.discovery.stats.eligibilityRejected,
       propositionRejected: result.discovery.stats.propositionRejected,
+      featureRejected: result.discovery.stats.featureRejected,
       riskVetoed: result.discovery.stats.riskVetoed,
       scored: result.discovery.stats.scored,
       budgetSkipped: result.discovery.stats.budgetSkipped,

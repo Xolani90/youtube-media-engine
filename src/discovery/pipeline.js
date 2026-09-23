@@ -72,7 +72,7 @@ export async function runDiscoveryPipeline({
 }) {
   const stats = {
     discovered: observations.length, dedupRejected: 0, eligibilityRejected: 0, propositionRejected: 0,
-    scored: 0, riskVetoed: 0, selected: 0, diversityExcluded: 0,
+    featureRejected: 0, scored: 0, riskVetoed: 0, selected: 0, diversityExcluded: 0,
     // ADR-0034: reused = took the ADR-0033 reuse path; freshEvaluated = a
     // fresh evaluation was durably committed (regardless of later risk-veto
     // or diversity exclusion); budgetSkipped = required a fresh evaluation
@@ -273,7 +273,26 @@ export async function runDiscoveryPipeline({
       });
 
       proposition = genResult.proposition;
-      raw = await rawFeatures(candidate.observation);
+      // Feature computation (e.g. computeRawFeatures) intentionally throws
+      // on malformed/truncated LLM output rather than fabricating a score
+      // -- see src/discovery/featureComputation.js's own contract. That
+      // throw must not be allowed to propagate out of the pipeline (which
+      // would abort the entire Discovery run over a single candidate); it
+      // is handled here, at the pipeline boundary, as a per-candidate
+      // rejection -- the same shape as the PROPOSITION_VALIDATION rejection
+      // above -- so the failing candidate is skipped and the loop proceeds
+      // to the next one.
+      try {
+        raw = await rawFeatures(candidate.observation);
+      } catch (err) {
+        stats.featureRejected++;
+        logDecision(storage, {
+          runId, stage: STAGE.FEATURE_COMPUTATION, subjectId: candidate.id,
+          decision: 'REJECTED', reason: REJECTION_REASON.INELIGIBLE_FEATURE_COMPUTATION_FAILED,
+          resultingState: 'REJECTED', configSnapshot: { errorMessage: err.message }
+        });
+        continue;
+      }
 
       if (evaluationStore) {
         const commitEvaluation = () => {
