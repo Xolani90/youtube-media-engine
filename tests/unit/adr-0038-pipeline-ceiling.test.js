@@ -173,7 +173,7 @@ test('default production budget (omitted override) never introduces UNRESOLVED a
       sponsorship_potential: 50, policyRisk: 0.1, copyrightRisk: 0.1, repetitionRisk: 0.1
     })
     // dedupWorkloadBudget intentionally omitted -- defaults to the frozen
-    // 4,950/4,950 production ceilings, far above what two observations need.
+    // 1,225/1,225 production ceilings, far above what two observations need.
   });
 
   assert.equal(stats.dedupUnresolved, 0);

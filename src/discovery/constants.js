@@ -34,16 +34,16 @@ export const REJECTION_REASON = Object.freeze({
 // decision; these are the frozen values/codes it authorizes).
 export const RSS_ADMISSION = Object.freeze({
   PER_FEED_CAP: 50,
-  GLOBAL_CAP: 100
+  GLOBAL_CAP: 50
 });
 
-// Both tied to the global RSS admission cap via 100 * 99 / 2 = 4,950
-// (maximum pairwise comparisons across a 100-item admitted set). If
+// Both tied to the global RSS admission cap via 50 * 49 / 2 = 1,225
+// (maximum pairwise comparisons across a 50-item admitted set). If
 // RSS_ADMISSION.GLOBAL_CAP ever changes, this basis must be reconsidered --
 // ADR-0038 does not pre-authorize any such recalculation.
 export const DEDUP_WORKLOAD = Object.freeze({
-  L2_COMPARISON_CAP: 4950,
-  L3_SEMANTIC_CALL_CAP: 4950
+  L2_COMPARISON_CAP: 1225,
+  L3_SEMANTIC_CALL_CAP: 1225
 });
 
 // The four, and only four, machine-readable ceiling reason codes ADR-0038
