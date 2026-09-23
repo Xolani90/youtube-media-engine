@@ -95,13 +95,28 @@ export class GdeltSearchProvider extends ResearchSourceProvider {
     url.searchParams.set('format', 'json');
     url.searchParams.set('maxrecords', String(boundedMaxResults));
 
+    // TEMP DIAGNOSTIC (GH Actions run 35799399048 investigation -- remove
+    // once root cause is confirmed and, if warranted, fixed). Logs only;
+    // does not alter control flow, return shape, or any error message
+    // text below.
+    logDiagnostic(`request: query=${JSON.stringify(query)} url=${url.toString()}`);
+
     let res;
     try {
       res = await this._fetch(url.toString());
     } catch (err) {
       // Network-level failure reaching GDELT.
+      logDiagnostic(
+        `network error: name=${err?.name} message=${err?.message} ` +
+        `cause=${err?.cause ? safeStringify(err.cause) : 'undefined'}`
+      );
       return { candidates: [], failures: [{ error: `network error contacting GDELT: ${err.message}` }] };
     }
+
+    const contentType = (res.headers && typeof res.headers.get === 'function')
+      ? res.headers.get('content-type')
+      : 'unknown (no headers on response mock)';
+    logDiagnostic(`response: status=${res.status} content-type=${contentType}`);
 
     if (!res.ok) {
       let detail = '';
@@ -110,19 +125,27 @@ export class GdeltSearchProvider extends ResearchSourceProvider {
       } catch {
         // Best-effort only; an unreadable body doesn't change the outcome.
       }
+      logDiagnostic(`non-ok body snippet: ${boundedSnippet(detail)}`);
       return {
         candidates: [],
         failures: [{ error: `GDELT HTTP ${res.status}${detail ? `: ${detail}` : ''}` }]
       };
     }
 
+    // Read as text first (diagnostic-only change from calling res.json()
+    // directly) purely so the raw body can be logged on a parse failure;
+    // JSON.parse over that same text produces the same error shape/message
+    // res.json() itself would have produced, so the return values and
+    // error text below are unchanged from before this diagnostic.
+    const rawBody = await res.text();
     let data;
     try {
-      data = await res.json();
+      data = JSON.parse(rawBody);
     } catch (err) {
       // Covers both genuinely malformed JSON and GDELT's documented
       // behavior of returning HTTP 200 with a plain-text error body for
       // malformed queries.
+      logDiagnostic(`non-JSON 200 body snippet: ${boundedSnippet(rawBody)}`);
       return { candidates: [], failures: [{ error: `malformed GDELT response: ${err.message}` }] };
     }
 
@@ -166,6 +189,32 @@ export class GdeltSearchProvider extends ResearchSourceProvider {
 function clampMaxResults(maxResults) {
   const n = Number.isFinite(maxResults) ? Math.floor(maxResults) : 5;
   return Math.min(250, Math.max(1, n));
+}
+
+/**
+ * TEMP DIAGNOSTIC helper (see discoverCandidates() call sites above) --
+ * remove alongside those call sites once root cause is confirmed.
+ */
+function logDiagnostic(message) {
+  console.error(`[gdelt-diagnostic] ${message}`);
+}
+
+/** Bounds a logged response-body snippet so a large/unexpected body never floods the log. */
+function boundedSnippet(text, maxLen = 300) {
+  if (typeof text !== 'string') return String(text);
+  return text.length > maxLen ? `${text.slice(0, maxLen)}... [truncated, ${text.length} chars total]` : text;
+}
+
+/** Best-effort stringify for `error.cause`, which may itself be a non-plain Error/object. */
+function safeStringify(value) {
+  try {
+    if (value instanceof Error) {
+      return `${value.name}: ${value.message}`;
+    }
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 export default GdeltSearchProvider;
