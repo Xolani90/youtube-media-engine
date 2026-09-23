@@ -346,6 +346,38 @@ async function main() {
     `selected=${result.discovery.stats.selected}, ` +
     `processed=${result.runner.processed.reduce((sum, item) => sum + item.count, 0)}`
   );
+
+  // TEMPORARY DIAGNOSTIC -- Google News RSS R0 Research verification.
+  // Read-only visibility into this run's actual Research outcome, since
+  // the summary line above is a cross-stage total and says nothing about
+  // research_projects.status. Opens its own short-lived storage handle
+  // (the same sqlite file this run just wrote) purely to SELECT; does not
+  // alter pipeline behavior, provider selection, or write anything.
+  // Remove this block once verification is complete (mirrors the earlier
+  // temp-diagnostic-then-revert pattern used for GDELT R0 rollout).
+  const diagnosticStorage = createStorage();
+  try {
+    const projects = diagnosticStorage.all(
+      'SELECT id, opportunity_id, status, stop_reason FROM research_projects WHERE run_id = ?',
+      [result.runner.runId]
+    );
+    if (projects.length === 0) {
+      console.log('[research-diagnostic] no research_projects rows for this run_id');
+    }
+    for (const project of projects) {
+      const sourceRows = diagnosticStorage.all(
+        'SELECT retrieval_status, COUNT(*) as count FROM sources WHERE research_project_id = ? GROUP BY retrieval_status',
+        [project.id]
+      );
+      const sourceSummary = sourceRows.map((r) => `${r.retrieval_status}=${r.count}`).join(', ') || 'none';
+      console.log(
+        `[research-diagnostic] project=${project.id} opportunity=${project.opportunity_id} ` +
+        `status=${project.status} stop_reason=${project.stop_reason ?? 'null'} sources={${sourceSummary}}`
+      );
+    }
+  } finally {
+    diagnosticStorage.close();
+  }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
