@@ -188,7 +188,7 @@ test('a bare fence with no language tag (``` ... ```) also parses successfully',
 
 // --- ADR-0037: proposition maxTokens ceiling ---
 
-test('ADR-0037: generateProposition supplies maxTokens=1000 to llmRouter.complete', async () => {
+test('ADR-0037: generateProposition supplies maxTokens=400 to llmRouter.complete', async () => {
   let capturedRequest = null;
   const registry = {
     'capture-stub': () => ({
@@ -203,7 +203,7 @@ test('ADR-0037: generateProposition supplies maxTokens=1000 to llmRouter.complet
   const router = new LLMRouter({ priority: ['capture-stub'], allowPaidProviders: false, registry });
   await generateProposition({ title: 'x', description: 'y' }, router);
   assert.ok(capturedRequest, 'expected generateProposition to have made an LLM call');
-  assert.equal(capturedRequest.maxTokens, 1000);
+  assert.equal(capturedRequest.maxTokens, 400);
 });
 
 test('ADR-0037: a truncated (mid-field, unparseable) proposition response retains the existing rejection behavior, unaffected by the ceiling', async () => {
