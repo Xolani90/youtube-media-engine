@@ -37,15 +37,6 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
   try {
     const discovery = await provider.discoverCandidates({ query, maxResults: maxSources, alreadyAcquiredUrls: [] });
     candidates = discovery.candidates || [];
-    // TEMP DIAGNOSTIC (remove once GDELT R0 rollout is confirmed in CI):
-    // no per-stage Research logging exists today, so a CI run's log
-    // cannot otherwise show which sourceProvider actually ran or whether
-    // it returned any candidates.
-    console.error(
-      `[research/acquisition] discoverCandidates via provider=${provider?.id ?? 'unknown'}: ` +
-      `${candidates.length} candidate(s), ${(discovery.failures || []).length} failure(s)` +
-      ((discovery.failures || []).length ? ` -- ${JSON.stringify(discovery.failures)}` : '')
-    );
   } catch (err) {
     // Discovery failure is isolated: the acquisition run reports zero
     // acquired sources rather than throwing (v0.3 S3: three-way failure
