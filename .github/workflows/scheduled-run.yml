@@ -43,6 +43,7 @@ jobs:
     env:
       RUN_MODE: SIMULATION
       AUTONOMOUS_ENABLED: 'false'
+      LLM_PROVIDER_PRIORITY: 'groq-free,gemini-free'
       # ADR-0036: publicly-authorized Discovery RSS sources (not secret
       # configuration — public feed URLs).
       RSS_FEED_URLS: 'https://openai.com/news/rss.xml,https://blog.google/technology/ai/rss/,https://techcrunch.com/category/artificial-intelligence/feed/,https://arstechnica.com/ai/feed/'
