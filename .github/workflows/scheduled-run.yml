@@ -23,7 +23,13 @@ on:
     - cron: '0 0,6,12,18 * * *'
   # Allows an Owner to trigger a run manually from the Actions tab for
   # verification purposes, without changing the automatic cadence above.
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref/branch to check out for manual runs'
+        required: false
+        type: string
+        default: ''
 
 # Only one scheduled run should be in flight from this workflow at a time.
 # This is a GitHub-Actions-level concurrency guard and is independent of,
@@ -60,6 +66,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
