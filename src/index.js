@@ -347,6 +347,31 @@ async function main() {
     `processed=${result.runner.processed.reduce((sum, item) => sum + item.count, 0)}`
   );
 
+  // TEMPORARY DIAGNOSTIC -- full Discovery stats breakdown. The summary
+  // line above only ever exposed discovered/selected/processed, so a run
+  // that ends with selected=0 gives no way to tell which pipeline stage
+  // (dedup, hard eligibility, proposition validation, risk gate, the
+  // fresh-evaluation budget, or an unresolved dedup workload ceiling)
+  // accounted for it. Read-only: logs the same `stats` object
+  // runDiscoveryPipeline already returns, does not alter Discovery
+  // behavior, thresholds, budgets, or persistence in any way. Remove once
+  // verification is complete (mirrors the existing temp-diagnostic-then-
+  // revert pattern already used for the Research diagnostic below).
+  console.log(
+    '[discovery-diagnostic] stats=' + JSON.stringify({
+      dedupRejected: result.discovery.stats.dedupRejected,
+      eligibilityRejected: result.discovery.stats.eligibilityRejected,
+      propositionRejected: result.discovery.stats.propositionRejected,
+      riskVetoed: result.discovery.stats.riskVetoed,
+      scored: result.discovery.stats.scored,
+      budgetSkipped: result.discovery.stats.budgetSkipped,
+      dedupUnresolved: result.discovery.stats.dedupUnresolved,
+      reused: result.discovery.stats.reused,
+      freshEvaluated: result.discovery.stats.freshEvaluated,
+      selected: result.discovery.stats.selected
+    })
+  );
+
   // TEMPORARY DIAGNOSTIC -- Google News RSS R0 Research verification.
   // Read-only visibility into this run's actual Research outcome, since
   // the summary line above is a cross-stage total and says nothing about
