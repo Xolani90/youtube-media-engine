@@ -5,10 +5,15 @@ import { LLMProvider } from '../../src/providers/llm/LLMProvider.js';
 import { REGISTRY } from '../../src/providers/llm/candidates.js';
 
 class FakeHealthyFree extends LLMProvider {
+  constructor() {
+    super();
+    this.completeCallCount = 0;
+  }
   get id() { return 'fake-free'; }
   get isPaid() { return false; }
   async healthCheck() { return true; }
   async complete() {
+    this.completeCallCount += 1;
     return { text: 'ok', model: 'fake', requestId: null, inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false };
   }
 }
@@ -26,6 +31,25 @@ class FakePaid extends LLMProvider {
   async healthCheck() { return true; }
   async complete() {
     return { text: 'paid-ok', model: 'fake-paid-model', requestId: null, inputTokens: 1, outputTokens: 1, estimatedCost: 1.5, isPaid: true };
+  }
+}
+
+// Healthy (eligible) provider whose complete() throws -- distinct from
+// FakeUnhealthyFree, which is ruled out at the health-check stage and so
+// never reaches complete() at all.
+class FakeThrowingHealthy extends LLMProvider {
+  constructor(id, err) {
+    super();
+    this._id = id;
+    this._err = err;
+    this.completeCallCount = 0;
+  }
+  get id() { return this._id; }
+  get isPaid() { return false; }
+  async healthCheck() { return true; }
+  async complete() {
+    this.completeCallCount += 1;
+    throw this._err;
   }
 }
 
@@ -138,4 +162,101 @@ test('F2-L1: with no fallback provider available, an unimplemented provider with
       delete process.env[envKey];
     }
   }
+});
+
+// --- Failover: complete() throwing for a selected (healthy/eligible)
+// provider should move on to the next eligible provider, rather than
+// stopping at the first provider that passed its health check. ---
+
+test('failover 1: first provider succeeds -> no fallback is attempted', async () => {
+  const first = new FakeHealthyFree();
+  const second = new FakeHealthyFree();
+  const router = new LLMRouter({
+    priority: ['fake-free', 'fake-free-2'],
+    allowPaidProviders: false,
+    registry: {
+      'fake-free': () => first,
+      'fake-free-2': () => second
+    }
+  });
+
+  const { providerUsed } = await router.complete({ prompt: 'hi' });
+  assert.equal(providerUsed, 'fake-free');
+  // Eligibility (health-check) is evaluated for the full priority list,
+  // but complete() itself must only ever be invoked on the provider
+  // actually used -- the second provider's complete() is never reached.
+  assert.equal(second.completeCallCount, 0);
+});
+
+test('failover 2: first provider throws a 429 -> second provider succeeds', async () => {
+  const err = Object.assign(new Error('rate limited'), { status: 429 });
+  const failing = new FakeThrowingHealthy('groq-free', err);
+  const router = new LLMRouter({
+    priority: ['groq-free', 'gemini-free'],
+    allowPaidProviders: false,
+    registry: {
+      'groq-free': () => failing,
+      'gemini-free': () => new FakeHealthyFree()
+    }
+  });
+
+  const { result, providerUsed } = await router.complete({ prompt: 'hi' });
+  assert.equal(providerUsed, 'fake-free');
+  assert.equal(result.text, 'ok');
+  assert.equal(failing.completeCallCount, 1);
+});
+
+test('failover 3: first provider throws a generic error -> second provider succeeds', async () => {
+  const failing = new FakeThrowingHealthy('groq-free', new Error('boom'));
+  const router = new LLMRouter({
+    priority: ['groq-free', 'gemini-free'],
+    allowPaidProviders: false,
+    registry: {
+      'groq-free': () => failing,
+      'gemini-free': () => new FakeHealthyFree()
+    }
+  });
+
+  const { providerUsed } = await router.complete({ prompt: 'hi' });
+  assert.equal(providerUsed, 'fake-free');
+  assert.equal(failing.completeCallCount, 1);
+});
+
+test('failover 4: all eligible providers fail -> failure propagates with failure detail', async () => {
+  const first = new FakeThrowingHealthy('groq-free', new Error('boom-1'));
+  const second = new FakeThrowingHealthy('gemini-free', new Error('boom-2'));
+  const router = new LLMRouter({
+    priority: ['groq-free', 'gemini-free'],
+    allowPaidProviders: false,
+    registry: {
+      'groq-free': () => first,
+      'gemini-free': () => second
+    }
+  });
+
+  await assert.rejects(
+    () => router.complete({ prompt: 'hi' }),
+    /All eligible LLM providers failed.*groq-free: boom-1.*gemini-free: boom-2/s
+  );
+  assert.equal(first.completeCallCount, 1);
+  assert.equal(second.completeCallCount, 1);
+});
+
+test('failover 5: providers without valid credentials (failed health check) remain skipped, never retried, and are not counted as failover attempts', async () => {
+  const unhealthy = new FakeUnhealthyFree();
+  const healthy = new FakeHealthyFree();
+  const router = new LLMRouter({
+    priority: ['fake-unhealthy', 'fake-free'],
+    allowPaidProviders: false,
+    registry: {
+      'fake-unhealthy': () => unhealthy,
+      'fake-free': () => healthy
+    }
+  });
+
+  const { providerUsed, attempted } = await router.complete({ prompt: 'hi' });
+  assert.equal(providerUsed, 'fake-free');
+  assert.deepEqual(attempted, [
+    { id: 'fake-unhealthy', skipped: 'failed health check (missing key or quota exhausted)' }
+  ]);
 });

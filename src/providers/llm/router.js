@@ -42,7 +42,15 @@ export class LLMRouter {
     return factory();
   }
 
-  async _selectProvider() {
+  /**
+   * Walks the full priority list once, applying the existing paid/health
+   * eligibility checks, and returns every eligible provider in priority
+   * order (not just the first). `attempted` carries the skip reasons for
+   * providers that were ruled out (paid-not-allowed / failed health
+   * check), in the same shape as before this method existed.
+   */
+  async _selectEligibleProviders() {
+    const eligible = [];
     const attempted = [];
     for (const id of this.priority) {
       const provider = this._instantiate(id);
@@ -51,10 +59,13 @@ export class LLMRouter {
         continue;
       }
       const healthy = await provider.healthCheck();
-      if (healthy) return { provider, attempted };
-      attempted.push({ id, skipped: 'failed health check (missing key or quota exhausted)' });
+      if (!healthy) {
+        attempted.push({ id, skipped: 'failed health check (missing key or quota exhausted)' });
+        continue;
+      }
+      eligible.push({ id, provider });
     }
-    return { provider: null, attempted };
+    return { eligible, attempted };
   }
 
   /**
@@ -73,35 +84,53 @@ export class LLMRouter {
    * it propagates from `complete()` unchanged — the router does not catch
    * it and try another provider, preserving the existing
    * no-silent-paid-fallback rule.
+   *
+   * Failover: if the selected provider's own `complete()` throws (e.g. a
+   * transient 429 that its internal retry logic didn't absorb), the
+   * router moves on to the next eligible provider in priority order and
+   * tries that one instead. Each eligible provider is tried at most once
+   * per call — there is no retrying the same provider. If every eligible
+   * provider fails, the router throws a single error summarizing every
+   * failure encountered.
    */
   async complete(request, context = {}) {
-    const { provider, attempted } = await this._selectProvider();
-    if (!provider) {
+    const { eligible, attempted } = await this._selectEligibleProviders();
+    if (eligible.length === 0) {
       const detail = attempted.map((a) => `${a.id}: ${a.skipped}`).join('; ');
       throw new Error(
         `No usable LLM provider available under current configuration. Attempted: ${detail || '(empty priority list)'}`
       );
     }
 
-    if (this.costTracker) {
-      const { runId = null, contentId = null, jobStage = null } = context;
-      this.costTracker.record({
-        runId,
-        contentId,
-        jobStage,
-        provider: provider.id,
-        model: null,
-        requestId: null,
-        inputTokens: null,
-        outputTokens: null,
-        estimatedCost: request?.estimatedCost ?? 0,
-        actualCost: null,
-        isPaid: provider.isPaid
-      });
+    const failures = [];
+    for (const { id, provider } of eligible) {
+      if (this.costTracker) {
+        const { runId = null, contentId = null, jobStage = null } = context;
+        this.costTracker.record({
+          runId,
+          contentId,
+          jobStage,
+          provider: provider.id,
+          model: null,
+          requestId: null,
+          inputTokens: null,
+          outputTokens: null,
+          estimatedCost: request?.estimatedCost ?? 0,
+          actualCost: null,
+          isPaid: provider.isPaid
+        });
+      }
+
+      try {
+        const result = await provider.complete(request);
+        return { result, providerUsed: provider.id, attempted };
+      } catch (err) {
+        failures.push({ id, error: err?.message ?? String(err) });
+      }
     }
 
-    const result = await provider.complete(request);
-    return { result, providerUsed: provider.id, attempted };
+    const detail = failures.map((f) => `${f.id}: ${f.error}`).join('; ');
+    throw new Error(`All eligible LLM providers failed. Failures: ${detail}`);
   }
 }
 
