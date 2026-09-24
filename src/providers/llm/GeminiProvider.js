@@ -23,6 +23,16 @@ const MAX_ATTEMPTS_ON_429 = 2;
 // source (header, RetryInfo detail, or message text).
 const FALLBACK_RETRY_DELAY_MS = 2000;
 
+// Bounds a single request attempt so a stalled (never-responding) fetch
+// can't block complete() -- and therefore the sequential callers above it
+// (e.g. Research claim extraction) and LLMRouter's failover -- forever.
+// Applied per attempt (each 429 retry gets its own fresh timeout), same
+// AbortController pattern already used by retrieveSource()/RssSource.js,
+// just with a larger budget appropriate for a text-generation completion
+// rather than a plain page fetch. Not a retry: a timeout still throws,
+// exactly like any other fetch failure.
+const LLM_REQUEST_TIMEOUT_MS = 30000;
+
 // Provider-local pacing floor, added after a real GitHub Actions run hit
 // Gemini's confirmed free-tier limit of 15 requests/minute for
 // gemini-3.5-flash-lite (generate_content_free_tier_requests, HTTP 429
@@ -245,14 +255,21 @@ export class GeminiProvider extends LLMProvider {
 
     let res;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_ON_429; attempt++) {
-      res = await this._fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
-        },
-        body: JSON.stringify(body)
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
+      try {
+        res = await this._fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+      } finally {
+        clearTimeout(timer);
+      }
 
       if (res.ok) break;
 

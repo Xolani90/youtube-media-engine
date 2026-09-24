@@ -38,6 +38,16 @@ const MAX_ATTEMPTS_ON_429 = 2;
 // fixed by design, not an adaptive/elaborate rate limiter.
 const FALLBACK_RETRY_DELAY_MS = 2000;
 
+// Bounds a single request attempt so a stalled (never-responding) fetch
+// can't block complete() -- and therefore the sequential callers above it
+// (e.g. Research claim extraction) and LLMRouter's failover -- forever.
+// Applied per attempt (each 429 retry gets its own fresh timeout), same
+// AbortController pattern already used by retrieveSource()/RssSource.js,
+// just with a larger budget appropriate for a text-generation completion
+// rather than a plain page fetch. Not a retry: a timeout still throws,
+// exactly like any other fetch failure.
+const LLM_REQUEST_TIMEOUT_MS = 30000;
+
 /**
  * Parses Retry-After's numeric-seconds form (the form Groq is documented
  * to return, e.g. "3"). The HTTP-date form is intentionally not handled --
@@ -183,14 +193,21 @@ export class GroqProvider extends LLMProvider {
 
     let res;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_ON_429; attempt++) {
-      res = await this._fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`
-        },
-        body: JSON.stringify(body)
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
+      try {
+        res = await this._fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+      } finally {
+        clearTimeout(timer);
+      }
 
       if (res.ok) break;
 

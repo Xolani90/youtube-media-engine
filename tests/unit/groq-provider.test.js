@@ -243,6 +243,30 @@ test('complete(): a 200 response with no completion text is an explicit failure,
   await assert.rejects(() => provider.complete({ prompt: 'hi' }), /no usable completion text/);
 });
 
+test('complete(): a request that never resolves is aborted after LLM_REQUEST_TIMEOUT_MS, rejecting instead of hanging forever', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  let capturedSignal;
+  const fetchImpl = (url, init) => {
+    capturedSignal = init.signal;
+    // Never resolves on its own -- only settles if the request is aborted.
+    return new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => {
+        const err = new Error('This operation was aborted');
+        err.name = 'AbortError';
+        reject(err);
+      });
+    });
+  };
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  const pending = assert.rejects(() => provider.complete({ prompt: 'hi' }), /aborted/i);
+  t.mock.timers.tick(30000);
+  await pending;
+
+  assert.equal(capturedSignal.aborted, true, 'the request signal must be aborted once the timeout elapses');
+});
+
 test('isPaid is false and id is "groq-free", matching config.llmProviderPriority\'s existing id', () => {
   const provider = new GroqProvider({ apiKeyProvider: () => 'key123' });
   assert.equal(provider.id, 'groq-free');

@@ -222,6 +222,24 @@ test('failover 3: first provider throws a generic error -> second provider succe
   assert.equal(failing.completeCallCount, 1);
 });
 
+test('failover 3b: first provider times out (AbortError, the shape a stalled fetch now rejects with) -> second provider succeeds', async () => {
+  const timeoutErr = new Error('The operation was aborted.');
+  timeoutErr.name = 'AbortError';
+  const timingOut = new FakeThrowingHealthy('groq-free', timeoutErr);
+  const router = new LLMRouter({
+    priority: ['groq-free', 'gemini-free'],
+    allowPaidProviders: false,
+    registry: {
+      'groq-free': () => timingOut,
+      'gemini-free': () => new FakeHealthyFree()
+    }
+  });
+
+  const { providerUsed } = await router.complete({ prompt: 'hi' });
+  assert.equal(providerUsed, 'fake-free');
+  assert.equal(timingOut.completeCallCount, 1);
+});
+
 test('failover 4: all eligible providers fail -> failure propagates with failure detail', async () => {
   const first = new FakeThrowingHealthy('groq-free', new Error('boom-1'));
   const second = new FakeThrowingHealthy('gemini-free', new Error('boom-2'));
