@@ -14,6 +14,7 @@ import { prepareDiscoveryMemory, recordDiscoveryOutcomes } from './autonomous/di
 import { createDiscoveryEvaluationStore } from './autonomous/discoveryEvaluationStore.js';
 import { createDiscoveryEvaluationSchedule } from './autonomous/discoveryEvaluationSchedule.js';
 import { SystemRunRecorder, assertRunAllowed, AUTONOMOUS_RUN_ACTIVE } from './state/SystemRun.js';
+import { resetRunDiagnostics, timeDiscovery, formatRunDiagnostics } from './diagnostics/runWorkloadDiagnostics.js';
 
 /**
  * Process exit code used when an invocation is REFUSED because another
@@ -65,6 +66,7 @@ export function selectDefaultResearchSourceProvider() {
  * here: the entrypoint owns the run lifecycle.
  */
 export async function runAutonomousEntrypoint(deps = {}) {
+  resetRunDiagnostics(); // diagnostics only: counters are per autonomous run
   const ownsStorage = !deps.storage;
   const storage = deps.storage ?? createStorage();
   const recorder = new SystemRunRecorder(storage);
@@ -201,7 +203,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
     const freshEvaluationBudget =
       deps.discovery?.freshEvaluationBudget ?? config.discoveryFreshEvaluationBudget;
 
-    const discoveryResult = await runDiscoveryPipeline({
+    const discoveryResult = await timeDiscovery(() => runDiscoveryPipeline({
       storage,
       runId: deps.discovery?.runId ?? null,
       observations: memory.admitted,
@@ -216,7 +218,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
       evaluationStore,
       evaluationSchedule,
       freshEvaluationBudget
-    });
+    }));
 
     // Record outcomes only after Discovery returned successfully. If
     // Discovery threw, the rows stay NOT_EVALUATED (non-suppressing). A
@@ -347,6 +349,10 @@ async function main() {
     `processed=${result.runner.processed.reduce((sum, item) => sum + item.count, 0)}`
   );
 
+  // Discovery dedup workload / LLM rate-limit diagnostics (numeric counters
+  // only; see src/diagnostics/runWorkloadDiagnostics.js).
+  console.log(formatRunDiagnostics());
+
   // TEMPORARY DIAGNOSTIC -- full Discovery stats breakdown. The summary
   // line above only ever exposed discovered/selected/processed, so a run
   // that ends with selected=0 gives no way to tell which pipeline stage
@@ -408,6 +414,7 @@ async function main() {
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
+    console.log(formatRunDiagnostics());
     console.error('Autonomous entrypoint failed:', err);
     process.exitCode = 1;
   });

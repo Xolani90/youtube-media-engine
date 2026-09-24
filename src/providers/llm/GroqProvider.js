@@ -1,4 +1,5 @@
 import { LLMProvider } from './LLMProvider.js';
+import { recordLlm429, recordRetrySleep } from '../../diagnostics/runWorkloadDiagnostics.js';
 
 // M3-B: diagnostics for non-2xx Groq responses, and (below) bounded retry
 // for 429 specifically -- see GroqProvider#complete's docstring. Rate-limit
@@ -215,11 +216,13 @@ export class GroqProvider extends LLMProvider {
       // attempts -- every other non-2xx status (400/401/403/404/5xx, etc.)
       // and an exhausted 429 retry both throw immediately here, exactly
       // as before this change.
+      if (res.status === 429) recordLlm429(); // diagnostics only
       if (res.status !== 429 || attempt === MAX_ATTEMPTS_ON_429) {
         throw await buildGroqRequestError(res);
       }
 
       const delayMs = parseRetryAfterMs(res.headers?.get?.('retry-after')) ?? FALLBACK_RETRY_DELAY_MS;
+      recordRetrySleep(delayMs); // diagnostics only
       await this._sleep(delayMs);
     }
 

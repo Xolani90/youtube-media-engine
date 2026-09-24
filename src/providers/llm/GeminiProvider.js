@@ -1,4 +1,5 @@
 import { LLMProvider } from './LLMProvider.js';
+import { recordLlm429, recordRetrySleep } from '../../diagnostics/runWorkloadDiagnostics.js';
 
 // Mirrors GroqProvider's non-2xx diagnostics and bounded 429 retry, adapted
 // to the Gemini API's error shape (`{ error: { code, message, status,
@@ -280,6 +281,7 @@ export class GeminiProvider extends LLMProvider {
       // Only 429 is retryable, and only up to MAX_ATTEMPTS_ON_429 total
       // attempts -- every other non-2xx status (400/401/403/404/5xx, etc.)
       // and an exhausted 429 retry both throw immediately here.
+      if (res.status === 429) recordLlm429(); // diagnostics only
       if (res.status !== 429 || attempt === MAX_ATTEMPTS_ON_429) {
         throw buildGeminiRequestError(res, errorBody);
       }
@@ -287,6 +289,7 @@ export class GeminiProvider extends LLMProvider {
       const delayMs = parseSecondsToMs(res.headers?.get?.('retry-after'))
         ?? errorBody.retryDelayMs
         ?? FALLBACK_RETRY_DELAY_MS;
+      recordRetrySleep(delayMs); // diagnostics only
       await this._sleep(delayMs);
     }
 
