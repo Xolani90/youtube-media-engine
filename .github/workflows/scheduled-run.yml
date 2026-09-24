@@ -53,6 +53,7 @@ jobs:
       # ADR-0036: publicly-authorized Discovery RSS sources (not secret
       # configuration — public feed URLs).
       RSS_FEED_URLS: 'https://openai.com/news/rss.xml,https://blog.google/technology/ai/rss/,https://techcrunch.com/category/artificial-intelligence/feed/,https://arstechnica.com/ai/feed/'
+      SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
       # Optional provider credentials (ADR-0035 §6). The engine's default
       # R0 operating mode (ADR-0001) does not require any of these to run;
       # if a secret is not configured, the corresponding provider is simply
@@ -97,3 +98,6 @@ jobs:
             exit 0
           fi
           exit "$code"
+
+      - name: Research source-level diagnostic
+        run: node scripts/research-source-diagnostic.js
