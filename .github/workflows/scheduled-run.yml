@@ -83,50 +83,124 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Restore SQLite state cache
+        # SQLite state persistence between GitHub Actions runs.
+        #
+        # The cache is ONLY a carrier of data/media-engine.db from one runner
+        # to the next; it is not a permanent or authoritative external
+        # database. Entries are evicted by GitHub after 7 days without access
+        # (or under the repository cache size limit), and are scoped to the
+        # branch that saved them (a branch can restore its own caches and its
+        # base/default branch's). A miss is therefore always survivable: the
+        # entrypoint simply starts from a fresh database.
+        #
+        # Every save uses a unique key (run id + attempt) because cache
+        # entries are immutable; restore-keys selects the most recently
+        # created entry with the shared prefix.
+        #
+        # The cached file is exactly the job-level SQLITE_PATH -- the same
+        # convention src/config/index.js reads -- so the restored file is the
+        # one the entrypoint opens. Only the main database file
+        # is cached: it is saved after a TRUNCATE WAL checkpoint (see the
+        # checkpoint step below), so -wal / -shm carry no state.
+        id: sqlite_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.SQLITE_PATH }}
+          key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            media-engine-sqlite-
+
+      - name: Report SQLite cache restore result
+        # Makes hit/miss explicit in the log. With restore-keys, the action's
+        # `cache-hit` output is only 'true' for an exact key match (which a
+        # unique per-run key never produces), so a prefix restore is detected
+        # through `cache-matched-key`, which is set whenever any cache was
+        # restored and empty on a miss.
+        env:
+          CACHE_HIT: ${{ steps.sqlite_cache_restore.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.sqlite_cache_restore.outputs.cache-matched-key }}
+        run: |
+          if [ -n "$CACHE_MATCHED_KEY" ]; then
+            echo "SQLite cache: HIT (matched key: $CACHE_MATCHED_KEY; exact-key hit: ${CACHE_HIT:-false})"
+            if [ -f "$SQLITE_PATH" ]; then
+              echo "Restored database at SQLITE_PATH=$SQLITE_PATH ($(wc -c < "$SQLITE_PATH") bytes)"
+            else
+              echo "::warning::SQLite cache reported a hit but no file exists at SQLITE_PATH=$SQLITE_PATH"
+            fi
+          else
+            echo "SQLite cache: MISS (no cache matched prefix media-engine-sqlite-); the entrypoint will create a fresh database at SQLITE_PATH=$SQLITE_PATH"
+          fi
+
       - name: Run autonomous entrypoint (SIMULATION)
         # Exit code 3 (REFUSED_EXIT_CODE, src/index.js) means another
         # invocation already holds the ADR-0024 single-run guard. That is
         # expected, safe behavior under this cadence — the guard correctly
         # doing its job — not a workflow failure, so it is not treated as
-        # one. Any other non-zero exit is a genuine failure, but this step
-        # itself must not fail here: GitHub Actions' default shell runs
-        # with `set -e`, which would otherwise terminate the step on
-        # node's non-zero exit before `$?` could be read, and would skip
-        # the diagnostic step below entirely. `set +e` is used around the
-        # invocation to capture the exit code reliably; `set -e` is
-        # restored immediately after. The captured code is exposed as a
-        # step output and only re-emitted as the job's real failure by the
-        # "Report application exit status" step below, after the
-        # diagnostic step (and whatever SQLite checkpoint/persistence
-        # src/index.js already performed before exiting) has had a chance
-        # to run.
-        id: run_app
+        # one. Any other non-zero exit is a genuine failure and fails the
+        # step normally.
         run: |
-          set +e
           node src/index.js
           code=$?
-          set -e
-          echo "code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 3 ]; then
             echo "Invocation refused: another run already holds the ADR-0024 single-run guard. Treating as expected, not a failure."
-          elif [ "$code" -ne 0 ]; then
-            echo "::warning::node src/index.js exited with code $code; continuing to diagnostic/persistence steps before failing the workflow."
+            exit 0
           fi
+          exit "$code"
 
       - name: Research source-level diagnostic
         run: node scripts/research-source-diagnostic.js
 
-      - name: Report application exit status
-        # Runs even if a prior step above failed, so the real application
-        # exit code (captured before any diagnostic/persistence step ran)
-        # is always the thing that finally determines job success/failure.
-        # Exit code 3 (ADR-0024 refusal) and 0 are treated as success;
-        # every other non-zero code is re-emitted here, not swallowed.
+      - name: Checkpoint SQLite WAL before saving
+        # Persists SQLite state for the next run. This step and the save step
+        # after it run under always(), so they execute whether or not an
+        # earlier step failed. The entrypoint step never fails on the
+        # application's exit code (it only records it), so a non-zero
+        # application exit still reaches here and its database state is
+        # still saved; the job's real pass/fail decision remains the final
+        # step below.
+        #
+        # The database runs in WAL mode (SqliteStorageDriver), so committed
+        # data may still live only in data/media-engine.db-wal. Only the main
+        # file is cached, so the WAL is folded into it and truncated first.
+        # If the checkpoint cannot complete (busy != 0) or the node command
+        # fails for any reason, the failure is handled explicitly (not left
+        # to bash -e): the step writes saveable=false, exits 1, and never
+        # reaches the saveable=true line, so an incomplete file is never
+        # saved over a good cache entry.
+        id: sqlite_checkpoint
         if: always()
         run: |
-          code="${{ steps.run_app.outputs.code }}"
-          if [ -z "$code" ] || [ "$code" -eq 0 ] || [ "$code" -eq 3 ]; then
+          if [ ! -f "$SQLITE_PATH" ]; then
+            echo "::warning::No SQLite database at SQLITE_PATH=$SQLITE_PATH; nothing to checkpoint or save."
+            echo "saveable=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Failing workflow: node src/index.js exited with code $code"
-          exit "$code"
+          if ! node --input-type=module - <<'NODE'
+          import Database from 'better-sqlite3';
+          const db = new Database(process.env.SQLITE_PATH, { fileMustExist: true });
+          try {
+            const [r] = db.pragma('wal_checkpoint(TRUNCATE)');
+            console.log(`[sqlite-persistence] wal_checkpoint(TRUNCATE): busy=${r.busy} wal_frames=${r.log} checkpointed_frames=${r.checkpointed}`);
+            if (r.busy !== 0) {
+              console.error('[sqlite-persistence] checkpoint did not complete (database busy); refusing to save.');
+              process.exitCode = 1;
+            }
+          } finally {
+            db.close();
+          }
+          NODE
+          then
+            echo "::error::SQLite WAL checkpoint did not complete for SQLITE_PATH=$SQLITE_PATH; failing this step and NOT saving the cache."
+            echo "saveable=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "[sqlite-persistence] database ready to save: $SQLITE_PATH ($(wc -c < "$SQLITE_PATH") bytes)"
+          echo "saveable=true" >> "$GITHUB_OUTPUT"
+
+      - name: Save SQLite state cache
+        if: always() && steps.sqlite_checkpoint.outputs.saveable == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SQLITE_PATH }}
+          key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
