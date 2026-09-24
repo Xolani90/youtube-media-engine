@@ -23,8 +23,11 @@ import { parseFeed } from '../../discovery/rssParser.js';
  *     demonstrated need yet for locale selection.
  *   - Response shape: RSS 2.0 (`<item><title><link><description><pubDate>`).
  *     Parsed with the EXISTING `rssParser.js` used by Discovery's
- *     `RssSource` -- no second XML parser. `<link>` is the real article URL
- *     `retrieveSource()` fetches.
+ *     `RssSource` -- no second XML parser. `<link>` is the URL
+ *     `retrieveSource()` fetches. Items whose `<link>` is a Google News
+ *     `/rss/articles/...` wrapper are EXCLUDED here (see
+ *     `isGoogleNewsRssWrapperUrl`): the opaque wrapper cannot be resolved
+ *     to publisher content within R0 and always fails retrieval.
  *   - `pubDate` is RSS's standard RFC-822 string and is mapped to
  *     `publishedAt` verbatim when present, exactly as GDELT's `seendate` and
  *     Tavily's `published_date` are passed through verbatim -- Research does
@@ -138,6 +141,11 @@ export class GoogleNewsRssSearchProvider extends ResearchSourceProvider {
     for (const item of items) {
       if (candidates.length >= boundedMaxResults) break;
       if (!item || typeof item.link !== 'string' || !item.link) continue;
+      // Google News wrapper URLs cannot be resolved to publisher content
+      // within R0 (opaque article tokens) and always fail retrieval, so
+      // they are excluded BEFORE the maxResults count and never occupy a
+      // candidate slot.
+      if (isGoogleNewsRssWrapperUrl(item.link)) continue;
       if (alreadySeen.has(item.link)) continue;
 
       const candidate = {
@@ -153,6 +161,27 @@ export class GoogleNewsRssSearchProvider extends ResearchSourceProvider {
 
     return { candidates, failures: [] };
   }
+}
+
+/**
+ * URL-shape-only check for a Google News RSS article wrapper
+ * (`https://news.google.com/rss/articles/...`). Same host + path shape as
+ * the retrieval-time guard `isGoogleNewsRssWrapperPage` in
+ * src/research/retrieval.js, which is intentionally left unchanged as a
+ * safety net (it additionally inspects response content, which is not
+ * available at discovery time). An unparseable URL is NOT treated as a
+ * wrapper: it is passed through exactly as before, so existing behavior
+ * for non-wrapper links is preserved and this never throws.
+ */
+export function isGoogleNewsRssWrapperUrl(url) {
+  if (typeof url !== 'string' || !url) return false;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return parsed.hostname === 'news.google.com' && parsed.pathname.startsWith('/rss/articles/');
 }
 
 /**

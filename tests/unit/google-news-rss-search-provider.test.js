@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GoogleNewsRssSearchProvider } from '../../src/providers/research/GoogleNewsRssSearchProvider.js';
+import { GoogleNewsRssSearchProvider, isGoogleNewsRssWrapperUrl } from '../../src/providers/research/GoogleNewsRssSearchProvider.js';
 
 function xmlResponse(status, xml) {
   return {
@@ -157,4 +157,80 @@ test('no API key is required anywhere (unauthenticated endpoint, network fully m
   // Structural guard: every test above supplies an injected fetchImpl and
   // no test reads or requires any environment credential.
   assert.equal(true, true);
+});
+
+const WRAPPER_URL = 'https://news.google.com/rss/articles/CBMiW0FVX3lxTE9kT2t4QWVHS3diRXpOWV90RFhEMTh5SWp0RU9TRFl1dmJENEtZMnJDWXNsdkNpSHd0MDQ5YzhCVDZBUzlrN00wUVY5Q2hMMUpyWlRVcW5NYnJXVDg?oc=5';
+
+test('Google News /rss/articles/ wrapper candidates are excluded; publisher URLs retained', async () => {
+  const fetchImpl = async () => xmlResponse(200, feed([
+    { title: 'Wrapped', link: WRAPPER_URL, description: 'w', pubDate: 'Mon, 01 Jan 2024 00:00:00 GMT' },
+    { title: 'Publisher', link: 'https://www.publisher.com/story', description: 'p', pubDate: 'Tue, 02 Jan 2024 00:00:00 GMT' }
+  ]));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.candidates, [{
+    url: 'https://www.publisher.com/story',
+    title: 'Publisher',
+    snippet: 'p',
+    publishedAt: 'Tue, 02 Jan 2024 00:00:00 GMT'
+  }]);
+});
+
+test('wrapper candidates do not consume maxResults slots', async () => {
+  const items = [
+    ...Array.from({ length: 4 }, (_, i) => ({ title: `w${i}`, link: `https://news.google.com/rss/articles/CBMi${i}?oc=5` })),
+    { title: 'a', link: 'https://example.com/a' },
+    { title: 'b', link: 'https://example.com/b' }
+  ];
+  const fetchImpl = async () => xmlResponse(200, feed(items));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 2 });
+  assert.deepEqual(result.candidates.map((c) => c.url), ['https://example.com/a', 'https://example.com/b']);
+});
+
+test('feed of only wrapper URLs: zero candidates, no failure, no throw', async () => {
+  const fetchImpl = async () => xmlResponse(200, feed([{ title: 'w', link: WRAPPER_URL }]));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.deepEqual(result.candidates, []);
+  assert.deepEqual(result.failures, []);
+});
+
+test('other news.google.com paths and non-Google hosts containing the wrapper path are NOT excluded', async () => {
+  const fetchImpl = async () => xmlResponse(200, feed([
+    { title: 'topic', link: 'https://news.google.com/topics/abc' },
+    { title: 'lookalike', link: 'https://example.com/rss/articles/xyz' },
+    { title: 'subdomain', link: 'https://evilnews.google.com.example.com/rss/articles/x' }
+  ]));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.equal(result.candidates.length, 3);
+});
+
+test('malformed/missing links fail safely: missing skipped as before, unparseable does not throw and is not misclassified', async () => {
+  const fetchImpl = async () => xmlResponse(200, feed([
+    { title: 'No link' },
+    { title: 'Garbage', link: 'not a url' },
+    { title: 'Wrapper', link: WRAPPER_URL }
+  ]));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.candidates.map((c) => c.url), ['not a url']);
+});
+
+test('isGoogleNewsRssWrapperUrl: shape checks and safe handling of non-string/empty/unparseable input', () => {
+  assert.equal(isGoogleNewsRssWrapperUrl(WRAPPER_URL), true);
+  assert.equal(isGoogleNewsRssWrapperUrl('https://news.google.com/rss/articles/CBMi123'), true);
+  assert.equal(isGoogleNewsRssWrapperUrl('https://news.google.com/topics/x'), false);
+  assert.equal(isGoogleNewsRssWrapperUrl('https://example.com/rss/articles/x'), false);
+  for (const bad of [undefined, null, '', 42, {}, 'not a url']) {
+    assert.equal(isGoogleNewsRssWrapperUrl(bad), false);
+  }
 });
