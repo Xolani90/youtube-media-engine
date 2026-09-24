@@ -88,16 +88,45 @@ jobs:
         # invocation already holds the ADR-0024 single-run guard. That is
         # expected, safe behavior under this cadence — the guard correctly
         # doing its job — not a workflow failure, so it is not treated as
-        # one. Any other non-zero exit is a genuine failure and fails the
-        # step normally.
+        # one. Any other non-zero exit is a genuine failure, but this step
+        # itself must not fail here: GitHub Actions' default shell runs
+        # with `set -e`, which would otherwise terminate the step on
+        # node's non-zero exit before `$?` could be read, and would skip
+        # the diagnostic step below entirely. `set +e` is used around the
+        # invocation to capture the exit code reliably; `set -e` is
+        # restored immediately after. The captured code is exposed as a
+        # step output and only re-emitted as the job's real failure by the
+        # "Report application exit status" step below, after the
+        # diagnostic step (and whatever SQLite checkpoint/persistence
+        # src/index.js already performed before exiting) has had a chance
+        # to run.
+        id: run_app
         run: |
+          set +e
           node src/index.js
           code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 3 ]; then
             echo "Invocation refused: another run already holds the ADR-0024 single-run guard. Treating as expected, not a failure."
-            exit 0
+          elif [ "$code" -ne 0 ]; then
+            echo "::warning::node src/index.js exited with code $code; continuing to diagnostic/persistence steps before failing the workflow."
           fi
-          exit "$code"
 
       - name: Research source-level diagnostic
         run: node scripts/research-source-diagnostic.js
+
+      - name: Report application exit status
+        # Runs even if a prior step above failed, so the real application
+        # exit code (captured before any diagnostic/persistence step ran)
+        # is always the thing that finally determines job success/failure.
+        # Exit code 3 (ADR-0024 refusal) and 0 are treated as success;
+        # every other non-zero code is re-emitted here, not swallowed.
+        if: always()
+        run: |
+          code="${{ steps.run_app.outputs.code }}"
+          if [ -z "$code" ] || [ "$code" -eq 0 ] || [ "$code" -eq 3 ]; then
+            exit 0
+          fi
+          echo "Failing workflow: node src/index.js exited with code $code"
+          exit "$code"
