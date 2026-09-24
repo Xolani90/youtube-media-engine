@@ -42,7 +42,61 @@ export async function retrieveSource(url, { fetchImpl = fetch, timeoutMs = 10000
     return { status: RETRIEVAL_STATUS.CONTENT_UNPARSEABLE, content: null, error: 'content could not be parsed into usable text' };
   }
 
+  if (isGoogleNewsRssWrapperPage({ url, res, raw })) {
+    return {
+      status: RETRIEVAL_STATUS.CONTENT_UNPARSEABLE,
+      content: null,
+      error: 'Google News RSS article URL resolved to an unresolved wrapper/interstitial page, not publisher article content'
+    };
+  }
+
   return { status: RETRIEVAL_STATUS.SUCCESS, content: extracted, error: null };
+}
+
+/**
+ * Confirmed-reproduced failure mode: a Google News RSS `<link>`
+ * (`https://news.google.com/rss/articles/...`) does not always resolve to
+ * publisher article content. It can return an HTTP 200 Google-hosted
+ * wrapper/interstitial page whose only static content is the site chrome
+ * (observed: `<title>Google News</title>`, no `<article>` element, and
+ * `extractText()` collapsing the whole page to the 11-character string
+ * "Google News"). No general JS rendering or URL-resolution
+ * infrastructure exists (or is being added) to recover the real article
+ * from this page — see the "no browser automation, no JS rendering"
+ * constraint above. This function only recognizes that specific,
+ * demonstrated wrapper shape so it isn't misclassified as SUCCESS and fed
+ * to claim extraction as if it were article text.
+ *
+ * Deliberately NOT a generic content-length/word-count check (that would
+ * also reject genuinely short real articles) and NOT a blanket rejection
+ * of every `news.google.com` response (a Google News URL that somehow did
+ * return substantive publisher content — e.g. an `<article>` element, or a
+ * `<title>` that isn't the bare wrapper chrome title — is left as SUCCESS).
+ * Both the URL shape (host + `/rss/articles/` path) AND the wrapper
+ * content signature (bare "Google News" title, no `<article>` element)
+ * must match.
+ */
+export function isGoogleNewsRssWrapperPage({ url, res, raw }) {
+  if (typeof raw !== 'string' || !raw) return false;
+
+  const effectiveUrl = (typeof res?.url === 'string' && res.url) || url;
+  let parsed;
+  try {
+    parsed = new URL(effectiveUrl);
+  } catch {
+    return false;
+  }
+
+  if (parsed.hostname !== 'news.google.com') return false;
+  if (!parsed.pathname.startsWith('/rss/articles/')) return false;
+
+  const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : null;
+  if (title === null || title.toLowerCase() !== 'google news') return false;
+
+  if (/<article[\s>]/i.test(raw)) return false;
+
+  return true;
 }
 
 /**
