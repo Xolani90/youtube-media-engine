@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { PUBLICATION_STAGE, PUBLICATION_STATUS, PUBLICATION_RESULT_STATUS, OUTCOME, DECISION_LOG_DECISION, publicationActionId, VISIBILITY_MISMATCH_FAILURE_REASON, REQUESTED_VISIBILITY_PUBLIC } from './constants.js';
+import path from 'node:path';
+import { PUBLICATION_STAGE, PUBLICATION_STATUS, PUBLICATION_RESULT_STATUS, OUTCOME, DECISION_LOG_DECISION, THUMBNAIL_STATUS, publicationActionId, VISIBILITY_MISMATCH_FAILURE_REASON, REQUESTED_VISIBILITY_PUBLIC } from './constants.js';
+import { generateThumbnail } from '../media/thumbnail.js';
+import { finalizeArtifact, sha256File } from '../media/artifactStore.js';
 import { resolveMediaForPublication } from './eligibility.js';
 import { buildPublicationRequest } from './PublicationRequest.js';
 import { resolveProvider } from './providerRegistry.js';
@@ -38,6 +41,150 @@ function isVisibilityMismatchRow(row) {
 
 function visibilityMismatchResult(row, reason = 'previously_visibility_mismatch_not_auto_retried') {
   return { outcome: OUTCOME.VISIBILITY_MISMATCH, reason, publication: row };
+}
+
+/**
+ * Phase 2B: best-effort, idempotent thumbnail generation. Runs once per
+ * media_artifacts row (guarded by `thumbnail_path IS NULL` at the UPDATE
+ * below, exactly mirroring the claim-race discipline used throughout
+ * this file) using the SAME already-normalized title the publication
+ * request itself carries (see ./metadataValidation.js via
+ * ./PublicationRequest.js) -- never a second, independently-invented
+ * title. Written via the existing tmp-file + atomic-rename artifact
+ * convention (../media/artifactStore.js#finalizeArtifact), into the
+ * same per-content_version directory the rendered .mp4 already lives
+ * in, so no parallel artifact layout is introduced.
+ *
+ * A generation failure (e.g. FFmpeg missing/misconfigured) is
+ * deliberately NEVER allowed to fail or block the underlying video
+ * publication -- it is logged and swallowed, leaving
+ * media_artifacts.thumbnail_path NULL so attemptThumbnailUpload() below
+ * simply has nothing to upload (see step 9's `existsSync` guard also
+ * covering a since-deleted file).
+ *
+ * @returns {object} the current (possibly freshly updated) media_artifacts row
+ */
+function ensureThumbnailArtifact(storage, { mediaArtifact, title, runId, nowISO }) {
+  if (mediaArtifact.thumbnail_path && fs.existsSync(mediaArtifact.thumbnail_path)) {
+    return mediaArtifact;
+  }
+  const dir = path.dirname(mediaArtifact.artifact_path);
+  const finalPath = path.join(dir, 'thumbnail.png');
+  const tmpPath = path.join(dir, `.thumbnail.png.tmp-${process.pid}-${Date.now()}`);
+  try {
+    generateThumbnail(title, tmpPath);
+    finalizeArtifact(tmpPath, finalPath);
+    const checksum = sha256File(finalPath);
+    storage.run(
+      `UPDATE media_artifacts SET thumbnail_path = ?, thumbnail_checksum = ? WHERE id = ? AND thumbnail_path IS NULL`,
+      [finalPath, checksum, mediaArtifact.id]
+    );
+  } catch (err) {
+    fs.rmSync(tmpPath, { force: true });
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: mediaArtifact.content_version_id,
+      decision: DECISION_LOG_DECISION.THUMBNAIL_GENERATION_FAILED, reason: `thumbnail_generation_failed_${err.message}`
+    }, nowISO);
+  }
+  return storage.get('SELECT * FROM media_artifacts WHERE id = ?', [mediaArtifact.id]);
+}
+
+/**
+ * Phase 2B: thumbnail upload as a SECOND, independently observable
+ * external step against an already-PUBLISHED publications row --
+ * tracked via the thumbnail_* columns on that same row (see
+ * 0023_thumbnail_columns.sql), never a second `publications` row and
+ * never a reason to touch `status`/`provider_item_id` (the video's own
+ * confirmed-success fields, which this function only ever reads).
+ *
+ * This is what makes the required recovery shape possible:
+ *   video upload -> provider video ID persisted
+ *   -> thumbnail upload fails -> retry thumbnail -> NO second video upload
+ * because runPublication's existing idempotency check (step 3) already
+ * returns the ALREADY_PUBLISHED publications row unchanged on every
+ * subsequent call for this (content_version, provider) -- this function
+ * is called from that exact path (and from the fresh-publish success
+ * path) and never claims or re-claims a video upload itself.
+ *
+ * Non-throwing and side-effect-safe to call repeatedly: a row whose
+ * thumbnail_status is already SUCCESS or AMBIGUOUS is left untouched
+ * (SUCCESS = nothing to do; AMBIGUOUS = never auto-retried, mirrors the
+ * video AMBIGUOUS precedent -- requires the same kind of explicit
+ * reconciliation). FAILED and NULL/never-attempted are both retried.
+ *
+ * @returns {object} the current (possibly freshly updated) publications row
+ */
+async function attemptThumbnailUpload(storage, { publication, mediaArtifact, contentVersion, provider, adapter, action, mode, runId, nowISO }) {
+  if (!mediaArtifact?.thumbnail_path || !fs.existsSync(mediaArtifact.thumbnail_path)) {
+    return publication;
+  }
+  if (publication.thumbnail_status === THUMBNAIL_STATUS.SUCCESS || publication.thumbnail_status === THUMBNAIL_STATUS.AMBIGUOUS) {
+    return publication;
+  }
+  if (typeof adapter.publishThumbnail !== 'function') {
+    return publication;
+  }
+  if (!publication.provider_item_id) {
+    // Defensive only: this function is only ever called once the video
+    // is confirmed PUBLISHED, at which point provider_item_id is always
+    // set. Nothing to upload a thumbnail against without it.
+    return publication;
+  }
+
+  // Same D-C2 external-action authorization gate as the video upload,
+  // re-checked fresh immediately before this external call (never
+  // cached from the earlier video-publish attempt, which may have been
+  // a different runPublication() invocation entirely on a retry).
+  let grant;
+  try {
+    grant = assertExternalActionAllowed({ action, mode });
+  } catch (err) {
+    if (!(err instanceof SideEffectDeniedError)) throw err;
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.THUMBNAIL_AUTHORIZATION_DENIED, reason: err.message
+    }, nowISO);
+    // Left exactly as-is (thumbnail_status untouched) so a future,
+    // authorized run can still attempt it -- an authorization denial is
+    // not an external attempt at all, so it is never persisted as FAILED.
+    return publication;
+  }
+  void grant; // audited above via decision_log only; carries no thumbnail-specific visibility concept.
+
+  storage.run(
+    `UPDATE publications SET thumbnail_status = ?, thumbnail_attempt_count = thumbnail_attempt_count + 1, thumbnail_updated_at = ? WHERE id = ?`,
+    [THUMBNAIL_STATUS.PENDING, nowISO(), publication.id]
+  );
+
+  let result;
+  try {
+    result = await adapter.publishThumbnail({ videoId: publication.provider_item_id, thumbnailFilePath: mediaArtifact.thumbnail_path });
+  } catch (err) {
+    result = { status: PUBLICATION_RESULT_STATUS.AMBIGUOUS, provider, reconciliationInfo: { note: `thumbnail_adapter_threw_${err.message}` } };
+  }
+
+  const nextStatus = result.status === PUBLICATION_RESULT_STATUS.SUCCESS
+    ? THUMBNAIL_STATUS.SUCCESS
+    : result.status === PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE
+      ? THUMBNAIL_STATUS.FAILED
+      : THUMBNAIL_STATUS.AMBIGUOUS;
+
+  storage.run(
+    `UPDATE publications SET thumbnail_status = ?, thumbnail_result_json = ?, thumbnail_updated_at = ? WHERE id = ?`,
+    [nextStatus, JSON.stringify(result), nowISO(), publication.id]
+  );
+
+  const decision = nextStatus === THUMBNAIL_STATUS.SUCCESS
+    ? DECISION_LOG_DECISION.THUMBNAIL_SUCCESS
+    : nextStatus === THUMBNAIL_STATUS.FAILED
+      ? DECISION_LOG_DECISION.THUMBNAIL_FAILURE
+      : DECISION_LOG_DECISION.THUMBNAIL_AMBIGUOUS;
+  logDecision(storage, {
+    runId, subjectType: 'content_version', subjectId: contentVersion.id,
+    decision, reason: `thumbnail_${publication.id}_${nextStatus.toLowerCase()}`
+  }, nowISO);
+
+  return storage.get('SELECT * FROM publications WHERE id = ?', [publication.id]);
 }
 
 /**
@@ -103,7 +250,8 @@ export async function runPublication({
     const outcome = eligibility.reason === 'NOT_YET_RENDERED' ? OUTCOME.NOT_YET_RENDERED : OUTCOME.STRUCTURAL_FAILURE;
     return { outcome, reason: eligibility.reason, publication: null };
   }
-  const { contentVersion, script, contentBrief, mediaArtifact } = eligibility;
+  const { contentVersion, script, contentBrief } = eligibility;
+  let { mediaArtifact } = eligibility;
 
   // --- 2. Lifecycle precondition. States that could still be relevant to
   // an existing publication record are let through so the short-circuits
@@ -140,7 +288,19 @@ export async function runPublication({
     [contentVersion.id, provider]
   );
   if (existing?.status === PUBLICATION_STATUS.PUBLISHED) {
-    return { outcome: OUTCOME.ALREADY_PUBLISHED, publication: existing };
+    // Phase 2B: the video itself is never re-uploaded here (this is the
+    // existing, unchanged idempotency short-circuit) -- but this is
+    // exactly the path a thumbnail retry takes ("video already
+    // PUBLISHED, thumbnail not yet SUCCESS"), so a not-yet-successful
+    // thumbnail is (re)attempted before returning. thumbnailAction is
+    // computed here (pure, no side effect) since step 5's D-C2 grant
+    // below is never reached on this short-circuit path.
+    const thumbnailAction = publicationActionId(provider, contentVersion.id);
+    const updated = await attemptThumbnailUpload(storage, {
+      publication: existing, mediaArtifact, contentVersion, provider, adapter,
+      action: thumbnailAction, mode, runId, nowISO
+    });
+    return { outcome: OUTCOME.ALREADY_PUBLISHED, publication: updated };
   }
   if (existing?.status === PUBLICATION_STATUS.AMBIGUOUS) {
     return { outcome: OUTCOME.AMBIGUOUS, reason: 'previously_ambiguous_not_auto_retried', publication: existing };
@@ -311,6 +471,13 @@ export async function runPublication({
     }, nowISO);
     return { outcome: OUTCOME.STRUCTURAL_FAILURE, reason: err.message, publication: null };
   }
+  // Phase 2B: best-effort thumbnail generation, from the SAME
+  // already-normalized title just placed on `request` -- never a
+  // second, independently-derived title. Idempotent (a no-op once
+  // media_artifacts.thumbnail_path is set) and never blocks or fails
+  // the video publication attempt itself (see ensureThumbnailArtifact).
+  mediaArtifact = ensureThumbnailArtifact(storage, { mediaArtifact, title: request.title, runId, nowISO });
+
   const requestJson = JSON.stringify(request);
 
   // Performs the claim attempt (race re-check + INSERT) inside a single
@@ -573,7 +740,19 @@ export async function runPublication({
     return storage.get('SELECT * FROM publications WHERE id = ?', [claim.publicationId]);
   });
 
-  return { outcome: OUTCOME.PUBLISHED, publication: published };
+  // Phase 2B: thumbnail upload only NOW, after the video upload is
+  // durably PUBLISHED (a confirmed provider_item_id is on the row) --
+  // never before (see ../youtube/YouTubeAdapter.js#publishThumbnail's
+  // own MISSING_VIDEO_ID guard as a second, defensive layer). Reuses the
+  // exact `action`/`mode` already authorized for this same publish
+  // action above (step 5) -- no second authorization prompt for the
+  // attempt that immediately follows a fresh video upload.
+  const withThumbnail = await attemptThumbnailUpload(storage, {
+    publication: published, mediaArtifact, contentVersion, provider, adapter,
+    action, mode, runId, nowISO
+  });
+
+  return { outcome: OUTCOME.PUBLISHED, publication: withThumbnail };
 }
 
 export default runPublication;

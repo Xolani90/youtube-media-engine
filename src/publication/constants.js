@@ -88,7 +88,28 @@ export const DECISION_LOG_DECISION = Object.freeze({
   // ADR-0030 audit: which grant authorized the external action.
   AUTHORIZATION_GRANTED: 'AUTHORIZATION_GRANTED',
   INTERRUPTED_ATTEMPT: 'INTERRUPTED_ATTEMPT',
-  PUBLISHED: 'PUBLISHED'
+  PUBLISHED: 'PUBLISHED',
+  // Phase 2B: thumbnail upload is a second, independently observable
+  // external action against an already-PUBLISHED video (see
+  // pipeline.js#attemptThumbnailUpload). Distinct decision values so a
+  // thumbnail outcome is never conflated with the video's own
+  // PROVIDER_FAILURE/AMBIGUOUS/PUBLISHED audit trail.
+  THUMBNAIL_GENERATION_FAILED: 'THUMBNAIL_GENERATION_FAILED',
+  THUMBNAIL_AUTHORIZATION_DENIED: 'THUMBNAIL_AUTHORIZATION_DENIED',
+  THUMBNAIL_SUCCESS: 'THUMBNAIL_SUCCESS',
+  THUMBNAIL_FAILURE: 'THUMBNAIL_FAILURE',
+  THUMBNAIL_AMBIGUOUS: 'THUMBNAIL_AMBIGUOUS'
+});
+
+// Phase 2B: durable `publications.thumbnail_status` vocabulary -- the
+// thumbnail-upload analogue of PUBLICATION_STATUS above, tracked on the
+// SAME row (never a second `publications` row: see
+// 0023_thumbnail_columns.sql). NULL/absent means "never attempted".
+export const THUMBNAIL_STATUS = Object.freeze({
+  PENDING: 'PENDING',
+  SUCCESS: 'SUCCESS',
+  FAILED: 'FAILED',
+  AMBIGUOUS: 'AMBIGUOUS'
 });
 
 // D-C2 action-id convention (ADR-0008 §3.1.3/§3.2; matches the worked
