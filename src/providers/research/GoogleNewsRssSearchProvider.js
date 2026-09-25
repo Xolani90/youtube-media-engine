@@ -3,6 +3,60 @@ import { parseFeed } from '../../discovery/rssParser.js';
 import { traceAsync, safeUrl } from '../../diagnostics/trace.js';
 
 /**
+ * Small, explicit set of natural-language question/function words that
+ * are poor Google News search terms. Deliberately NOT a general English
+ * stopword list -- just enough to turn a `core_question`-shaped sentence
+ * into a compact keyword query, per the live-evidence finding (run #72/
+ * #73: Google News RSS returned zero candidates, `failures=[]`, for the
+ * raw natural-language `core_question` on both live Research projects).
+ * Matched case-insensitively against each token with leading/trailing
+ * punctuation stripped, so it never touches a word's letters.
+ */
+const GOOGLE_NEWS_QUERY_STOPWORDS = new Set([
+  'a', 'an', 'the', 'is', 'are', 'was', 'were', 'do', 'does', 'did',
+  'how', 'what', 'which', 'who', 'whom', 'why', 'when', 'where',
+  'in', 'on', 'of', 'to', 'by', 'for', 'with', 'while', 'through', 'into', 'and', 'or', 'but'
+]);
+
+/**
+ * Deterministic, bounded query-shaping step specific to this provider's
+ * request construction. Google News RSS's `q` param is a keyword search,
+ * not a natural-language question endpoint; this strips
+ * `GOOGLE_NEWS_QUERY_STOPWORDS` tokens from `rawQuery` while preserving
+ * token order and every other token verbatim (named entities, products,
+ * versions, numbers, and any punctuation attached to them, e.g.
+ * "GPT-5.6" or "78%" survive unchanged) -- a single pass, no LLM call, no
+ * entity-extraction subsystem.
+ *
+ * Scope discipline: this function is called ONLY from this provider's
+ * `discoverCandidates()`, immediately before building the request URL.
+ * It does not touch `src/research/acquisition.js`, any other provider,
+ * or the `query` value Research itself persists/logs -- GDELT, Tavily,
+ * and every other consumer of `core_question` are unaffected.
+ *
+ * Never returns an empty string: if removing stopwords would leave
+ * nothing (a degenerate/very short query), the original trimmed query is
+ * returned unchanged rather than sending an empty search.
+ */
+export function shapeGoogleNewsQuery(rawQuery) {
+  const trimmed = typeof rawQuery === 'string' ? rawQuery.trim() : '';
+  if (!trimmed) return trimmed;
+
+  const kept = trimmed
+    .split(/\s+/)
+    // Drop trailing sentence/question punctuation from each token (e.g.
+    // "agents?" -> "agents"); leaves punctuation WITHIN a token (hyphens,
+    // decimal points, "%") untouched.
+    .map((token) => token.replace(/[?.,!;:"'()]+$/, ''))
+    .filter((token) => {
+      const bare = token.replace(/^[?.,!;:"'()]+/, '').toLowerCase();
+      return bare.length > 0 && !GOOGLE_NEWS_QUERY_STOPWORDS.has(bare);
+    });
+
+  return kept.length > 0 ? kept.join(' ') : trimmed;
+}
+
+/**
  * Concrete 'google-news-rss' ResearchSourceProvider. Turns a Research
  * `core_question` into candidate URLs/metadata via Google News' public,
  * unauthenticated RSS search feed, in the exact shape
@@ -89,7 +143,7 @@ export class GoogleNewsRssSearchProvider extends ResearchSourceProvider {
     const boundedMaxResults = clampMaxResults(maxResults);
 
     const url = new URL(this._baseUrl);
-    url.searchParams.set('q', query);
+    url.searchParams.set('q', shapeGoogleNewsQuery(query));
     url.searchParams.set('hl', 'en-US');
     url.searchParams.set('gl', 'US');
     url.searchParams.set('ceid', 'US:en');
