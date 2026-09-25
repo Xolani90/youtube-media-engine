@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GoogleNewsRssSearchProvider, isGoogleNewsRssWrapperUrl } from '../../src/providers/research/GoogleNewsRssSearchProvider.js';
+import { GoogleNewsRssSearchProvider, isGoogleNewsRssWrapperUrl, shapeGoogleNewsQuery } from '../../src/providers/research/GoogleNewsRssSearchProvider.js';
 
 function xmlResponse(status, xml) {
   return {
@@ -233,4 +233,69 @@ test('isGoogleNewsRssWrapperUrl: shape checks and safe handling of non-string/em
   for (const bad of [undefined, null, '', 42, {}, 'not a url']) {
     assert.equal(isGoogleNewsRssWrapperUrl(bad), false);
   }
+});
+
+test('shapeGoogleNewsQuery strips question/function words while preserving order and distinctive terms', () => {
+  const shaped = shapeGoogleNewsQuery(
+    'How does V7 use GPT-5.6 Luna to cut costs by 78% while boosting accuracy through source-linked context for agents?'
+  );
+  // Distinctive terms survive, in their original order, punctuation intact.
+  assert.match(shaped, /\bV7\b/);
+  assert.match(shaped, /\bGPT-5\.6\b/);
+  assert.match(shaped, /\bLuna\b/);
+  assert.match(shaped, /\b78%(\s|$)/);
+  assert.match(shaped, /\bsource-linked\b/);
+  assert.equal(shaped.indexOf('V7') < shaped.indexOf('GPT-5.6'), true);
+  assert.equal(shaped.indexOf('GPT-5.6') < shaped.indexOf('Luna'), true);
+  assert.equal(shaped.indexOf('Luna') < shaped.indexOf('78%'), true);
+  // Question/function words removed.
+  for (const removed of ['How', 'does', 'to', 'by', 'while', 'through', 'for']) {
+    assert.doesNotMatch(shaped, new RegExp(`\\b${removed}\\b`));
+  }
+  // No trailing question mark left over.
+  assert.doesNotMatch(shaped, /\?/);
+});
+
+test('shapeGoogleNewsQuery strips a different question shape the same way', () => {
+  const shaped = shapeGoogleNewsQuery(
+    'What improvements does ChatGPT Images 2.5 offer in turning sketches and reference photos into polished images?'
+  );
+  for (const kept of ['ChatGPT', 'Images', '2.5', 'sketches', 'photos', 'polished', 'images']) {
+    assert.match(shaped, new RegExp(`\\b${kept.replace('.', '\\.')}\\b`));
+  }
+  for (const removed of ['What', 'does', 'in', 'and', 'into']) {
+    assert.doesNotMatch(shaped, new RegExp(`\\b${removed}\\b`));
+  }
+  assert.doesNotMatch(shaped, /\?/);
+});
+
+test('shapeGoogleNewsQuery never produces an empty string, even for an all-stopword input', () => {
+  assert.equal(shapeGoogleNewsQuery('What is the how'), 'What is the how');
+});
+
+test('shapeGoogleNewsQuery falls back to the trimmed original for empty/whitespace/non-string input', () => {
+  assert.equal(shapeGoogleNewsQuery(''), '');
+  assert.equal(shapeGoogleNewsQuery('   '), '');
+  assert.equal(shapeGoogleNewsQuery(null), '');
+  assert.equal(shapeGoogleNewsQuery(undefined), '');
+});
+
+test('shapeGoogleNewsQuery is deterministic: same input always produces the same output', () => {
+  const input = 'How does the widget work for teams?';
+  assert.equal(shapeGoogleNewsQuery(input), shapeGoogleNewsQuery(input));
+});
+
+test('boundary: the shaped query, not the raw core_question, is what reaches the Google News RSS request URL', async () => {
+  let sentUrl;
+  const fetchImpl = async (url) => { sentUrl = new URL(url); return xmlResponse(200, feed([])); };
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const rawQuestion = 'How does V7 use GPT-5.6 Luna to cut costs by 78% while boosting accuracy for agents?';
+  await provider.discoverCandidates({ query: rawQuestion, maxResults: 5 });
+
+  const sentQ = sentUrl.searchParams.get('q');
+  assert.notEqual(sentQ, rawQuestion, 'the raw natural-language question must not be sent verbatim');
+  assert.equal(sentQ, shapeGoogleNewsQuery(rawQuestion), 'the request must carry exactly what shapeGoogleNewsQuery produces');
+  assert.doesNotMatch(sentQ, /\bHow\b/);
+  assert.match(sentQ, /\bV7\b/);
 });
