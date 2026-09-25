@@ -6,6 +6,7 @@ import { RssSource } from './providers/opportunity/RssSource.js';
 import { PixabayAssetSourceProvider } from './providers/asset/PixabayAssetSourceProvider.js';
 import { TavilySearchProvider } from './providers/research/TavilySearchProvider.js';
 import { GoogleNewsRssSearchProvider } from './providers/research/GoogleNewsRssSearchProvider.js';
+import { GdeltSearchProvider } from './providers/research/GdeltSearchProvider.js';
 import { runDiscoveryPipeline } from './discovery/pipeline.js';
 import { runAutonomousOperation } from './autonomous/runner.js';
 import { computeRawFeatures } from './discovery/featureComputation.js';
@@ -40,6 +41,31 @@ export const REFUSED_EXIT_CODE = 3;
  */
 export function selectDefaultResearchSourceProvider() {
   return process.env.TAVILY_API_KEY ? new TavilySearchProvider() : new GoogleNewsRssSearchProvider();
+}
+
+/**
+ * Opt-in, manual-only override of the Research sourceProvider, gated on the
+ * RESEARCH_SOURCE_PROVIDER_OVERRIDE env var (wired from the
+ * workflow_dispatch-only `research_provider_override` input in
+ * scheduled-run.yml; empty/undefined on the scheduled cron trigger, so
+ * scheduled runs are unaffected). Exact match on the literal string
+ * 'gdelt' is the only value that has any effect: it returns a deps.research
+ * override carrying an explicitly-constructed GdeltSearchProvider. Any
+ * other value (including case variants, whitespace variants, other
+ * provider names, or falsy-looking strings) returns {} -- i.e. no
+ * override -- so runAutonomousEntrypoint's existing
+ * `deps.research?.sourceProvider ?? selectDefaultResearchSourceProvider()`
+ * fallback is unchanged. This function is a pure function of an env-like
+ * object so it can be unit-tested directly; it is only ever invoked from
+ * main() for the real CLI entrypoint -- runAutonomousEntrypoint itself
+ * never calls it and has no automatic/implicit provider selection of its
+ * own. Exported for tests; not part of the public module surface.
+ */
+export function resolveResearchProviderOverrideDeps(env = {}) {
+  if (env.RESEARCH_SOURCE_PROVIDER_OVERRIDE === 'gdelt') {
+    return { research: { sourceProvider: new GdeltSearchProvider() } };
+  }
+  return {};
 }
 
 /**
@@ -337,7 +363,12 @@ async function main() {
   traceEvent('main.begin');
   // No deps.discovery.rawFeatures supplied: runAutonomousEntrypoint falls
   // back to the production feature-computation function (M2).
-  const result = await runAutonomousEntrypoint({});
+  //
+  // resolveResearchProviderOverrideDeps() folds in the opt-in, manual-only
+  // RESEARCH_SOURCE_PROVIDER_OVERRIDE env override (see its doc comment);
+  // it returns {} on every scheduled/cron run, leaving
+  // runAutonomousEntrypoint's existing default provider selection intact.
+  const result = await runAutonomousEntrypoint(resolveResearchProviderOverrideDeps(process.env));
   traceEvent('main.entrypoint.returned', { refused: Boolean(result?.refused) });
 
   if (result.refused) {

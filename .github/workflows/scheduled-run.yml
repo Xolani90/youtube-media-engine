@@ -30,6 +30,11 @@ on:
         required: false
         type: string
         default: ''
+      research_provider_override:
+        description: 'Manual-only Research sourceProvider override. Leave empty for default behavior; set to "gdelt" to explicitly select GdeltSearchProvider for this run only. No effect on the scheduled/cron trigger.'
+        required: false
+        type: string
+        default: ''
 
 # Only one scheduled run should be in flight from this workflow at a time.
 # This is a GitHub-Actions-level concurrency guard and is independent of,
@@ -49,6 +54,13 @@ jobs:
     env:
       RUN_MODE: SIMULATION
       AUTONOMOUS_ENABLED: 'false'
+      # Opt-in, manual-only Research sourceProvider override (see the
+      # workflow_dispatch.inputs.research_provider_override description
+      # above). github.event.inputs is undefined on the schedule/cron
+      # trigger, so this expression evaluates to '' there -- scheduled runs
+      # are always unaffected. src/index.js's resolveResearchProviderOverrideDeps()
+      # is the sole gate: only the exact value 'gdelt' has any effect.
+      RESEARCH_SOURCE_PROVIDER_OVERRIDE: ${{ github.event.inputs.research_provider_override || '' }}
       LLM_PROVIDER_PRIORITY: 'groq-free,gemini-free'
       # ADR-0036: publicly-authorized Discovery RSS sources (not secret
       # configuration — public feed URLs).
