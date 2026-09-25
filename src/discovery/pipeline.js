@@ -5,7 +5,7 @@ import { generateProposition, validateProposition } from './proposition.js';
 import { computeValueScore } from './scoring.js';
 import { evaluateOpportunityRisk } from './riskGate.js';
 import { selectDiversePortfolio } from './diversity.js';
-import { STAGE, REJECTION_REASON, DEDUP_WORKLOAD, CEILING_REASON } from './constants.js';
+import { STAGE, REJECTION_REASON, DEDUP_WORKLOAD, CEILING_REASON, LLM_PROVIDER_UNAVAILABLE } from './constants.js';
 import { RISK_LEVELS } from '../state/RiskPolicy.js';
 import { traceAsync } from '../diagnostics/trace.js';
 
@@ -22,6 +22,22 @@ function logDecision(storage, { runId, stage, subjectId, decision, reason, provi
     [id, runId, subjectId, decision, reason, provider, configSnapshot ? JSON.stringify(configSnapshot) : null, confidence, riskLevel, resultingState, new Date().toISOString(), stage]
   );
   return id;
+}
+
+/**
+ * Shared helper for the one SKIPPED/LLM_PROVIDER_UNAVAILABLE decision shape
+ * used at both the PROPOSITION_GENERATION and FEATURE_COMPUTATION pipeline
+ * boundaries when the underlying failure is LLMRouter reporting that every
+ * eligible provider failed transiently (`err.llmProviderUnavailable ===
+ * true` -- see LLMRouter#complete and classifyProviderFailure). Kept to a
+ * single decision-log call so the two boundaries can't drift in shape.
+ */
+function logProviderUnavailableSkip(storage, { runId, stage, subjectId, errorMessage }) {
+  logDecision(storage, {
+    runId, stage, subjectId,
+    decision: 'SKIPPED', reason: LLM_PROVIDER_UNAVAILABLE,
+    resultingState: 'SKIPPED', configSnapshot: { errorMessage }
+  });
 }
 
 function insertOpportunity(storage, opp) {
@@ -79,6 +95,13 @@ export async function runDiscoveryPipeline({
     // or diversity exclusion); budgetSkipped = required a fresh evaluation
     // but the run's freshEvaluationBudget was exhausted first.
     reused: 0, freshEvaluated: 0, budgetSkipped: 0,
+    // Feature computation (rawFeatures) failed solely because every
+    // eligible LLM provider was transiently unavailable (LLMRouter's
+    // `llmProviderUnavailable` flag) -- distinct from featureRejected,
+    // which remains a durable, non-transient rejection. Not counted
+    // toward freshEvaluated (no durable evaluation was committed) or
+    // budgetSkipped (this candidate was not schedule-skipped).
+    providerUnavailable: 0,
     // ADR-0038: a candidate whose dedup comparison set was only partially
     // evaluated because an L2/L3 workload ceiling was reached. Never pushed
     // into `accepted`, so it is absent from scoredCandidates/selected and
@@ -251,7 +274,29 @@ export async function runDiscoveryPipeline({
         decision: 'ACCEPTED', reason: 'proposition_valid', resultingState: 'PROPOSITION_VALID'
       });
     } else {
-      const genResult = await traceAsync('discovery.proposition', { candidate: candidate.id }, () => generateProposition(candidate.observation, llmRouter));
+      let genResult;
+      // generateProposition() calls LLMRouter#complete() -- if every
+      // eligible provider failed transiently (timeout / exhausted 429;
+      // see classifyProviderFailure), that surfaces here as an aggregate
+      // error with `llmProviderUnavailable === true`. That specific,
+      // narrowly-classified condition is handled as a per-candidate skip
+      // (the same SKIPPED/LLM_PROVIDER_UNAVAILABLE shape used below for
+      // feature computation) so a transient provider outage does not
+      // abort the entire Discovery run. Any other error (validation bugs,
+      // non-transient HTTP statuses, unexpected exceptions) is NOT this
+      // condition and must still propagate/fail the run normally.
+      try {
+        genResult = await traceAsync('discovery.proposition', { candidate: candidate.id }, () => generateProposition(candidate.observation, llmRouter));
+      } catch (err) {
+        if (err && err.llmProviderUnavailable === true) {
+          stats.providerUnavailable++;
+          logProviderUnavailableSkip(storage, {
+            runId, stage: STAGE.PROPOSITION_GENERATION, subjectId: candidate.id, errorMessage: err.message
+          });
+          continue;
+        }
+        throw err;
+      }
       logDecision(storage, {
         runId, stage: STAGE.PROPOSITION_GENERATION, subjectId: candidate.id,
         decision: 'GENERATED', reason: 'proposition_generation_completed', provider: genResult.providerUsed,
@@ -286,6 +331,21 @@ export async function runDiscoveryPipeline({
       try {
         raw = await traceAsync('discovery.features', { candidate: candidate.id }, () => rawFeatures(candidate.observation));
       } catch (err) {
+        // A rawFeatures() throw whose root cause is LLMRouter reporting
+        // that every eligible provider failed transiently (timeout /
+        // exhausted 429 -- never an explicit 4xx, a config error, or an
+        // arbitrary unexpected exception; see LLMRouter#complete and
+        // classifyProviderFailure) is a temporary provider-unavailable
+        // condition, not a genuine feature-computation rejection: it is
+        // logged as SKIPPED and does not consume this candidate's
+        // eligibility permanently the way featureRejected does.
+        if (err && err.llmProviderUnavailable === true) {
+          stats.providerUnavailable++;
+          logProviderUnavailableSkip(storage, {
+            runId, stage: STAGE.FEATURE_COMPUTATION, subjectId: candidate.id, errorMessage: err.message
+          });
+          continue;
+        }
         stats.featureRejected++;
         logDecision(storage, {
           runId, stage: STAGE.FEATURE_COMPUTATION, subjectId: candidate.id,

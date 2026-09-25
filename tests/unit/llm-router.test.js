@@ -371,6 +371,135 @@ test('Phase 1 / Test D: every eligible provider cooling down fails fast with a u
   assert.ok(Date.now() - startedAt < 1000);
 });
 
+// --- Provider-unavailable classification (aggregate `llmProviderUnavailable`
+// flag on the "all eligible providers failed" error). Only a failure set
+// that is entirely transient (AbortError timeout / exhausted 429) may set
+// this flag; any explicit non-transient HTTP status or arbitrary unexpected
+// exception must keep it false so callers never treat those as a safe
+// per-candidate skip. ---
+
+test('provider-unavailable A: a real AbortError (timeout) failure is classified as provider-unavailable', async () => {
+  const timeoutErr = new Error('The operation was aborted.');
+  timeoutErr.name = 'AbortError';
+  const timingOut = new FakeThrowingHealthy('groq-free', timeoutErr);
+  const router = new LLMRouter({
+    priority: ['groq-free'],
+    allowPaidProviders: false,
+    registry: { 'groq-free': () => timingOut }
+  });
+
+  try {
+    await router.complete({ prompt: 'hi' });
+    assert.fail('expected router.complete() to reject');
+  } catch (err) {
+    assert.equal(err.llmProviderUnavailable, true);
+    assert.deepEqual(err.providerFailures, [
+      { id: 'groq-free', error: timeoutErr.message, transient: true }
+    ]);
+  }
+});
+
+test('provider-unavailable B: an exhausted 429 (err.status === 429) remains eligible for provider-unavailable classification', async () => {
+  const err429 = Object.assign(new Error('rate limited'), { status: 429 });
+  const rateLimited = new FakeThrowingHealthy('groq-free', err429);
+  const router = new LLMRouter({
+    priority: ['groq-free'],
+    allowPaidProviders: false,
+    registry: { 'groq-free': () => rateLimited }
+  });
+
+  try {
+    await router.complete({ prompt: 'hi' });
+    assert.fail('expected router.complete() to reject');
+  } catch (err) {
+    assert.equal(err.llmProviderUnavailable, true);
+    assert.equal(err.providerFailures[0].transient, true);
+  }
+});
+
+test('provider-unavailable C: a real failure carrying status 401 is NOT classified as provider-unavailable and propagates', async () => {
+  const err401 = Object.assign(new Error('unauthorized'), { status: 401 });
+  const unauthorized = new FakeThrowingHealthy('groq-free', err401);
+  const router = new LLMRouter({
+    priority: ['groq-free'],
+    allowPaidProviders: false,
+    registry: { 'groq-free': () => unauthorized }
+  });
+
+  try {
+    await router.complete({ prompt: 'hi' });
+    assert.fail('expected router.complete() to reject');
+  } catch (err) {
+    assert.equal(err.llmProviderUnavailable, false);
+    assert.equal(err.providerFailures[0].transient, false);
+    assert.match(err.message, /unauthorized/);
+  }
+});
+
+test('provider-unavailable D: an explicit 400/403 (or equivalent non-transient HTTP status) is NOT classified as provider-unavailable', async () => {
+  const err400 = Object.assign(new Error('bad request'), { status: 400 });
+  const err403 = Object.assign(new Error('forbidden'), { status: 403 });
+  const badRequest = new FakeThrowingHealthy('groq-free', err400);
+  const forbidden = new FakeThrowingHealthy('gemini-free', err403);
+  const router = new LLMRouter({
+    priority: ['groq-free', 'gemini-free'],
+    allowPaidProviders: false,
+    registry: {
+      'groq-free': () => badRequest,
+      'gemini-free': () => forbidden
+    }
+  });
+
+  try {
+    await router.complete({ prompt: 'hi' });
+    assert.fail('expected router.complete() to reject');
+  } catch (err) {
+    assert.equal(err.llmProviderUnavailable, false);
+    assert.equal(err.providerFailures.every((f) => f.transient === false), true);
+  }
+});
+
+test('provider-unavailable E: an unexpected exception (e.g. TypeError) inside provider.complete() is NOT silently classified as provider-unavailable', async () => {
+  const bug = new TypeError("Cannot read properties of undefined (reading 'foo')");
+  const buggy = new FakeThrowingHealthy('groq-free', bug);
+  const router = new LLMRouter({
+    priority: ['groq-free'],
+    allowPaidProviders: false,
+    registry: { 'groq-free': () => buggy }
+  });
+
+  try {
+    await router.complete({ prompt: 'hi' });
+    assert.fail('expected router.complete() to reject');
+  } catch (err) {
+    assert.equal(err.llmProviderUnavailable, false);
+    assert.equal(err.providerFailures[0].transient, false);
+  }
+});
+
+test('provider-unavailable: a mix of one transient and one non-transient failure is NOT classified as provider-unavailable (a real failure must never be masked by a co-occurring transient one)', async () => {
+  const timeoutErr = new Error('The operation was aborted.');
+  timeoutErr.name = 'AbortError';
+  const err401 = Object.assign(new Error('unauthorized'), { status: 401 });
+  const timingOut = new FakeThrowingHealthy('groq-free', timeoutErr);
+  const unauthorized = new FakeThrowingHealthy('gemini-free', err401);
+  const router = new LLMRouter({
+    priority: ['groq-free', 'gemini-free'],
+    allowPaidProviders: false,
+    registry: {
+      'groq-free': () => timingOut,
+      'gemini-free': () => unauthorized
+    }
+  });
+
+  try {
+    await router.complete({ prompt: 'hi' });
+    assert.fail('expected router.complete() to reject');
+  } catch (err) {
+    assert.equal(err.llmProviderUnavailable, false);
+  }
+});
+
 test('Phase 1 / Test J: with both providers healthy (no cooldown), normal priority ordering is unaffected', async () => {
   const groq = new FakeHealthyWithId('groq-free');
   const gemini = new FakeHealthyWithId('gemini-free');

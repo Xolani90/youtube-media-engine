@@ -25,6 +25,46 @@ import { isProviderCoolingDown, providerCooldownRemainingMs } from './providerHe
  * opt-in — a router constructed without a `costTracker` behaves exactly
  * as before.
  */
+/**
+ * Classifies a single provider.complete() failure into the narrow
+ * "temporary inability to obtain an LLM response" class the pipeline is
+ * allowed to treat as a per-candidate skip (LLM_PROVIDER_UNAVAILABLE),
+ * versus everything else (which must propagate/fail normally).
+ *
+ * Transient (returns true):
+ *   - AbortError (the existing per-attempt request timeout in
+ *     GroqProvider/GeminiProvider rejects with this DOMException/Error
+ *     shape; timeout value itself is untouched).
+ *   - An exhausted 429: GroqProvider/GeminiProvider only let a 429 reach
+ *     the router after their own existing bounded retry gives up, so any
+ *     `err.status === 429` seen here is already "exhausted" -- existing
+ *     retry count, Retry-After handling, and cooldown recording are all
+ *     unchanged (they run inside the provider, before this point).
+ *
+ * Non-transient (returns false) -- and therefore NOT eligible for
+ * LLM_PROVIDER_UNAVAILABLE:
+ *   - Any other explicit HTTP status (400/401/403/404/5xx/etc.) --
+ *     GroqProvider/GeminiProvider already attach `err.status` for every
+ *     non-2xx response, so this is a reliable structured signal, not
+ *     string matching.
+ *   - Anything else: missing API key configuration errors, JSON parsing
+ *     failures, or an arbitrary unexpected exception (TypeError,
+ *     ReferenceError, a raw network/transport failure, etc.). None of
+ *     these carry a structured, reliable "this was transient" signal in
+ *     the current provider error shapes, so -- per the conservative rule
+ *     of never guessing here -- they are treated as non-transient rather
+ *     than heuristically pattern-matched against error messages.
+ */
+function classifyProviderFailure(err) {
+  if (err && err.name === 'AbortError') {
+    return true;
+  }
+  if (err && typeof err.status === 'number' && err.status === 429) {
+    return true;
+  }
+  return false;
+}
+
 export class LLMRouter {
   constructor({
     priority = config.llmProviderPriority,
@@ -107,6 +147,19 @@ export class LLMRouter {
    * per call — there is no retrying the same provider. If every eligible
    * provider fails, the router throws a single error summarizing every
    * failure encountered.
+   *
+   * That aggregate error additionally carries:
+   *   - `providerFailures`: an array of `{ id, error, transient }` (see
+   *     classifyProviderFailure for what counts as transient).
+   *   - `llmProviderUnavailable`: true only when there was at least one
+   *     failure AND every failure is transient. A caller (e.g. the
+   *     Discovery pipeline) may use this flag to treat the aggregate
+   *     failure as a temporary provider-unavailable condition safe to
+   *     skip-and-retry-later, rather than a real per-candidate rejection.
+   *     It is false whenever any failure is non-transient (an explicit
+   *     4xx status, a config error, or an arbitrary unexpected exception)
+   *     — the router never lets one transient failure among several mask
+   *     a genuine, non-transient one.
    */
   async complete(request, context = {}) {
     const { eligible, attempted } = await this._selectEligibleProviders();
@@ -145,12 +198,15 @@ export class LLMRouter {
         );
         return { result, providerUsed: provider.id, attempted };
       } catch (err) {
-        failures.push({ id, error: err?.message ?? String(err) });
+        failures.push({ id, error: err?.message ?? String(err), transient: classifyProviderFailure(err) });
       }
     }
 
     const detail = failures.map((f) => `${f.id}: ${f.error}`).join('; ');
-    throw new Error(`All eligible LLM providers failed. Failures: ${detail}`);
+    const aggregateError = new Error(`All eligible LLM providers failed. Failures: ${detail}`);
+    aggregateError.providerFailures = failures;
+    aggregateError.llmProviderUnavailable = failures.length > 0 && failures.every((f) => f.transient);
+    throw aggregateError;
   }
 }
 

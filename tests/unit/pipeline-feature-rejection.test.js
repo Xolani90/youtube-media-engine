@@ -94,3 +94,58 @@ test('a rawFeatures() throw rejects only that candidate: run completes, other ca
   assert.equal(selected.length, 1);
   assert.equal(selected[0].observation.sourceId, 'b');
 });
+
+// A rawFeatures() throw carrying LLMRouter's `llmProviderUnavailable` flag
+// (every eligible provider failed transiently -- see router.js) must be
+// counted and logged separately from a genuine feature-computation
+// rejection: SKIPPED/LLM_PROVIDER_UNAVAILABLE, stats.providerUnavailable,
+// and NOT featureRejected/freshEvaluated/budgetSkipped.
+test('a rawFeatures() throw carrying llmProviderUnavailable is counted as providerUnavailable, not featureRejected, and does not abort the run', async () => {
+  const observations = [
+    observation('a', 'The first candidate for the unique topic Alpha'),
+    observation('b', 'The second candidate for the unique topic Beta')
+  ];
+
+  const rawFeatures = (obs) => {
+    if (obs.sourceId === 'a') {
+      const err = new Error('All eligible LLM providers failed. Failures: groq-free: The operation was aborted.');
+      err.llmProviderUnavailable = true;
+      err.providerFailures = [{ id: 'groq-free', error: 'The operation was aborted.', transient: true }];
+      throw err;
+    }
+    return goodRawFeatures();
+  };
+
+  const decisions = [];
+  const storage = {
+    run(sql, params) {
+      // Only decision_log inserts matter for this assertion; capture the
+      // stage/decision/reason columns (positions match logDecision's
+      // INSERT above) without depending on insertOpportunity's shape.
+      if (sql.includes('INSERT INTO decision_log')) {
+        const [, , , decision, reason, , , , , , , stage] = params;
+        decisions.push({ decision, reason, stage });
+      }
+    }
+  };
+
+  const { stats, selected } = await runDiscoveryPipeline({
+    storage, runId: 'run-1', observations, llmRouter: stubRouter(),
+    discoveryPolicy, scoringWeights, alreadyProducedCorpus: [], topK: 5, rawFeatures
+  });
+
+  assert.equal(stats.discovered, 2);
+  assert.equal(stats.providerUnavailable, 1);
+  assert.equal(stats.featureRejected, 0);
+  assert.equal(stats.freshEvaluated, 1); // only candidate 'b' committed a fresh evaluation
+  assert.equal(stats.budgetSkipped, 0);
+
+  const skipDecision = decisions.find((d) => d.stage === 'FEATURE_COMPUTATION' && d.decision === 'SKIPPED');
+  assert.ok(skipDecision, 'expected a SKIPPED FEATURE_COMPUTATION decision for candidate a');
+  assert.equal(skipDecision.reason, 'LLM_PROVIDER_UNAVAILABLE');
+
+  // The unaffected candidate still reaches scoring/selection.
+  assert.equal(stats.scored, 1);
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].observation.sourceId, 'b');
+});

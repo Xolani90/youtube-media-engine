@@ -33,6 +33,14 @@ export const REJECTION_REASON = Object.freeze({
   HIGH_REPETITION_RISK: 'HIGH_REPETITION_RISK'
 });
 
+// Reason code used for a FEATURE_COMPUTATION-stage SKIPPED decision (never
+// REJECTED) when rawFeatures() failed solely because every eligible LLM
+// provider was transiently unavailable (see LLMRouter#complete's
+// `llmProviderUnavailable` flag) -- as opposed to a genuine feature-
+// computation failure (INELIGIBLE_FEATURE_COMPUTATION_FAILED above), which
+// still applies to every other rawFeatures() throw.
+export const LLM_PROVIDER_UNAVAILABLE = 'LLM_PROVIDER_UNAVAILABLE';
+
 // ADR-0038: Discovery Workload Bounds and Fairness Controls (governance-only
 // decision; these are the frozen values/codes it authorizes).
 export const RSS_ADMISSION = Object.freeze({
