@@ -165,6 +165,32 @@ export async function runResearchProject({
     return { project: storage.get('SELECT * FROM research_projects WHERE id = ?', [project.id]), stopReason: 'SOURCE_DISCOVERY_FAILED' };
   }
 
+  // Instrumentation: the loop below only ever produces decision_log/sources
+  // rows for candidates that were actually discovered, so a provider that
+  // discovers zero candidates left no evidence anywhere (see
+  // GoogleNewsRssSearchProvider's `{ candidates, failures }` contract --
+  // discoveryFailed above only covers a thrown exception, not this case).
+  // This single decision log entry closes that gap without altering stage
+  // order, retries, or any provider behavior: it fires on every run and
+  // records exactly what discovery returned (query, provider id, how many
+  // candidates, and the provider's own reported failures, if any), so a
+  // zero-candidates run can be told apart from a provider-reported failure
+  // after the fact.
+  logDecision(storage, {
+    runId, stage: RESEARCH_STAGE.SOURCE_DISCOVERY, subjectType: 'research_project', subjectId: project.id,
+    decision: acquisitionResult.candidatesConsidered > 0
+      ? 'CANDIDATES_FOUND'
+      : (acquisitionResult.discoveryFailures.length > 0 ? 'PROVIDER_REPORTED_FAILURE' : 'ZERO_RESULTS'),
+    reason: JSON.stringify({
+      provider: sourceProvider?.id ?? null,
+      query: acquisitionResult.discoveryQuery,
+      candidatesConsidered: acquisitionResult.candidatesConsidered,
+      failures: acquisitionResult.discoveryFailures
+    }),
+    provider: sourceProvider?.id ?? null,
+    resultingState: null
+  });
+
   const persistedSources = [];
   for (const acquired of acquisitionResult.acquired) {
     const roleResult = classifySourceRole(acquired.url, classification);

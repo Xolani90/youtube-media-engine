@@ -12,16 +12,19 @@ function policyWith(overrides) {
 }
 
 class StubProvider extends ResearchSourceProvider {
-  constructor(candidates, { failDiscovery = false } = {}) {
+  constructor(candidates, { failDiscovery = false, failures = undefined } = {}) {
     super();
     this.candidates = candidates;
     this.failDiscovery = failDiscovery;
+    this.failures = failures;
   }
   get id() { return 'stub'; }
   async healthCheck() { return true; }
   async discoverCandidates() {
     if (this.failDiscovery) throw new Error('discovery unreachable');
-    return { candidates: this.candidates };
+    return this.failures !== undefined
+      ? { candidates: this.candidates, failures: this.failures }
+      : { candidates: this.candidates };
   }
 }
 
@@ -120,4 +123,23 @@ test('the acquisition loop always terminates deterministically even with unlimit
   const result = await acquireSources({ provider, query: 'q', policy: policyWith({}), retrieveImpl });
   assert.equal(result.acquired.length, 8);
   assert.equal(calls, 8);
+});
+test('zero candidates with no provider failures reports a genuine zero-result discovery (discoveryFailures empty)', async () => {
+  const provider = new StubProvider([], { failures: [] });
+  const retrieveImpl = async () => ({ status: 'SUCCESS', content: 'ok', error: null });
+  const result = await acquireSources({ provider, query: 'my query', policy: policyWith({}), retrieveImpl });
+  assert.equal(result.discoveryFailed, false);
+  assert.equal(result.acquired.length, 0);
+  assert.equal(result.candidatesConsidered, 0);
+  assert.deepEqual(result.discoveryFailures, []);
+  assert.equal(result.discoveryQuery, 'my query');
+});
+
+test('zero candidates with a provider-reported failure surfaces it via discoveryFailures, not discoveryFailed', async () => {
+  const provider = new StubProvider([], { failures: [{ error: 'Google News RSS HTTP 503' }] });
+  const retrieveImpl = async () => ({ status: 'SUCCESS', content: 'ok', error: null });
+  const result = await acquireSources({ provider, query: 'my query', policy: policyWith({}), retrieveImpl });
+  assert.equal(result.discoveryFailed, false, 'discoveryFailed only covers a thrown discoverCandidates()');
+  assert.equal(result.acquired.length, 0);
+  assert.deepEqual(result.discoveryFailures, [{ error: 'Google News RSS HTTP 503' }]);
 });

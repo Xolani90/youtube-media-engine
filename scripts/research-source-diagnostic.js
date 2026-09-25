@@ -68,6 +68,71 @@ export function formatSourceDiagnostic({ projectId, sourceId, url, retrievalStat
 }
 
 /**
+ * Formats one [research-discovery-diagnostic] block from a single
+ * decision_log row at the SOURCE_DISCOVERY stage (see
+ * src/research/pipeline.js). `reason` is the JSON string logDecision
+ * stored -- `{ provider, query, candidatesConsidered, failures }`
+ * (src/research/acquisition.js's `discoveryFailures`). Unparseable/legacy
+ * `reason` values (e.g. the earlier plain-string discoveryError reason on
+ * the thrown-exception path) fall back to printing the raw reason so this
+ * never throws on older rows.
+ */
+export function formatDiscoveryDiagnostic({ projectId, decision, reason }) {
+  let detail;
+  try {
+    const parsed = JSON.parse(reason);
+    detail = [
+      `provider=${parsed.provider ?? 'UNKNOWN'}`,
+      `query=${JSON.stringify(parsed.query ?? null)}`,
+      `candidates=${parsed.candidatesConsidered ?? 'UNKNOWN'}`,
+      `failures=${JSON.stringify(parsed.failures ?? [])}`
+    ].join(' ');
+  } catch {
+    detail = `reason=${reason}`;
+  }
+  return [
+    '[research-discovery-diagnostic]',
+    `project=${projectId}`,
+    `decision=${decision}`,
+    detail
+  ].join('\n');
+}
+
+/**
+ * Reads every SOURCE_DISCOVERY decision_log row (one per research project
+ * per run, written unconditionally by pipeline.js) and prints a
+ * discovery-level diagnostic block for each. This is what distinguishes a
+ * provider that discovered zero candidates (decision=ZERO_RESULTS) from
+ * one that reported a concrete failure (decision=PROVIDER_REPORTED_FAILURE,
+ * with the provider's failure detail in the printed `failures` field) --
+ * information the sources-table-only diagnostic below cannot show, since
+ * zero candidates means zero sources rows exist to read.
+ */
+export function runDiscoveryDiagnostic(storage) {
+  let rows;
+  try {
+    rows = storage.all(`
+      SELECT subject_id AS project_id, decision, reason
+      FROM decision_log
+      WHERE stage = 'SOURCE_DISCOVERY' AND subject_type = 'research_project'
+      ORDER BY created_at
+    `);
+  } catch (err) {
+    console.log(`[research-discovery-diagnostic] unavailable: ${err.message}`);
+    return;
+  }
+
+  if (rows.length === 0) {
+    console.log('[research-discovery-diagnostic] no SOURCE_DISCOVERY decisions found in this run');
+    return;
+  }
+
+  for (const row of rows) {
+    console.log(formatDiscoveryDiagnostic({ projectId: row.project_id, decision: row.decision, reason: row.reason }));
+  }
+}
+
+/**
  * Reads every sources row (joined to its research project) and prints a
  * diagnostic block for each, oldest project/source first. Missing
  * database file or missing tables (e.g. the entrypoint failed before
@@ -76,6 +141,8 @@ export function formatSourceDiagnostic({ projectId, sourceId, url, retrievalStat
  * fail a CI job on its own.
  */
 export function runDiagnostic(storage = createStorage()) {
+  runDiscoveryDiagnostic(storage);
+
   let rows;
   try {
     rows = storage.all(`

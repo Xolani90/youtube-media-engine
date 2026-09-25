@@ -24,8 +24,16 @@ import { traceAsync, safeHost } from '../diagnostics/trace.js';
  * @param {object} deps.policy - research_policy.json
  * @param {function} [deps.retrieveImpl] - injectable for testing (defaults to retrieveSource)
  * @param {function} [deps.fetchImpl] - forwarded to retrieveImpl
- * @returns {Promise<{acquired: Array, attemptsUsed: number, candidatesConsidered: number, discoveryFailed: boolean, discoveryError: string|null}>}
+ * @returns {Promise<{acquired: Array, attemptsUsed: number, candidatesConsidered: number, discoveryFailed: boolean, discoveryError: string|null, discoveryFailures: Array<{error: string}>, discoveryQuery: string}>}
  *   `acquired` entries: { url, title, snippet, publishedAt, status, content, error, attemptCount }
+ *   `discoveryFailures` is the provider's own `failures` array from its
+ *   `{ candidates, failures }` contract (e.g. HTTP error, network error,
+ *   malformed feed) — distinct from `discoveryFailed`/`discoveryError`,
+ *   which only cover the case where `discoverCandidates()` itself throws.
+ *   A provider that returns `{ candidates: [], failures: [] }` reported a
+ *   genuine zero-result discovery, not a failure; `discoveryFailures`
+ *   lets callers tell the two apart instead of seeing an empty
+ *   `acquired` array either way.
  */
 export async function acquireSources({ provider, query, policy, retrieveImpl = retrieveSource, fetchImpl }) {
   const maxSources = policy.acquisition.max_sources_per_research_project;
@@ -35,6 +43,7 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
   let candidates = [];
   let discoveryFailed = false;
   let discoveryError = null;
+  let discoveryFailures = [];
   try {
     const discovery = await traceAsync(
       'research.discover', { provider: provider?.id },
@@ -42,13 +51,17 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
       (d) => ({ candidates: d?.candidates?.length, failures: d?.failures?.length })
     );
     candidates = discovery.candidates || [];
+    discoveryFailures = discovery.failures || [];
   } catch (err) {
     // Discovery failure is isolated: the acquisition run reports zero
     // acquired sources rather than throwing (v0.3 S3: three-way failure
     // distinction — this is the "discovery failure" case).
     discoveryFailed = true;
     discoveryError = err.message;
-    return { acquired: [], attemptsUsed: 0, candidatesConsidered: 0, discoveryFailed, discoveryError };
+    return {
+      acquired: [], attemptsUsed: 0, candidatesConsidered: 0, discoveryFailed, discoveryError,
+      discoveryFailures: [], discoveryQuery: query
+    };
   }
 
   const acquired = [];
@@ -92,5 +105,8 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
     });
   }
 
-  return { acquired, attemptsUsed, candidatesConsidered: candidates.length, discoveryFailed, discoveryError };
+  return {
+    acquired, attemptsUsed, candidatesConsidered: candidates.length, discoveryFailed, discoveryError,
+    discoveryFailures, discoveryQuery: query
+  };
 }
