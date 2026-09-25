@@ -1,6 +1,7 @@
 import { LLMProvider } from './LLMProvider.js';
 import { recordLlm429, recordRetrySleep } from '../../diagnostics/runWorkloadDiagnostics.js';
-import { traceAsync } from '../../diagnostics/trace.js';
+import { traceAsync, traceEvent } from '../../diagnostics/trace.js';
+import { recordProviderRateLimit } from './providerHealth.js';
 
 // M3-B: diagnostics for non-2xx Groq responses, and (below) bounded retry
 // for 429 specifically -- see GroqProvider#complete's docstring. Rate-limit
@@ -213,16 +214,33 @@ export class GroqProvider extends LLMProvider {
 
       if (res.ok) break;
 
-      // Only 429 is retryable, and only up to MAX_ATTEMPTS_ON_429 total
-      // attempts -- every other non-2xx status (400/401/403/404/5xx, etc.)
-      // and an exhausted 429 retry both throw immediately here, exactly
-      // as before this change.
-      if (res.status === 429) recordLlm429(); // diagnostics only
-      if (res.status !== 429 || attempt === MAX_ATTEMPTS_ON_429) {
+      // Every other non-2xx status (400/401/403/404/5xx, etc.) throws
+      // immediately here, exactly as before this change -- unaffected by
+      // Phase 1 (provider cooldown/health-memory), which is scoped to 429
+      // rate-limit responses only (never a generic failure).
+      if (res.status !== 429) {
         throw await traceAsync('llm.http.errorBody', { provider: 'groq-free', status: res.status }, () => buildGroqRequestError(res));
       }
 
+      recordLlm429(); // diagnostics only
+      // Same Retry-After parsing and fallback as before this change; only
+      // now computed once per 429 response so both branches below (retry
+      // sleep, or the exhausted-retry cooldown) can use the same value.
       const delayMs = parseRetryAfterMs(res.headers?.get?.('retry-after')) ?? FALLBACK_RETRY_DELAY_MS;
+
+      // Only up to MAX_ATTEMPTS_ON_429 total attempts -- an exhausted 429
+      // retry still throws immediately here, exactly as before this
+      // change. Phase 1 adds: the provider is still rate-limited, so
+      // record a cooldown (using the same delay the exhausted retry itself
+      // would have slept for) before throwing, so LLMRouter can skip this
+      // provider on the next, independent complete() call instead of
+      // paying this same sleep again.
+      if (attempt === MAX_ATTEMPTS_ON_429) {
+        recordProviderRateLimit('groq-free', delayMs);
+        traceEvent('llm.provider.cooldown.recorded', { provider: 'groq-free', cooldownMs: delayMs });
+        throw await traceAsync('llm.http.errorBody', { provider: 'groq-free', status: res.status }, () => buildGroqRequestError(res));
+      }
+
       recordRetrySleep(delayMs); // diagnostics only
       await traceAsync('llm.retry.sleep', { provider: 'groq-free', delayMs }, () => this._sleep(delayMs));
     }

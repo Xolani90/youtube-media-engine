@@ -1,6 +1,7 @@
 import { REGISTRY } from './candidates.js';
 import { config } from '../../config/index.js';
-import { traceAsync } from '../../diagnostics/trace.js';
+import { traceAsync, traceEvent } from '../../diagnostics/trace.js';
+import { isProviderCoolingDown, providerCooldownRemainingMs } from './providerHealth.js';
 
 /**
  * LLMRouter selects a usable provider from config.llmProviderPriority,
@@ -57,6 +58,19 @@ export class LLMRouter {
       const provider = this._instantiate(id);
       if (provider.isPaid && !this.allowPaidProviders) {
         attempted.push({ id, skipped: 'paid provider not enabled (ALLOW_PAID_PROVIDERS=false)' });
+        continue;
+      }
+      // Phase 1 (provider cooldown/health-memory): a provider that a prior,
+      // independent complete() call already established is rate-limited is
+      // skipped without a network call -- same "skip, don't select" shape
+      // as the health-check case just below, so it counts the same way in
+      // `attempted` and never reaches provider.complete(). Checked before
+      // healthCheck() (synchronous, no network call) purely so a cooling-
+      // down provider doesn't pay for an unnecessary health check.
+      if (isProviderCoolingDown(id)) {
+        const remainingMs = providerCooldownRemainingMs(id);
+        traceEvent('llm.provider.cooldown.skip', { provider: id, remainingMs });
+        attempted.push({ id, skipped: `cooling down after a recent rate limit (${remainingMs}ms remaining)` });
         continue;
       }
       const healthy = await provider.healthCheck();
