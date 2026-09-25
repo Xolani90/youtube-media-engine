@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { localSimilarity } from './similarity.js';
 import { untrustedSourceBlock } from '../providers/llm/promptTrust.js';
 import { nowMs, recordL2Comparison, recordL3Call, recordL3Unresolved } from '../diagnostics/runWorkloadDiagnostics.js';
+import { traceAsync } from '../diagnostics/trace.js';
 
 export const DEDUP_RESULT = Object.freeze({
   DISTINCT: 'DISTINCT',
@@ -144,7 +145,7 @@ export async function checkDuplicate(a, b, { thresholds, llmRouter, budget = nul
   const l3StartedAt = nowMs();
   let layer3;
   try {
-    layer3 = await layer3SemanticJudgment(a, b, llmRouter);
+    layer3 = await traceAsync('discovery.dedup.l3', { l3Used: budget?.l3Used, l3Cap: budget?.l3Cap }, () => layer3SemanticJudgment(a, b, llmRouter));
   } finally {
     recordL3Call(nowMs() - l3StartedAt);
   }

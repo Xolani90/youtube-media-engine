@@ -1,5 +1,6 @@
 import { LLMProvider } from './LLMProvider.js';
 import { recordLlm429, recordRetrySleep } from '../../diagnostics/runWorkloadDiagnostics.js';
+import { traceAsync } from '../../diagnostics/trace.js';
 
 // M3-B: diagnostics for non-2xx Groq responses, and (below) bounded retry
 // for 429 specifically -- see GroqProvider#complete's docstring. Rate-limit
@@ -197,7 +198,7 @@ export class GroqProvider extends LLMProvider {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
       try {
-        res = await this._fetch('https://api.groq.com/openai/v1/chat/completions', {
+        res = await traceAsync('llm.http.request', { provider: 'groq-free', model: this._model, attempt }, () => this._fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -205,7 +206,7 @@ export class GroqProvider extends LLMProvider {
           },
           body: JSON.stringify(body),
           signal: controller.signal
-        });
+        }), (r) => ({ status: r?.status }));
       } finally {
         clearTimeout(timer);
       }
@@ -218,15 +219,15 @@ export class GroqProvider extends LLMProvider {
       // as before this change.
       if (res.status === 429) recordLlm429(); // diagnostics only
       if (res.status !== 429 || attempt === MAX_ATTEMPTS_ON_429) {
-        throw await buildGroqRequestError(res);
+        throw await traceAsync('llm.http.errorBody', { provider: 'groq-free', status: res.status }, () => buildGroqRequestError(res));
       }
 
       const delayMs = parseRetryAfterMs(res.headers?.get?.('retry-after')) ?? FALLBACK_RETRY_DELAY_MS;
       recordRetrySleep(delayMs); // diagnostics only
-      await this._sleep(delayMs);
+      await traceAsync('llm.retry.sleep', { provider: 'groq-free', delayMs }, () => this._sleep(delayMs));
     }
 
-    const data = await res.json();
+    const data = await traceAsync('llm.http.body', { provider: 'groq-free' }, () => res.json());
     const choice = data?.choices?.[0]?.message?.content;
     if (typeof choice !== 'string') {
       throw new Error('GroqProvider received a response with no usable completion text.');

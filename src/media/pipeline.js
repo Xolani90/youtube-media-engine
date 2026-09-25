@@ -14,6 +14,7 @@ import { validateMediaArtifact } from './validate.js';
 import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
 import { config } from '../config/index.js';
+import { traceSync } from '../diagnostics/trace.js';
 import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, FAILURE_NATURE, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /** Same shape/discipline as every other stage's local logDecision helper. Media Production never transitions content_versions.state, so resultingState is always null here. */
@@ -201,9 +202,9 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   const narrationTmpPath = path.join(dir, `.narration.wav.tmp-${process.pid}-${Date.now()}`);
   let narrationDurationSeconds;
   try {
-    synthesizeNarration(narrationText, narrationTmpPath);
+    traceSync('child.espeak-ng', { textChars: narrationText?.length }, () => synthesizeNarration(narrationText, narrationTmpPath));
     fs.renameSync(narrationTmpPath, narrationPath);
-    narrationDurationSeconds = probeDurationSeconds(narrationPath);
+    narrationDurationSeconds = traceSync('child.ffprobe.narration', {}, () => probeDurationSeconds(narrationPath));
   } catch (err) {
     fs.rmSync(narrationTmpPath, { force: true });
     return failWith(
@@ -257,7 +258,7 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     if (captionsSrtTmpPath) {
       writeSrtFile(captionTiming, captionsSrtTmpPath);
     }
-    renderSilentVideo({
+    traceSync('child.ffmpeg.render', { segments: visualTiming?.length }, () => renderSilentVideo({
       visualTiming,
       width: RENDER_DEFAULTS.WIDTH,
       height: RENDER_DEFAULTS.HEIGHT,
@@ -266,13 +267,13 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
       listPath: concatListTmpPath,
       outputPath: silentVideoTmpPath,
       subtitlesPath: captionsSrtTmpPath
-    });
-    muxNarration({
+    }));
+    traceSync('child.ffmpeg.mux', {}, () => muxNarration({
       silentVideoPath: silentVideoTmpPath,
       narrationPath,
       audioEncoder: RENDER_DEFAULTS.AUDIO_ENCODER,
       outputPath: finalVideoTmpPath
-    });
+    }));
   } catch (err) {
     fs.rmSync(silentVideoTmpPath, { force: true });
     fs.rmSync(finalVideoTmpPath, { force: true });
@@ -286,12 +287,12 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   }
 
   // --- Validate BEFORE persisting anything or promoting the tmp path ---
-  const validation = validateMediaArtifact(finalVideoTmpPath, {
+  const validation = traceSync('child.ffprobe.validate', {}, () => validateMediaArtifact(finalVideoTmpPath, {
     width: RENDER_DEFAULTS.WIDTH,
     height: RENDER_DEFAULTS.HEIGHT,
     videoCodecName: RENDER_DEFAULTS.VIDEO_CODEC_NAME,
     audioCodecName: RENDER_DEFAULTS.AUDIO_CODEC_NAME
-  });
+  }));
   if (!validation.valid) {
     fs.rmSync(finalVideoTmpPath, { force: true });
     return failWith(

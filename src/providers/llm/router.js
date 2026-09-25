@@ -1,5 +1,6 @@
 import { REGISTRY } from './candidates.js';
 import { config } from '../../config/index.js';
+import { traceAsync } from '../../diagnostics/trace.js';
 
 /**
  * LLMRouter selects a usable provider from config.llmProviderPriority,
@@ -122,7 +123,12 @@ export class LLMRouter {
       }
 
       try {
-        const result = await provider.complete(request);
+        const result = await traceAsync(
+          'llm.complete',
+          { provider: provider.id, maxTokens: request?.maxTokens, promptChars: request?.prompt?.length },
+          () => provider.complete(request),
+          (r) => ({ model: r?.model, inTokens: r?.inputTokens, outTokens: r?.outputTokens })
+        );
         return { result, providerUsed: provider.id, attempted };
       } catch (err) {
         failures.push({ id, error: err?.message ?? String(err) });

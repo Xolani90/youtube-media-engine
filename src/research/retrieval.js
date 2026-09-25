@@ -1,4 +1,5 @@
 import { RETRIEVAL_STATUS } from './constants.js';
+import { traceAsync, safeHost } from '../diagnostics/trace.js';
 
 /**
  * Deterministic HTTP retrieval + text extraction (Research Subsystem
@@ -17,7 +18,7 @@ export async function retrieveSource(url, { fetchImpl = fetch, timeoutMs = 10000
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      res = await fetchImpl(url, { signal: controller.signal });
+      res = await traceAsync('research.retrieve.http.request', { host: safeHost(url) }, () => fetchImpl(url, { signal: controller.signal }), (r) => ({ status: r?.status }));
     } finally {
       clearTimeout(timer);
     }
@@ -31,7 +32,7 @@ export async function retrieveSource(url, { fetchImpl = fetch, timeoutMs = 10000
 
   let raw;
   try {
-    raw = await res.text();
+    raw = await traceAsync('research.retrieve.http.body', { host: safeHost(url) }, () => res.text());
   } catch (err) {
     return { status: RETRIEVAL_STATUS.FAILED, content: null, error: err.message };
   }

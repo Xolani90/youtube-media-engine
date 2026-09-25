@@ -20,6 +20,7 @@ import { OUTCOME as FINAL_COMPLIANCE_OUTCOME } from '../compliance/constants.js'
 import { RESEARCH_PROJECT_STATUS } from '../research/constants.js';
 import { FACT_CHECK_STATUS } from '../fact-check/constants.js';
 import { CHECK_RESULT as QUALITY_GATE_CHECK_RESULT } from '../quality-gate/constants.js';
+import { traceAsync, traceEvent, traceEnabled } from '../diagnostics/trace.js';
 import {
   selectEligibleResearch,
   selectEligibleBriefs,
@@ -377,6 +378,13 @@ export async function runAutonomousOperation(deps) {
       sweeps += 1;
       const sweepEligible = stages.map((stage) => ({ stage, items: stage.select(storage) }));
       const totalEligible = sweepEligible.reduce((sum, s) => sum + s.items.length, 0);
+      if (traceEnabled()) {
+        traceEvent('runner.sweep', {
+          sweep: sweeps,
+          eligible: totalEligible,
+          byStage: sweepEligible.filter((s) => s.items.length > 0).map((s) => `${s.stage.name}:${s.items.length}`).join(',') || 'none'
+        });
+      }
 
       if (totalEligible === 0) {
         stopReason = 'no_work';
@@ -397,7 +405,12 @@ export async function runAutonomousOperation(deps) {
           const retryKey = `${stage.name}:${item.contentBriefId ?? item.researchProjectId}`;
           if (stage.consumedRetryAttempt && retryConsumed.has(retryKey)) continue;
           try {
-            const result = await stage.run(item, runId);
+            const result = await traceAsync(
+              `runner.stage.${stage.name}`,
+              { item: item.contentBriefId ?? item.researchProjectId ?? item.opportunityId },
+              () => stage.run(item, runId),
+              (r) => ({ outcome: typeof r?.outcome === 'string' ? r.outcome : undefined })
+            );
             processed.set(stage.name, processed.get(stage.name) + 1);
             attemptedCount += 1;
             if (stage.isSuccess(result)) successCount += 1;

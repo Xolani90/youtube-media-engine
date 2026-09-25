@@ -7,6 +7,7 @@ import { evaluateOpportunityRisk } from './riskGate.js';
 import { selectDiversePortfolio } from './diversity.js';
 import { STAGE, REJECTION_REASON, DEDUP_WORKLOAD, CEILING_REASON } from './constants.js';
 import { RISK_LEVELS } from '../state/RiskPolicy.js';
+import { traceAsync } from '../diagnostics/trace.js';
 
 /**
  * Records a decision_log entry with `stage` as a first-class field
@@ -250,7 +251,7 @@ export async function runDiscoveryPipeline({
         decision: 'ACCEPTED', reason: 'proposition_valid', resultingState: 'PROPOSITION_VALID'
       });
     } else {
-      const genResult = await generateProposition(candidate.observation, llmRouter);
+      const genResult = await traceAsync('discovery.proposition', { candidate: candidate.id }, () => generateProposition(candidate.observation, llmRouter));
       logDecision(storage, {
         runId, stage: STAGE.PROPOSITION_GENERATION, subjectId: candidate.id,
         decision: 'GENERATED', reason: 'proposition_generation_completed', provider: genResult.providerUsed,
@@ -283,7 +284,7 @@ export async function runDiscoveryPipeline({
       // above -- so the failing candidate is skipped and the loop proceeds
       // to the next one.
       try {
-        raw = await rawFeatures(candidate.observation);
+        raw = await traceAsync('discovery.features', { candidate: candidate.id }, () => rawFeatures(candidate.observation));
       } catch (err) {
         stats.featureRejected++;
         logDecision(storage, {

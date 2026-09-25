@@ -1,5 +1,6 @@
 import { ResearchSourceProvider } from '../../research/ResearchSourceProvider.js';
 import { parseFeed } from '../../discovery/rssParser.js';
+import { traceAsync, safeUrl } from '../../diagnostics/trace.js';
 
 /**
  * Concrete 'google-news-rss' ResearchSourceProvider. Turns a Research
@@ -95,7 +96,7 @@ export class GoogleNewsRssSearchProvider extends ResearchSourceProvider {
 
     let res;
     try {
-      res = await this._fetch(url.toString());
+      res = await traceAsync('research.discover.http.request', { provider: 'google-news-rss', endpoint: safeUrl(url) }, () => this._fetch(url.toString()), (r) => ({ status: r?.status }));
     } catch (err) {
       // Network-level failure reaching Google News.
       return { candidates: [], failures: [{ error: `network error contacting Google News RSS: ${err.message}` }] };
@@ -116,7 +117,7 @@ export class GoogleNewsRssSearchProvider extends ResearchSourceProvider {
 
     let xml;
     try {
-      xml = await res.text();
+      xml = await traceAsync('research.discover.http.body', { provider: 'google-news-rss' }, () => res.text());
     } catch (err) {
       return { candidates: [], failures: [{ error: `unreadable Google News RSS response: ${err.message}` }] };
     }

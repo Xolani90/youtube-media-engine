@@ -15,6 +15,7 @@ import { createDiscoveryEvaluationStore } from './autonomous/discoveryEvaluation
 import { createDiscoveryEvaluationSchedule } from './autonomous/discoveryEvaluationSchedule.js';
 import { SystemRunRecorder, assertRunAllowed, AUTONOMOUS_RUN_ACTIVE } from './state/SystemRun.js';
 import { resetRunDiagnostics, timeDiscovery, formatRunDiagnostics } from './diagnostics/runWorkloadDiagnostics.js';
+import { startTrace, traceAsync, traceSync, traceEvent } from './diagnostics/trace.js';
 
 /**
  * Process exit code used when an invocation is REFUSED because another
@@ -74,9 +75,9 @@ export async function runAutonomousEntrypoint(deps = {}) {
   let released = false;
 
   try {
-    await storage.migrate();
+    await traceAsync('entrypoint.migrate', {}, () => storage.migrate());
 
-    const acquisition = recorder.acquireExclusive({ mode: deps.mode });
+    const acquisition = traceSync('entrypoint.acquireGuard', {}, () => recorder.acquireExclusive({ mode: deps.mode }));
     if (!acquisition.acquired) {
       return {
         refused: true,
@@ -137,7 +138,11 @@ export async function runAutonomousEntrypoint(deps = {}) {
       candidates,
       failures,
       ceilings: rssCeilings
-    } = await opportunitySource.fetchCandidates();
+    } = await traceAsync(
+      'discovery.rss.fetchCandidates', { feeds: opportunitySource.feedUrls?.length },
+      () => opportunitySource.fetchCandidates(),
+      (r) => ({ candidates: r?.candidates?.length, failures: r?.failures?.length })
+    );
 
     // ADR-0038: occurrence-level RSS ceiling events. A run can contain
     // multiple RSS_PER_FEED_CAP_REACHED occurrences (one per feed that
@@ -169,13 +174,13 @@ export async function runAutonomousEntrypoint(deps = {}) {
     // (fail closed), apply the cooldown policy, and mark admitted
     // observations NOT_EVALUATED -- BEFORE any Discovery LLM call. Only
     // currently-eligible observations enter the unmodified pipeline.
-    const memory = prepareDiscoveryMemory({
+    const memory = traceSync('discovery.memory.prepare', { observations: observations.length }, () => prepareDiscoveryMemory({
       storage,
       observations,
       sourceScope: opportunitySource.id ?? null,
       discoveryPolicy,
       now: deps.discovery?.now
-    });
+    }), (m) => ({ admitted: m?.admitted?.length }));
 
     // ADR-0033: durable per-observation Discovery evaluation state. Always
     // constructed for the production entrypoint (an evaluationStore override
@@ -203,7 +208,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
     const freshEvaluationBudget =
       deps.discovery?.freshEvaluationBudget ?? config.discoveryFreshEvaluationBudget;
 
-    const discoveryResult = await timeDiscovery(() => runDiscoveryPipeline({
+    const discoveryResult = await timeDiscovery(() => traceAsync('discovery.pipeline', { admitted: memory.admitted?.length }, () => runDiscoveryPipeline({
       storage,
       runId: deps.discovery?.runId ?? null,
       observations: memory.admitted,
@@ -218,17 +223,17 @@ export async function runAutonomousEntrypoint(deps = {}) {
       evaluationStore,
       evaluationSchedule,
       freshEvaluationBudget
-    }));
+    }), (r) => ({ selected: r?.stats?.selected, scored: r?.stats?.scored })));
 
     // Record outcomes only after Discovery returned successfully. If
     // Discovery threw, the rows stay NOT_EVALUATED (non-suppressing). A
     // failed write fails closed: the runner does not start.
-    recordDiscoveryOutcomes({
+    traceSync('discovery.recordOutcomes', {}, () => recordDiscoveryOutcomes({
       storage,
       plan: memory.plan,
       discoveryResult,
       now: deps.discovery?.now
-    });
+    }));
 
     // ADR-0038: run-level structured ceiling summary combining RSS admission
     // and Discovery dedup workload ceilings, persisted on this run's
@@ -247,7 +252,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
       )
     };
 
-    const runnerResult = await runAutonomousOperation({
+    const runnerResult = await traceAsync('runner.operation', {}, () => runAutonomousOperation({
       ...deps,
       storage,
       systemRunRecorder: guardedRecorder,
@@ -296,7 +301,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
         artifactsDir:
           deps.media?.artifactsDir ?? config.mediaArtifactsDir
       }
-    });
+    }), (r) => ({ sweeps: r?.sweeps, stopReason: r?.stopReason }));
 
     return {
       discovery: {
@@ -328,9 +333,12 @@ export async function runAutonomousEntrypoint(deps = {}) {
 }
 
 async function main() {
+  startTrace();
+  traceEvent('main.begin');
   // No deps.discovery.rawFeatures supplied: runAutonomousEntrypoint falls
   // back to the production feature-computation function (M2).
   const result = await runAutonomousEntrypoint({});
+  traceEvent('main.entrypoint.returned', { refused: Boolean(result?.refused) });
 
   if (result.refused) {
     const ids = result.activeRuns.map((r) => r.id).join(', ') || 'unknown';
@@ -410,6 +418,7 @@ async function main() {
   } finally {
     diagnosticStorage.close();
   }
+  traceEvent('main.done');
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

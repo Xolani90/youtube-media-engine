@@ -6,6 +6,7 @@ import { extractClaims, validateExtractedClaim } from './claims.js';
 import { computeEvidenceStatus } from './evidenceGrading.js';
 import { canonicalizePair, recordContradiction, hasUnresolvedContradiction } from './contradictions.js';
 import { evaluateCompleteness } from './completeness.js';
+import { traceAsync } from '../diagnostics/trace.js';
 
 /**
  * Records a decision_log entry, same shape/discipline as Discovery's
@@ -201,7 +202,11 @@ export async function runResearchProject({
   for (const source of successfulSources) {
     const full = persistedSources.find((s) => s.id === source.id);
     const sourceRow = storage.get('SELECT * FROM sources WHERE id = ?', [source.id]);
-    const extraction = await extractClaims({ sourceText: sourceRow.content, coreQuestion, sourceRole: sourceRow.role, sourceUrl: sourceRow.url }, llmRouter);
+    const extraction = await traceAsync(
+      'research.claimExtraction', { source: source.id },
+      () => extractClaims({ sourceText: sourceRow.content, coreQuestion, sourceRole: sourceRow.role, sourceUrl: sourceRow.url }, llmRouter),
+      (e) => ({ claims: e?.claims?.length })
+    );
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
       decision: 'EXTRACTED', reason: `${extraction.claims.length}_claims_proposed`, provider: extraction.providerUsed,
@@ -274,7 +279,11 @@ export async function runResearchProject({
           let outcome;
           let errorReason = null;
           try {
-            outcome = await detectContradiction(a, b, llmRouter);
+            outcome = await traceAsync(
+              'research.contradiction', { pair: `${i}-${j}`, of: eligibleClaims.length },
+              () => detectContradiction(a, b, llmRouter),
+              (o) => ({ outcome: typeof o === 'string' ? o : undefined })
+            );
           } catch (err) {
             outcome = CONTRADICTION_RESULT.ERROR;
             errorReason = err?.message || 'detector threw';

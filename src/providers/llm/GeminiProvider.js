@@ -1,5 +1,6 @@
 import { LLMProvider } from './LLMProvider.js';
 import { recordLlm429, recordRetrySleep } from '../../diagnostics/runWorkloadDiagnostics.js';
+import { traceAsync } from '../../diagnostics/trace.js';
 
 // Mirrors GroqProvider's non-2xx diagnostics and bounded 429 retry, adapted
 // to the Gemini API's error shape (`{ error: { code, message, status,
@@ -259,7 +260,7 @@ export class GeminiProvider extends LLMProvider {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
       try {
-        res = await this._fetch(url, {
+        res = await traceAsync('llm.http.request', { provider: 'gemini-free', model: this._model, attempt }, () => this._fetch(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -267,7 +268,7 @@ export class GeminiProvider extends LLMProvider {
           },
           body: JSON.stringify(body),
           signal: controller.signal
-        });
+        }), (r) => ({ status: r?.status }));
       } finally {
         clearTimeout(timer);
       }
@@ -276,7 +277,7 @@ export class GeminiProvider extends LLMProvider {
 
       // The body is read at most once per attempt (never again below),
       // whether this attempt is the final failure or a retryable 429.
-      const errorBody = await readGeminiErrorBody(res);
+      const errorBody = await traceAsync('llm.http.errorBody', { provider: 'gemini-free', status: res.status }, () => readGeminiErrorBody(res));
 
       // Only 429 is retryable, and only up to MAX_ATTEMPTS_ON_429 total
       // attempts -- every other non-2xx status (400/401/403/404/5xx, etc.)
@@ -290,10 +291,10 @@ export class GeminiProvider extends LLMProvider {
         ?? errorBody.retryDelayMs
         ?? FALLBACK_RETRY_DELAY_MS;
       recordRetrySleep(delayMs); // diagnostics only
-      await this._sleep(delayMs);
+      await traceAsync('llm.retry.sleep', { provider: 'gemini-free', delayMs }, () => this._sleep(delayMs));
     }
 
-    const data = await res.json();
+    const data = await traceAsync('llm.http.body', { provider: 'gemini-free' }, () => res.json());
     const parts = data?.candidates?.[0]?.content?.parts;
     const text = Array.isArray(parts) ? parts.map((p) => p?.text ?? '').join('') : '';
     if (!text) {

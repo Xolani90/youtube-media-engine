@@ -1,5 +1,6 @@
 import { RETRIEVAL_STATUS } from './constants.js';
 import { retrieveSource } from './retrieval.js';
+import { traceAsync, safeHost } from '../diagnostics/trace.js';
 
 /**
  * Orchestrates bounded source acquisition (Research Subsystem
@@ -35,7 +36,11 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
   let discoveryFailed = false;
   let discoveryError = null;
   try {
-    const discovery = await provider.discoverCandidates({ query, maxResults: maxSources, alreadyAcquiredUrls: [] });
+    const discovery = await traceAsync(
+      'research.discover', { provider: provider?.id },
+      () => provider.discoverCandidates({ query, maxResults: maxSources, alreadyAcquiredUrls: [] }),
+      (d) => ({ candidates: d?.candidates?.length, failures: d?.failures?.length })
+    );
     candidates = discovery.candidates || [];
   } catch (err) {
     // Discovery failure is isolated: the acquisition run reports zero
@@ -61,7 +66,11 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
     // FAILED (transient retrieval failure). CONTENT_UNPARSEABLE never
     // retries. Both paths are bounded by the global attempt cap.
     while (attemptsUsed < maxAttempts) {
-      result = await retrieveImpl(candidate.url, { fetchImpl });
+      result = await traceAsync(
+        'research.retrieve', { host: safeHost(candidate.url), attempt: attemptCount + 1 },
+        () => retrieveImpl(candidate.url, { fetchImpl }),
+        (r) => ({ status: r?.status })
+      );
       attemptsUsed++;
       attemptCount++;
 
