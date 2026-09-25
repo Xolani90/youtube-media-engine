@@ -152,7 +152,7 @@ export async function runResearchProject({
 
   // --- Source discovery + bounded acquisition ---
   const acquisitionResult = await acquireSources({
-    provider: sourceProvider, query: coreQuestion, policy, retrieveImpl, fetchImpl
+    provider: sourceProvider, query: coreQuestion, subjectHint: proposition.subject, policy, retrieveImpl, fetchImpl
   });
 
   if (acquisitionResult.discoveryFailed) {
