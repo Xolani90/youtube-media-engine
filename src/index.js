@@ -241,6 +241,18 @@ export async function runAutonomousEntrypoint(deps = {}) {
     // autonomous orchestration layer can distinguish normal/exhaustive
     // Discovery completion from workload-bounded Discovery completion. The
     // exact shape is an implementation detail -- not decided by ADR-0038.
+    //
+    // Instrumentation-only addition (Discovery admission-funnel visibility):
+    // `discoveryStats` carries the existing, unmodified `discoveryResult.stats`
+    // object computed by runDiscoveryPipeline() (candidates/dedupRejected/
+    // eligibilityRejected/featureRejected/scored/selected/etc.) through the
+    // same already-existing ceilingSummary JSON persistence path (system_runs
+    // .ceiling_summary via recorder.finish(), see runner.js), so every real
+    // run -- selected work, COMPLETED/no_work, or a completed-but-zero-
+    // selected Discovery pass -- has its funnel statistics available for
+    // inspection after the fact. No new column/table, no change to Discovery
+    // selection logic, thresholds, or stats semantics: this only threads the
+    // existing object through.
     const ceilingSummary = {
       rss: rssCeilings ?? { perFeedCapReached: [], globalCapReached: false },
       dedup: discoveryResult.ceilings ?? { l2ComparisonCapReached: false, l3SemanticCallCapReached: false },
@@ -249,7 +261,8 @@ export async function runAutonomousEntrypoint(deps = {}) {
         rssCeilings?.globalCapReached ||
         discoveryResult.ceilings?.l2ComparisonCapReached ||
         discoveryResult.ceilings?.l3SemanticCallCapReached
-      )
+      ),
+      discoveryStats: discoveryResult.stats ?? null
     };
 
     const runnerResult = await traceAsync('runner.operation', {}, () => runAutonomousOperation({

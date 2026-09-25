@@ -191,13 +191,28 @@ test('autonomous entrypoint runs Discovery once and hands off to runner', async 
 
     const run = storage.db
       .prepare(
-        `SELECT id, status
+        `SELECT id, status, ceiling_summary
            FROM system_runs
           WHERE id = ?`
       )
       .get(result.runner.runId);
 
     assert.equal(run.status, 'COMPLETED');
+
+    // Instrumentation: the existing Discovery admission-funnel stats object
+    // (runDiscoveryPipeline()'s unmodified `stats`, already returned as
+    // result.discovery.stats) must be persisted, unmodified, on the run's
+    // system_runs row via the existing ceiling_summary JSON column -- so a
+    // real scheduled run's funnel counts are inspectable afterwards without
+    // re-running anything.
+    assert.ok(run.ceiling_summary, 'system_runs.ceiling_summary must be persisted');
+    const persistedCeilingSummary = JSON.parse(run.ceiling_summary);
+    assert.deepEqual(
+      persistedCeilingSummary.discoveryStats,
+      result.discovery.stats,
+      'persisted discoveryStats must match the Discovery pipeline\'s own stats object'
+    );
+    assert.equal(persistedCeilingSummary.discoveryStats.selected, 1);
 
     const researchProject = storage.db
       .prepare(
@@ -216,6 +231,63 @@ test('autonomous entrypoint runs Discovery once and hands off to runner', async 
 
     assert.ok(processedResearch);
     assert.equal(processedResearch.count, 1);
+  } finally {
+    storage.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('autonomous entrypoint persists Discovery admission-funnel stats even when Discovery selects zero candidates (COMPLETED / no_work)', async () => {
+  const { dir, dbPath } = tempDbPath();
+
+  const storage = new SqliteStorageDriver({ dbPath });
+  const llmRouter = new LLMRouter({
+    priority: ['e2e-stub'],
+    allowPaidProviders: false,
+    registry: stubRegistry()
+  });
+
+  const opportunitySource = new SingleCandidateSource();
+  const sourceProvider = new NoCandidatesSourceProvider();
+
+  try {
+    // topK: 0 -- Discovery scores the candidate but selects none of it, the
+    // same "completed but selected zero" shape observed in real no_work
+    // runs. This does not change Discovery selection behavior; it only
+    // exercises the existing selectDiversePortfolio(riskCleared, topK)
+    // path with its existing topK parameter.
+    const result = await runAutonomousEntrypoint({
+      storage,
+      llmRouter,
+      discovery: {
+        opportunitySource,
+        rawFeatures: rawFeaturesStub,
+        topK: 0
+      },
+      research: {
+        sourceProvider
+      }
+    });
+
+    assert.equal(result.discovery.stats.discovered, 1);
+    assert.equal(result.discovery.stats.selected, 0);
+    assert.equal(result.runner.stopReason, 'no_work');
+
+    const run = storage.db
+      .prepare(
+        `SELECT id, status, ceiling_summary
+           FROM system_runs
+          WHERE id = ?`
+      )
+      .get(result.runner.runId);
+
+    assert.equal(run.status, 'COMPLETED');
+    assert.ok(run.ceiling_summary, 'system_runs.ceiling_summary must be persisted for a zero-selected Discovery pass');
+
+    const persistedCeilingSummary = JSON.parse(run.ceiling_summary);
+    assert.ok(persistedCeilingSummary.discoveryStats, 'discoveryStats must be present even when nothing was selected');
+    assert.equal(persistedCeilingSummary.discoveryStats.selected, 0);
+    assert.deepEqual(persistedCeilingSummary.discoveryStats, result.discovery.stats);
   } finally {
     storage.close();
     fs.rmSync(dir, { recursive: true, force: true });
