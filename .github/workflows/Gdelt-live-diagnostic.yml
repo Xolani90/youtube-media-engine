@@ -1,0 +1,158 @@
+# TEMPORARY diagnostic workflow — not a production feature.
+#
+# Purpose: exercise the EXISTING src/providers/research/GdeltSearchProvider.js
+# directly against the real, public GDELT DOC 2.0 API, using its normal/default
+# fetch implementation, so we have live evidence of whether the provider
+# actually reaches GDELT, gets a response, and parses usable candidates.
+#
+# Explicitly out of scope, by construction:
+#   - does not import or invoke src/index.js
+#   - does not invoke runAutonomousEntrypoint / runAutonomousOperation
+#   - does not touch Research pipeline orchestration, Rights Verification,
+#     Production, Media Production, or Publication
+#   - does not read or write RUN_MODE, AUTONOMOUS_ENABLED, or
+#     config/authorized_external_actions.json
+#   - does not open or write to any SQLite database
+#   - does not require TAVILY_API_KEY or any other credential
+#   - makes only read-only HTTP GET requests to GDELT's public,
+#     unauthenticated endpoint (api.gdeltproject.org)
+#
+# Manually dispatched only. Not on any schedule, not triggered by push/PR.
+# Intended to be deleted once the live-evidence question is answered.
+
+name: GDELT Live Diagnostic (temporary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref/branch to check out for this diagnostic run'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run GDELT live diagnostic (read-only)
+        # Inline Node script, not a new application file: this exists only
+        # to call the existing GdeltSearchProvider's discoverCandidates()
+        # with its default fetchImpl (real global fetch) and report what
+        # comes back. It never imports src/index.js or anything from
+        # src/autonomous/, src/research/pipeline.js, src/rights-verification/,
+        # src/media/, or src/publication/.
+        run: |
+          node --input-type=module - <<'NODE'
+          import { GdeltSearchProvider } from './src/providers/research/GdeltSearchProvider.js';
+
+          const QUERIES = ['artificial intelligence', 'generative AI', 'OpenAI'];
+          const MAX_RECORDS = 10;
+
+          const provider = new GdeltSearchProvider();
+
+          function firstN(arr, n, mapFn) {
+            return arr.slice(0, n).map(mapFn);
+          }
+
+          function domainOf(url) {
+            try {
+              return new URL(url).hostname;
+            } catch {
+              return null;
+            }
+          }
+
+          async function runQuery(query) {
+            const start = Date.now();
+            let result;
+            let threw = null;
+            try {
+              result = await provider.discoverCandidates({ query, maxResults: MAX_RECORDS });
+            } catch (err) {
+              // The documented contract says discoverCandidates() never
+              // throws. If it does, that is itself a diagnostic finding,
+              // not something to swallow.
+              threw = err;
+            }
+            const elapsedMs = Date.now() - start;
+
+            console.log(`\n=== query: ${JSON.stringify(query)} ===`);
+            console.log(`elapsed_ms=${elapsedMs}`);
+
+            if (threw) {
+              console.log('UNEXPECTED_THROW=true');
+              console.log(`error_name=${threw?.name}`);
+              console.log(`error_message=${threw?.message}`);
+              return { query, elapsedMs, candidateCount: 0, failureCount: 1, threw: true };
+            }
+
+            const candidates = result?.candidates ?? [];
+            const failures = result?.failures ?? [];
+
+            console.log(`candidate_count=${candidates.length}`);
+            console.log(`failure_count=${failures.length}`);
+            if (failures.length > 0) {
+              console.log('failures=' + JSON.stringify(failures));
+            }
+
+            console.log('first_5_titles=' + JSON.stringify(firstN(candidates, 5, (c) => c.title)));
+            console.log('first_5_urls=' + JSON.stringify(firstN(candidates, 5, (c) => c.url)));
+            console.log('first_5_domains=' + JSON.stringify(firstN(candidates, 5, (c) => domainOf(c.url))));
+            // Field-completeness check: does each candidate actually carry
+            // what the research pipeline's candidate shape expects
+            // ({url, title, snippet, publishedAt?})? This does not judge
+            // whether the pipeline would accept them (that is Research's
+            // own eligibility/dedup logic, untouched here) -- only whether
+            // the fields are structurally present.
+            const shapeSample = firstN(candidates, 5, (c) => ({
+              hasUrl: typeof c.url === 'string' && c.url.length > 0,
+              hasTitle: typeof c.title === 'string' && c.title.length > 0,
+              snippet: c.snippet,
+              hasPublishedAt: typeof c.publishedAt === 'string' && c.publishedAt.length > 0
+            }));
+            console.log('first_5_shape=' + JSON.stringify(shapeSample));
+
+            return { query, elapsedMs, candidateCount: candidates.length, failureCount: failures.length, threw: false };
+          }
+
+          const results = [];
+          for (const q of QUERIES) {
+            results.push(await runQuery(q));
+          }
+
+          const queriesRun = results.length;
+          const queriesWithCandidates = results.filter((r) => r.candidateCount > 0).length;
+          const totalCandidates = results.reduce((sum, r) => sum + r.candidateCount, 0);
+          const totalFailures = results.reduce((sum, r) => sum + r.failureCount, 0);
+
+          console.log('\n=== aggregate ===');
+          console.log(`queries_run=${queriesRun}`);
+          console.log(`queries_with_candidates=${queriesWithCandidates}`);
+          console.log(`total_candidates=${totalCandidates}`);
+          console.log(`total_failures=${totalFailures}`);
+
+          // Fails the step (and therefore the job) only on an unexpected
+          // throw from the provider itself -- a documented contract
+          // violation -- not on zero candidates or reported failures,
+          // which are themselves valid diagnostic findings to read from
+          // the log above, not reasons to hide them behind a red X.
+          const anyUnexpectedThrow = results.some((r) => r.threw);
+          if (anyUnexpectedThrow) {
+            console.error('One or more queries caused GdeltSearchProvider to throw, violating its documented never-throws contract.');
+            process.exitCode = 1;
+          }
+          NODE
