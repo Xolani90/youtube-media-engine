@@ -3,6 +3,7 @@ export const STAGE = Object.freeze({
   HARD_ELIGIBILITY: 'HARD_ELIGIBILITY',
   PROPOSITION_GENERATION: 'PROPOSITION_GENERATION',
   PROPOSITION_VALIDATION: 'PROPOSITION_VALIDATION',
+  FEATURE_COMPUTATION: 'FEATURE_COMPUTATION',
   VALUE_SCORE: 'VALUE_SCORE',
   RISK_GATE: 'RISK_GATE',
   DIVERSITY_SELECTION: 'DIVERSITY_SELECTION'
@@ -18,6 +19,8 @@ export const REJECTION_REASON = Object.freeze({
   EXPIRED: 'EXPIRED',
   // Proposition Validation stage
   INELIGIBLE_NO_VIABLE_PROPOSITION: 'INELIGIBLE_NO_VIABLE_PROPOSITION',
+  // Feature Computation stage
+  INELIGIBLE_FEATURE_COMPUTATION_FAILED: 'INELIGIBLE_FEATURE_COMPUTATION_FAILED',
   // Value/Risk/Diversity stage
   LOW_DEMAND: 'LOW_DEMAND',
   LOW_NOVELTY: 'LOW_NOVELTY',
@@ -34,16 +37,16 @@ export const REJECTION_REASON = Object.freeze({
 // decision; these are the frozen values/codes it authorizes).
 export const RSS_ADMISSION = Object.freeze({
   PER_FEED_CAP: 50,
-  GLOBAL_CAP: 100
+  GLOBAL_CAP: 50
 });
 
-// Both tied to the global RSS admission cap via 100 * 99 / 2 = 4,950
-// (maximum pairwise comparisons across a 100-item admitted set). If
+// Both tied to the global RSS admission cap via 50 * 49 / 2 = 1,225
+// (maximum pairwise comparisons across a 50-item admitted set). If
 // RSS_ADMISSION.GLOBAL_CAP ever changes, this basis must be reconsidered --
 // ADR-0038 does not pre-authorize any such recalculation.
 export const DEDUP_WORKLOAD = Object.freeze({
-  L2_COMPARISON_CAP: 4950,
-  L3_SEMANTIC_CALL_CAP: 4950
+  L2_COMPARISON_CAP: 1225,
+  L3_SEMANTIC_CALL_CAP: 1225
 });
 
 // The four, and only four, machine-readable ceiling reason codes ADR-0038

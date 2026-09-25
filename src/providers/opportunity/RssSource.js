@@ -1,6 +1,7 @@
 import { OpportunitySource } from './OpportunitySource.js';
 import { parseFeed } from '../../discovery/rssParser.js';
 import { RSS_ADMISSION } from '../../discovery/constants.js';
+import { traceAsync, safeUrl } from '../../diagnostics/trace.js';
 
 /**
  * RssSource is the first production OpportunitySource implementation
@@ -59,11 +60,11 @@ export class RssSource extends OpportunitySource {
         const timer = setTimeout(() => controller.abort(), this.timeoutMs);
         let text;
         try {
-          const res = await this.fetchImpl(feedUrl, { signal: controller.signal });
+          const res = await traceAsync('discovery.rss.http.request', { feed: safeUrl(feedUrl) }, () => this.fetchImpl(feedUrl, { signal: controller.signal }), (r) => ({ status: r?.status }));
           if (!res.ok) {
             throw new Error(`HTTP ${res.status} fetching ${feedUrl}`);
           }
-          text = await res.text();
+          text = await traceAsync('discovery.rss.http.body', { feed: safeUrl(feedUrl) }, () => res.text());
         } finally {
           clearTimeout(timer);
         }

@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import { localSimilarity } from './similarity.js';
 import { untrustedSourceBlock } from '../providers/llm/promptTrust.js';
+import { nowMs, recordL2Comparison, recordL3Call, recordL3Unresolved } from '../diagnostics/runWorkloadDiagnostics.js';
+import { traceAsync } from '../diagnostics/trace.js';
 
 export const DEDUP_RESULT = Object.freeze({
   DISTINCT: 'DISTINCT',
@@ -123,6 +125,7 @@ export async function checkDuplicate(a, b, { thresholds, llmRouter, budget = nul
 
   layersUsed.push('layer2');
   if (budget) budget.l2Used += 1;
+  recordL2Comparison();
   const layer2 = layer2Similarity(a, b, thresholds);
   if (layer2.result === DEDUP_RESULT.DUPLICATE) {
     return { eventMatch: DEDUP_RESULT.DUPLICATE, distinctAngle: false, layersUsed, llmCallMade: false, llmEvidence: { similarity: layer2.score }, ceilingReason: null };
@@ -132,12 +135,20 @@ export async function checkDuplicate(a, b, { thresholds, llmRouter, budget = nul
   }
 
   if (budget && budget.l3Used >= budget.l3Cap) {
+    recordL3Unresolved();
     return { eventMatch: DEDUP_RESULT.UNRESOLVED, distinctAngle: null, layersUsed, llmCallMade: false, llmEvidence: { similarity: layer2.score }, ceilingReason: 'L3' };
   }
 
   layersUsed.push('layer3');
   if (budget) budget.l3Used += 1;
-  const layer3 = await layer3SemanticJudgment(a, b, llmRouter);
+  // Diagnostics only: time the whole L3 call, including a throwing one.
+  const l3StartedAt = nowMs();
+  let layer3;
+  try {
+    layer3 = await traceAsync('discovery.dedup.l3', { l3Used: budget?.l3Used, l3Cap: budget?.l3Cap }, () => layer3SemanticJudgment(a, b, llmRouter));
+  } finally {
+    recordL3Call(nowMs() - l3StartedAt);
+  }
   return {
     eventMatch: layer3.sameEvent ? DEDUP_RESULT.DUPLICATE : DEDUP_RESULT.DISTINCT,
     distinctAngle: layer3.sameEvent ? layer3.distinctAngle : null,

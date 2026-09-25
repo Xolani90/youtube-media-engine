@@ -1,6 +1,15 @@
-import { test } from 'node:test';
+import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { GroqProvider } from '../../src/providers/llm/GroqProvider.js';
+import { resetProviderHealth, isProviderCoolingDown, providerCooldownRemainingMs } from '../../src/providers/llm/providerHealth.js';
+
+// Phase 1 (provider cooldown/health-memory) shares process-wide state with
+// every other test file's provider/router tests (module-level singleton).
+// Reset before each test in this file so a cooldown recorded by one test
+// never leaks into the next.
+beforeEach(() => {
+  resetProviderHealth();
+});
 
 function jsonResponse(status, body, headers = {}) {
   const text = JSON.stringify(body);
@@ -243,8 +252,108 @@ test('complete(): a 200 response with no completion text is an explicit failure,
   await assert.rejects(() => provider.complete({ prompt: 'hi' }), /no usable completion text/);
 });
 
+test('complete(): a request that never resolves is aborted after LLM_REQUEST_TIMEOUT_MS, rejecting instead of hanging forever', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  let capturedSignal;
+  const fetchImpl = (url, init) => {
+    capturedSignal = init.signal;
+    // Never resolves on its own -- only settles if the request is aborted.
+    return new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => {
+        const err = new Error('This operation was aborted');
+        err.name = 'AbortError';
+        reject(err);
+      });
+    });
+  };
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  const pending = assert.rejects(() => provider.complete({ prompt: 'hi' }), /aborted/i);
+  t.mock.timers.tick(30000);
+  await pending;
+
+  assert.equal(capturedSignal.aborted, true, 'the request signal must be aborted once the timeout elapses');
+});
+
 test('isPaid is false and id is "groq-free", matching config.llmProviderPriority\'s existing id', () => {
   const provider = new GroqProvider({ apiKeyProvider: () => 'key123' });
   assert.equal(provider.id, 'groq-free');
   assert.equal(provider.isPaid, false);
+});
+
+// --- Phase 1: provider cooldown / health-memory ---
+
+test('Phase 1 / Test A + H: an exhausted 429 retry records a cooldown derived from Retry-After, and cooldownUntil is in the future', async () => {
+  const fetchImpl = async () => jsonResponse(
+    429,
+    { error: 'rate_limit_exceeded' },
+    { 'retry-after': '12' }
+  );
+  const sleepImpl = async () => {};
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  assert.equal(isProviderCoolingDown('groq-free'), false, 'no cooldown before the call');
+  await assert.rejects(() => provider.complete({ prompt: 'hi' }));
+
+  assert.equal(isProviderCoolingDown('groq-free'), true, 'cooldown recorded after exhausted 429');
+  // Retry-After: 12 -> 12000ms, minus a little slack for time elapsed running the test.
+  assert.ok(providerCooldownRemainingMs('groq-free') > 11000, 'cooldown reflects the server-provided 12s delay');
+});
+
+test('Phase 1 / Test E: an ordinary (non-429) failure does not record a cooldown', async () => {
+  const fetchImpl = async () => jsonResponse(401, { error: 'invalid_api_key' });
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'bad-key' });
+
+  await assert.rejects(() => provider.complete({ prompt: 'hi' }), /HTTP 401/);
+  assert.equal(isProviderCoolingDown('groq-free'), false);
+});
+
+test('Phase 1 / Test F: a successful call does not record a cooldown', async () => {
+  const fetchImpl = async () => jsonResponse(200, {
+    choices: [{ message: { content: 'ok' } }],
+    usage: {}
+  });
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  await provider.complete({ prompt: 'hi' });
+  assert.equal(isProviderCoolingDown('groq-free'), false);
+});
+
+test('Phase 1 / Test G: a 200 response with invalid/missing completion content does not record a cooldown (content validation is not a rate-limit event)', async () => {
+  const fetchImpl = async () => jsonResponse(200, { choices: [{ message: {} }] });
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  await assert.rejects(() => provider.complete({ prompt: 'hi' }), /no usable completion text/);
+  assert.equal(isProviderCoolingDown('groq-free'), false);
+});
+
+test('Phase 1: a 429 immediately followed by a successful retry does NOT record a cooldown (provider is not "still" rate-limited)', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    if (fetchCalls === 1) return jsonResponse(429, { error: 'rate_limit_exceeded' }, { 'retry-after': '1' });
+    return jsonResponse(200, { choices: [{ message: { content: 'ok' } }], usage: {} });
+  };
+  const sleepImpl = async () => {};
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  await provider.complete({ prompt: 'hi' });
+  assert.equal(isProviderCoolingDown('groq-free'), false);
+});
+
+test('Phase 1: existing 429 retry/Retry-After/bounded-attempt behavior is unchanged by the cooldown addition', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    return jsonResponse(429, { error: { message: 'still limited' } }, { 'retry-after': '5' });
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  await assert.rejects(() => provider.complete({ prompt: 'hi' }), /HTTP 429/);
+  assert.equal(fetchCalls, 2, 'still exactly two attempts (MAX_ATTEMPTS_ON_429 unchanged)');
+  assert.equal(sleepCalls.length, 1, 'still exactly one retry sleep, unchanged');
+  assert.deepEqual(sleepCalls, [5000], 'Retry-After parsing unchanged');
 });

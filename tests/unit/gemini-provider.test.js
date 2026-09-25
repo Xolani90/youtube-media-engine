@@ -1,6 +1,15 @@
-import { test } from 'node:test';
+import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { GeminiProvider } from '../../src/providers/llm/GeminiProvider.js';
+import { resetProviderHealth, isProviderCoolingDown, providerCooldownRemainingMs } from '../../src/providers/llm/providerHealth.js';
+
+// Phase 1 (provider cooldown/health-memory) shares process-wide state with
+// every other test file's provider/router tests (module-level singleton).
+// Reset before each test in this file so a cooldown recorded by one test
+// never leaks into the next.
+beforeEach(() => {
+  resetProviderHealth();
+});
 
 function jsonResponse(status, body, headers = {}) {
   const text = JSON.stringify(body);
@@ -396,4 +405,101 @@ test('pacing: does not interfere with the existing 429 retry -- retry delay and 
   assert.equal(sleepCalls.length, 1, 'only the 429 retry delay was awaited -- pacing added no extra wait here');
   assert.equal(sleepCalls[0], 1000, 'the retry delay itself is unchanged: derived from Retry-After, not the pacing floor');
   assert.equal(second.text, 'Retried successfully.');
+});
+
+test('complete(): a request that never resolves is aborted after LLM_REQUEST_TIMEOUT_MS, rejecting instead of hanging forever', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  let capturedSignal;
+  const fetchImpl = (url, init) => {
+    capturedSignal = init.signal;
+    // Never resolves on its own -- only settles if the request is aborted.
+    return new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => {
+        const err = new Error('This operation was aborted');
+        err.name = 'AbortError';
+        reject(err);
+      });
+    });
+  };
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  const pending = assert.rejects(() => provider.complete({ prompt: 'hi' }), /aborted/i);
+  // Let complete()'s pacing-slot await (a real microtask hop, since this is
+  // the first call on a fresh instance) resolve before the timeout timer
+  // this test is about is even registered.
+  await Promise.resolve();
+  await Promise.resolve();
+  t.mock.timers.tick(30000);
+  await pending;
+
+  assert.equal(capturedSignal.aborted, true, 'the request signal must be aborted once the timeout elapses');
+});
+
+// --- Phase 1: provider cooldown / health-memory ---
+
+test('Phase 1 / Test A + I: an exhausted 429 retry records a cooldown derived from Gemini\'s own RetryInfo.retryDelay', async () => {
+  const fetchImpl = async () => jsonResponse(429, {
+    error: {
+      code: 429,
+      message: 'Resource has been exhausted. Please retry in 6.203550290s.',
+      status: 'RESOURCE_EXHAUSTED',
+      details: [
+        { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '6.203550290s' }
+      ]
+    }
+  }); // no Retry-After header -- forces the RetryInfo-detail path, unchanged by Phase 1
+  const sleepImpl = async () => {};
+  const nowImpl = () => 0; // disable the pacing-floor sleep so this test is fast/deterministic
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+
+  assert.equal(isProviderCoolingDown('gemini-free'), false, 'no cooldown before the call');
+  await assert.rejects(() => provider.complete({ prompt: 'hi' }));
+
+  assert.equal(isProviderCoolingDown('gemini-free'), true, 'cooldown recorded after exhausted 429');
+  // 6.20355029s -> ~6203ms, minus a little slack for time elapsed running the test.
+  assert.ok(providerCooldownRemainingMs('gemini-free') > 6000, 'cooldown reflects Gemini\'s own retryDelay, unchanged from existing parsing');
+});
+
+test('Phase 1 / Test E: an ordinary (non-429) failure does not record a cooldown', async () => {
+  const fetchImpl = async () => jsonResponse(403, { error: { message: 'forbidden' } });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  await assert.rejects(() => provider.complete({ prompt: 'hi' }), /HTTP 403/);
+  assert.equal(isProviderCoolingDown('gemini-free'), false);
+});
+
+test('Phase 1 / Test F: a successful call does not record a cooldown', async () => {
+  const fetchImpl = async () => jsonResponse(200, {
+    candidates: [{ content: { parts: [{ text: 'ok' }] } }]
+  });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  await provider.complete({ prompt: 'hi' });
+  assert.equal(isProviderCoolingDown('gemini-free'), false);
+});
+
+test('Phase 1 / Test G: a 200 response with no usable completion text does not record a cooldown (content validation is not a rate-limit event)', async () => {
+  const fetchImpl = async () => jsonResponse(200, { candidates: [] });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  await assert.rejects(() => provider.complete({ prompt: 'hi' }), /no usable completion text/);
+  assert.equal(isProviderCoolingDown('gemini-free'), false);
+});
+
+test('Phase 1: existing 429 retry/retryDelay/bounded-attempt behavior is unchanged by the cooldown addition', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    return jsonResponse(429, { error: { message: 'still limited' } }, { 'retry-after': '5' });
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const nowImpl = () => 0;
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+
+  await assert.rejects(() => provider.complete({ prompt: 'hi' }), /HTTP 429/);
+  assert.equal(fetchCalls, 2, 'still exactly two attempts (MAX_ATTEMPTS_ON_429 unchanged)');
+  assert.equal(sleepCalls.length, 1, 'still exactly one retry sleep, unchanged');
+  assert.deepEqual(sleepCalls, [5000], 'Retry-After parsing unchanged');
 });

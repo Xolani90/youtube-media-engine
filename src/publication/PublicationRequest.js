@@ -1,3 +1,5 @@
+import { normalizeTitle, normalizeDescription } from './metadataValidation.js';
+
 /**
  * Builds the provider-neutral publication request from the existing
  * content model (content_brief / script / media_artifact) — the sole
@@ -8,6 +10,17 @@
  * ./youtube/YouTubeAdapter.js) is responsible for translating this into
  * its own provider-specific request shape — this module knows nothing
  * about YouTube, or any other provider.
+ *
+ * Phase 2A: title/description are passed through
+ * normalizeTitle()/normalizeDescription() (./metadataValidation.js)
+ * before being placed on the returned request, so every publication
+ * request this function produces already carries YouTube-compatible
+ * metadata — this is the one canonical place that happens, so no
+ * caller (pipeline.js, any future caller) needs to duplicate it. A
+ * fundamentally invalid title (missing/empty/wrong type) throws
+ * InvalidPublicationMetadataError; the caller is responsible for
+ * translating that into its own error contract (see pipeline.js's
+ * STRUCTURAL_FAILURE handling).
  *
  * `requestedPublishAt` is carried through as a plain value (or null)
  * purely so a provider adapter *may* use it if that provider supports
@@ -32,12 +45,12 @@
  * @param {string|null} [args.requestedVisibility] - authorization-derived visibility ('public'), or null
  */
 export function buildPublicationRequest({ contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt = null, requestedVisibility = null }) {
-  const title = contentBrief.working_title ?? `Untitled (${contentVersion.id})`;
+  const title = normalizeTitle(contentBrief.working_title ?? `Untitled (${contentVersion.id})`);
   // No separate "video description" field exists on content_briefs yet;
   // viewer_promise is the closest existing authoritative field
   // describing what the video delivers to a viewer. Falls back to an
   // empty string rather than fabricating copy.
-  const description = contentBrief.viewer_promise ?? '';
+  const description = normalizeDescription(contentBrief.viewer_promise ?? '');
 
   return {
     contentVersionId: contentVersion.id,

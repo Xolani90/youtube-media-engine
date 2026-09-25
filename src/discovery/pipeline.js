@@ -7,6 +7,7 @@ import { evaluateOpportunityRisk } from './riskGate.js';
 import { selectDiversePortfolio } from './diversity.js';
 import { STAGE, REJECTION_REASON, DEDUP_WORKLOAD, CEILING_REASON } from './constants.js';
 import { RISK_LEVELS } from '../state/RiskPolicy.js';
+import { traceAsync } from '../diagnostics/trace.js';
 
 /**
  * Records a decision_log entry with `stage` as a first-class field
@@ -72,7 +73,7 @@ export async function runDiscoveryPipeline({
 }) {
   const stats = {
     discovered: observations.length, dedupRejected: 0, eligibilityRejected: 0, propositionRejected: 0,
-    scored: 0, riskVetoed: 0, selected: 0, diversityExcluded: 0,
+    featureRejected: 0, scored: 0, riskVetoed: 0, selected: 0, diversityExcluded: 0,
     // ADR-0034: reused = took the ADR-0033 reuse path; freshEvaluated = a
     // fresh evaluation was durably committed (regardless of later risk-veto
     // or diversity exclusion); budgetSkipped = required a fresh evaluation
@@ -250,7 +251,7 @@ export async function runDiscoveryPipeline({
         decision: 'ACCEPTED', reason: 'proposition_valid', resultingState: 'PROPOSITION_VALID'
       });
     } else {
-      const genResult = await generateProposition(candidate.observation, llmRouter);
+      const genResult = await traceAsync('discovery.proposition', { candidate: candidate.id }, () => generateProposition(candidate.observation, llmRouter));
       logDecision(storage, {
         runId, stage: STAGE.PROPOSITION_GENERATION, subjectId: candidate.id,
         decision: 'GENERATED', reason: 'proposition_generation_completed', provider: genResult.providerUsed,
@@ -273,7 +274,26 @@ export async function runDiscoveryPipeline({
       });
 
       proposition = genResult.proposition;
-      raw = await rawFeatures(candidate.observation);
+      // Feature computation (e.g. computeRawFeatures) intentionally throws
+      // on malformed/truncated LLM output rather than fabricating a score
+      // -- see src/discovery/featureComputation.js's own contract. That
+      // throw must not be allowed to propagate out of the pipeline (which
+      // would abort the entire Discovery run over a single candidate); it
+      // is handled here, at the pipeline boundary, as a per-candidate
+      // rejection -- the same shape as the PROPOSITION_VALIDATION rejection
+      // above -- so the failing candidate is skipped and the loop proceeds
+      // to the next one.
+      try {
+        raw = await traceAsync('discovery.features', { candidate: candidate.id }, () => rawFeatures(candidate.observation));
+      } catch (err) {
+        stats.featureRejected++;
+        logDecision(storage, {
+          runId, stage: STAGE.FEATURE_COMPUTATION, subjectId: candidate.id,
+          decision: 'REJECTED', reason: REJECTION_REASON.INELIGIBLE_FEATURE_COMPUTATION_FAILED,
+          resultingState: 'REJECTED', configSnapshot: { errorMessage: err.message }
+        });
+        continue;
+      }
 
       if (evaluationStore) {
         const commitEvaluation = () => {

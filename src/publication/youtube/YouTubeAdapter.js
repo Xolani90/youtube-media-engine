@@ -146,6 +146,136 @@ export class YouTubeAdapter extends PublicationProvider {
     return this._interpretUploadResult(uploadResult, { sessionUrl });
   }
 
+  /**
+   * Phase 2B: uploads a thumbnail image for an already-uploaded video.
+   * Distinct from publish() -- this is a second, independently
+   * observable external action against a video that already has a
+   * confirmed provider id (the caller, ../pipeline.js, never calls this
+   * before publish() has returned a confirmed SUCCESS). Reuses the same
+   * credential/token-refresh path as publish() (never a second OAuth
+   * implementation) and returns the identical normalized
+   * SUCCESS/EXPLICIT_FAILURE/AMBIGUOUS contract as publish() (see
+   * ../PublicationProvider.js) so the publication core never needs a
+   * second result vocabulary.
+   *
+   * Verified against the current YouTube Data API v3 documentation
+   * (developers.google.com/youtube/v3/docs/thumbnails/set) at
+   * implementation time: POST
+   * https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=<id>
+   * with the raw image bytes as the request body (uploadType=media,
+   * simple upload -- thumbnails are small enough that the resumable
+   * protocol publish() uses for video is unnecessary here).
+   *
+   * @param {object} args
+   * @param {string} args.videoId - confirmed provider video id (PublicationRequest never supplies this; the caller reads it from the already-PUBLISHED publications row)
+   * @param {string} args.thumbnailFilePath - local path to the generated thumbnail image
+   * @returns {Promise<{status: string, provider: string, [key: string]: any}>}
+   */
+  async publishThumbnail({ videoId, thumbnailFilePath }) {
+    if (!videoId) {
+      return {
+        status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE,
+        provider: this.id,
+        errorClass: 'MISSING_VIDEO_ID',
+        retryable: false
+      };
+    }
+    if (!fs.existsSync(thumbnailFilePath)) {
+      return {
+        status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE,
+        provider: this.id,
+        errorClass: 'THUMBNAIL_FILE_MISSING',
+        retryable: false
+      };
+    }
+
+    let accessToken;
+    try {
+      accessToken = await this._getAccessToken();
+    } catch (err) {
+      return {
+        status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE,
+        provider: this.id,
+        errorClass: 'CREDENTIALS_UNAVAILABLE',
+        retryable: false
+      };
+    }
+
+    const body = fs.readFileSync(thumbnailFilePath);
+    let res;
+    try {
+      res = await this._fetch(
+        `https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=${encodeURIComponent(videoId)}&uploadType=media`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'image/png',
+            'Content-Length': String(body.length)
+          },
+          body
+        }
+      );
+    } catch (err) {
+      // Thrown fetch/network error: identical undetermined-outcome
+      // discipline as _classifyNetworkError below -- never guess.
+      return {
+        status: PUBLICATION_RESULT_STATUS.AMBIGUOUS,
+        provider: this.id,
+        reconciliationInfo: { phase: 'THUMBNAIL_UPLOAD', note: err?.message ?? 'network_error' }
+      };
+    }
+
+    if (res.status >= 500) {
+      return {
+        status: PUBLICATION_RESULT_STATUS.AMBIGUOUS,
+        provider: this.id,
+        reconciliationInfo: { phase: 'THUMBNAIL_UPLOAD', note: `thumbnail_server_error_${res.status}` }
+      };
+    }
+    if (!res.ok) {
+      let errorBody = null;
+      try {
+        errorBody = await res.json();
+      } catch {
+        // ignore unparseable error body
+      }
+      return {
+        status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE,
+        provider: this.id,
+        errorClass: `thumbnail_upload_rejected_${res.status}`,
+        retryable: false,
+        raw: { httpStatus: res.status, errorBody }
+      };
+    }
+
+    let json = null;
+    try {
+      json = await res.json();
+    } catch {
+      // 2xx with an unparseable body -- still ambiguous, never fabricated.
+    }
+    // The Data API's thumbnails.set response echoes back the set of
+    // thumbnail sizes YouTube now has for the video (items[0].default,
+    // etc.). Any 2xx body is evidence the request was accepted; a
+    // completely empty/unparseable 2xx body is treated as ambiguous
+    // rather than a fabricated success, matching publish()'s own
+    // no-id-in-response handling.
+    if (!json) {
+      return {
+        status: PUBLICATION_RESULT_STATUS.AMBIGUOUS,
+        provider: this.id,
+        reconciliationInfo: { phase: 'THUMBNAIL_UPLOAD', note: 'no_body_in_2xx_response' }
+      };
+    }
+
+    return {
+      status: PUBLICATION_RESULT_STATUS.SUCCESS,
+      provider: this.id,
+      raw: json
+    };
+  }
+
   // --- Internal helpers (all YouTube-specific; never referenced outside this file) ---
 
   async _getAccessToken() {
