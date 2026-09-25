@@ -8,6 +8,7 @@ import { assertExternalActionAllowed, SideEffectDeniedError } from '../state/Sid
 import { canTransition, transition } from '../state/ContentStateMachine.js';
 import { verifyGate2Pass } from '../compliance/verify.js';
 import { Gate2PolicyLoadError } from '../compliance/policy.js';
+import { InvalidPublicationMetadataError } from './metadataValidation.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
 import { isQuarantined, recordFailedAttempt, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
@@ -287,10 +288,29 @@ export async function runPublication({
   // between here and the provider result is itself detectable as an
   // interrupted attempt on the next run (step 3 above), rather than
   // leaving no trace at all that an external call may have been made. ---
-  const request = buildPublicationRequest({
-    contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt,
-    requestedVisibility: grant.requestedVisibility
-  });
+  // Phase 2A: buildPublicationRequest() normalizes title/description
+  // (./metadataValidation.js) and throws InvalidPublicationMetadataError
+  // for metadata that is fundamentally invalid (missing/empty/wrong
+  // type) rather than merely over a length limit. That is a structural
+  // precondition failure, same as every other precondition check above
+  // (eligibility, lifecycle state, Gate 2) -- it fails clearly via the
+  // existing STRUCTURAL_FAILURE outcome/decision-log contract, before
+  // any PENDING row is claimed and before the adapter is ever reached,
+  // rather than inventing replacement metadata.
+  let request;
+  try {
+    request = buildPublicationRequest({
+      contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt,
+      requestedVisibility: grant.requestedVisibility
+    });
+  } catch (err) {
+    if (!(err instanceof InvalidPublicationMetadataError)) throw err;
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE, reason: err.message
+    }, nowISO);
+    return { outcome: OUTCOME.STRUCTURAL_FAILURE, reason: err.message, publication: null };
+  }
   const requestJson = JSON.stringify(request);
 
   // Performs the claim attempt (race re-check + INSERT) inside a single
