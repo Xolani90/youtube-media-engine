@@ -55,14 +55,17 @@ export class GdeltSearchProvider extends ResearchSourceProvider {
    * @param {object} [opts]
    * @param {typeof fetch} [opts.fetchImpl] - injectable for tests; defaults to global fetch.
    * @param {string} [opts.baseUrl] - defaults to GDELT's documented DOC 2.0 endpoint; overridable for tests.
+   * @param {number} [opts.timeoutMs] - request timeout in ms; matches retrieval.js's own default of 10000. GDELT gives no bounded-latency guarantee, so an unbounded request could hang the research stage indefinitely; this aborts and fails closed instead.
    */
   constructor({
     fetchImpl = fetch,
-    baseUrl = 'https://api.gdeltproject.org/api/v2/doc/doc'
+    baseUrl = 'https://api.gdeltproject.org/api/v2/doc/doc',
+    timeoutMs = 10000
   } = {}) {
     super();
     this._fetch = fetchImpl;
     this._baseUrl = baseUrl;
+    this._timeoutMs = timeoutMs;
   }
 
   get id() {
@@ -96,11 +99,17 @@ export class GdeltSearchProvider extends ResearchSourceProvider {
     url.searchParams.set('maxrecords', String(boundedMaxResults));
 
     let res;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this._timeoutMs);
     try {
-      res = await this._fetch(url.toString());
+      res = await this._fetch(url.toString(), { signal: controller.signal });
     } catch (err) {
-      // Network-level failure reaching GDELT.
+      // Network-level failure reaching GDELT, including a timeout-triggered
+      // abort (surfaces as an AbortError here, handled the same as any
+      // other network failure).
       return { candidates: [], failures: [{ error: `network error contacting GDELT: ${err.message}` }] };
+    } finally {
+      clearTimeout(timer);
     }
 
     if (!res.ok) {

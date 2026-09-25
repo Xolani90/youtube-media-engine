@@ -150,6 +150,45 @@ test('network failure: fails closed, does not throw', async () => {
   assert.match(result.failures[0].error, /network error/);
 });
 
+test('passes an AbortSignal to fetchImpl', async () => {
+  let receivedInit;
+  const fetchImpl = async (url, init) => { receivedInit = init; return jsonResponse(200, { articles: [] }); };
+  const provider = new GdeltSearchProvider({ fetchImpl });
+
+  await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.ok(receivedInit && receivedInit.signal instanceof AbortSignal);
+});
+
+test('a hung request is aborted after timeoutMs and fails closed rather than hanging', async () => {
+  const fetchImpl = (url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('The operation was aborted')));
+  });
+  const provider = new GdeltSearchProvider({ fetchImpl, timeoutMs: 10 });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.deepEqual(result.candidates, []);
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0].error, /network error/);
+});
+
+test('timeout failure is converted into the existing failure result, not thrown', async () => {
+  const fetchImpl = (url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('aborted')));
+  });
+  const provider = new GdeltSearchProvider({ fetchImpl, timeoutMs: 10 });
+
+  await assert.doesNotReject(provider.discoverCandidates({ query: 'q', maxResults: 5 }));
+});
+
+test('a normal successful request is not incorrectly aborted', async () => {
+  const fetchImpl = async () => jsonResponse(200, { articles: [{ url: 'https://example.com/a', title: 'A' }] });
+  const provider = new GdeltSearchProvider({ fetchImpl, timeoutMs: 10000 });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.equal(result.failures.length, 0);
+  assert.equal(result.candidates.length, 1);
+});
+
 test('no API key is required anywhere (unauthenticated endpoint, network fully mocked in tests)', () => {
   // Structural guard: every test above supplies an injected fetchImpl and
   // no test reads or requires any environment credential.
