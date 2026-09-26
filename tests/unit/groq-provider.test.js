@@ -199,6 +199,46 @@ test('complete(): the 429 retry delay is derived from a present Retry-After head
   assert.deepEqual(sleepCalls, [3000], 'Retry-After: 3 must produce a 3000ms delay, derived from the header');
 });
 
+test('complete(): a Retry-After below the cap is preserved unchanged', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    if (fetchCalls === 1) {
+      return jsonResponse(429, { error: 'rate_limit_exceeded' }, { 'retry-after': '5' });
+    }
+    return jsonResponse(200, { choices: [{ message: { content: 'ok' } }], usage: {} });
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  await provider.complete({ prompt: 'hi' });
+
+  assert.deepEqual(sleepCalls, [5000], 'a Retry-After of 5s (5000ms), below the cap, must be used as-is');
+});
+
+test('complete(): a Retry-After above the cap is reduced to the cap, not honored verbatim', async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls++;
+    // 617s, matching the magnitude of Retry-After values observed in the
+    // live run that motivated this cap -- far above any reasonable ceiling.
+    if (fetchCalls === 1) {
+      return jsonResponse(429, { error: 'rate_limit_exceeded' }, { 'retry-after': '617' });
+    }
+    return jsonResponse(200, { choices: [{ message: { content: 'ok' } }], usage: {} });
+  };
+  const sleepCalls = [];
+  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+
+  await provider.complete({ prompt: 'hi' });
+
+  assert.equal(sleepCalls.length, 1);
+  assert.ok(sleepCalls[0] < 617000, 'the 617s Retry-After must be reduced, not honored verbatim');
+  assert.ok(sleepCalls[0] > 0, 'the capped delay must still be a real, positive wait');
+});
+
 test('complete(): a 429 with no Retry-After header falls back to the fixed bounded delay (M3-B)', async () => {
   let fetchCalls = 0;
   const fetchImpl = async () => {

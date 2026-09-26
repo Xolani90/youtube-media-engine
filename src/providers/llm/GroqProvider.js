@@ -51,6 +51,19 @@ const FALLBACK_RETRY_DELAY_MS = 2000;
 // exactly like any other fetch failure.
 const LLM_REQUEST_TIMEOUT_MS = 30000;
 
+// Owner-authorized hard ceiling on the 429 retry sleep (see the Owner
+// authorization following the read-only Groq-429-bottleneck audit). Groq's
+// own Retry-After has been observed as large as ~2,551,015ms in a live run,
+// with no upstream mechanism able to interrupt that sleep once entered --
+// this is the fix for exactly that. Deliberately reuses the already-
+// established LLM_REQUEST_TIMEOUT_MS budget rather than introducing a new,
+// unrelated magic number: a single 429 retry should never be allowed to
+// sleep longer than we already accept for one full request attempt. This
+// caps the SLEEP only -- MAX_ATTEMPTS_ON_429, the FALLBACK_RETRY_DELAY_MS
+// used when Retry-After is absent/unparseable, and the per-attempt
+// LLM_REQUEST_TIMEOUT_MS itself are all unchanged.
+const MAX_429_RETRY_DELAY_MS = LLM_REQUEST_TIMEOUT_MS;
+
 /**
  * Parses Retry-After's numeric-seconds form (the form Groq is documented
  * to return, e.g. "3"). The HTTP-date form is intentionally not handled --
@@ -138,8 +151,11 @@ async function buildGroqRequestError(res) {
  *
  * A 429 specifically is retried once (see MAX_ATTEMPTS_ON_429), honoring
  * Retry-After when Groq supplies a usable value and otherwise waiting
- * FALLBACK_RETRY_DELAY_MS; every other non-2xx status remains immediately
- * non-retryable. This is transport-layer resilience only: it does not
+ * FALLBACK_RETRY_DELAY_MS -- either way capped at MAX_429_RETRY_DELAY_MS,
+ * so a large Groq-supplied Retry-After can no longer block complete() for
+ * an unbounded, provider-controlled duration; every other non-2xx status
+ * remains immediately non-retryable. This is transport-layer resilience
+ * only: it does not
  * change provider selection (LLMRouter is untouched and never sees a
  * mid-flight retry), request semantics, or the success/error contract
  * shapes documented above.
@@ -226,7 +242,12 @@ export class GroqProvider extends LLMProvider {
       // Same Retry-After parsing and fallback as before this change; only
       // now computed once per 429 response so both branches below (retry
       // sleep, or the exhausted-retry cooldown) can use the same value.
-      const delayMs = parseRetryAfterMs(res.headers?.get?.('retry-after')) ?? FALLBACK_RETRY_DELAY_MS;
+      // Capped at MAX_429_RETRY_DELAY_MS: Groq's own header value is
+      // otherwise honored verbatim and can be arbitrarily large (a live
+      // run observed ~2,551,015ms), which is the specific bottleneck this
+      // cap exists to bound. A delay at or below the cap is unaffected.
+      const uncappedDelayMs = parseRetryAfterMs(res.headers?.get?.('retry-after')) ?? FALLBACK_RETRY_DELAY_MS;
+      const delayMs = Math.min(uncappedDelayMs, MAX_429_RETRY_DELAY_MS);
 
       // Only up to MAX_ATTEMPTS_ON_429 total attempts -- an exhausted 429
       // retry still throws immediately here, exactly as before this
