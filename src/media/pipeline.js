@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS } from './constants.js';
+import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS, SHORT_FORM_RENDER_DEFAULTS } from './constants.js';
 import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets } from './visualTiming.js';
 import { computeVisualSequencing } from './visualSequencing.js';
@@ -12,6 +12,7 @@ import { scriptBodyToNarrationText, ScriptBodyContractError } from './scriptText
 import { renderSilentVideo, muxNarration, writeSrtFile } from './render.js';
 import { validateMediaArtifact } from './validate.js';
 import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
+import { selectShortFormSegment, trimVisualTiming, trimCaptionTiming } from './shortFormSelection.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
 import { config } from '../config/index.js';
 import { traceSync } from '../diagnostics/trace.js';
@@ -351,4 +352,226 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
 
   const mediaArtifact = storage.get('SELECT * FROM media_artifacts WHERE id = ?', [outcome.mediaArtifactId]);
   return { outcome: OUTCOME.RENDERED, mediaArtifact };
+}
+
+/**
+ * Short-form derivative production (v1): renders a bounded-duration,
+ * vertical (1080x1920) derivative of an ALREADY-RENDERED long-form
+ * media_artifacts row. Deliberately thin -- it re-reads the source's
+ * own already-computed render_spec_json (visual_timing/captions/
+ * narration duration) rather than recomputing anything from scratch,
+ * selects a deterministic bounded segment (shortFormSelection.js), and
+ * reuses the same render/mux/validate/artifact functions long-form uses
+ * unmodified, just with different width/height/output-path/duration.
+ *
+ * No LLM, no Whisper, no "viral clip" heuristic -- this is
+ * infrastructure, not content intelligence (see shortFormSelection.js).
+ *
+ * Entry precondition: an existing `media_artifacts` row for the
+ * content_version (long-form must already be rendered). This stage
+ * never transitions content_versions.state, exactly like
+ * runMediaProduction above.
+ *
+ * @param {object} deps
+ * @param {import('../storage/StorageDriver.js').StorageDriver} deps.storage
+ * @param {string} deps.contentBriefId
+ * @param {string} [deps.artifactsDir] - defaults to config.mediaArtifactsDir
+ * @param {string} [deps.runId]
+ */
+export function runShortFormProduction({ storage, contentBriefId, artifactsDir = config.mediaArtifactsDir, runId = null }) {
+  const nowISO = () => new Date().toISOString();
+
+  // Same content_version resolution rule every stage uses independently
+  // (content_briefs -> content_versions is a direct FK; no script/brief
+  // lookup is needed here since this stage reads ONLY the long-form
+  // media_artifacts row, never the script/brief themselves).
+  const contentVersion = storage.get(
+    'SELECT * FROM content_versions WHERE content_brief_id = ?',
+    [contentBriefId]
+  );
+  if (!contentVersion) {
+    logDecision(storage, {
+      runId, subjectType: 'content_brief', subjectId: contentBriefId,
+      decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE, reason: 'CONTENT_VERSION_NOT_FOUND'
+    }, nowISO);
+    return { outcome: OUTCOME.STRUCTURAL_FAILURE, reason: 'CONTENT_VERSION_NOT_FOUND', mediaArtifact: null };
+  }
+
+  const longFormArtifact = storage.get(
+    'SELECT * FROM media_artifacts WHERE content_version_id = ?',
+    [contentVersion.id]
+  );
+  if (!longFormArtifact) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.NOT_YET_PRODUCED, reason: 'LONG_FORM_NOT_YET_RENDERED'
+    }, nowISO);
+    return { outcome: OUTCOME.NOT_YET_PRODUCED, reason: 'LONG_FORM_NOT_YET_RENDERED', mediaArtifact: null };
+  }
+
+  // Idempotency: one short_form_media_artifacts row per content_version
+  // (UNIQUE index, same one-row-per-subject precedent as media_artifacts
+  // itself). Already-rendered -> return the existing record unchanged.
+  const existingShortForm = storage.get(
+    'SELECT * FROM short_form_media_artifacts WHERE content_version_id = ?',
+    [contentVersion.id]
+  );
+  if (existingShortForm) {
+    return { outcome: OUTCOME.ALREADY_RENDERED, mediaArtifact: existingShortForm };
+  }
+
+  // --- Read the source's own already-computed timing; never recompute. ---
+  let sourceRenderSpec;
+  try {
+    sourceRenderSpec = JSON.parse(longFormArtifact.render_spec_json);
+  } catch (err) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE, reason: `source_render_spec_unparseable_${err.message}`
+    }, nowISO);
+    return { outcome: OUTCOME.STRUCTURAL_FAILURE, reason: 'SOURCE_RENDER_SPEC_UNPARSEABLE', mediaArtifact: null };
+  }
+
+  const selection = selectShortFormSegment({
+    visualTiming: sourceRenderSpec.visual_timing,
+    captionTiming: sourceRenderSpec.captions,
+    narrationDurationSeconds: sourceRenderSpec.narration?.duration_seconds,
+    maxDurationSeconds: SHORT_FORM_RENDER_DEFAULTS.MAX_DURATION_SECONDS
+  });
+  if (!selection.selected) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.NO_VALID_SEGMENT, reason: selection.reason
+    }, nowISO);
+    return { outcome: OUTCOME.NO_VALID_SEGMENT, reason: selection.reason, mediaArtifact: null };
+  }
+  const { endSeconds } = selection;
+
+  const shortVisualTiming = trimVisualTiming(sourceRenderSpec.visual_timing, endSeconds);
+  const shortCaptionTiming = trimCaptionTiming(sourceRenderSpec.captions, endSeconds);
+
+  // v1 always trims from 0 -- see shortFormSelection.js's module docstring
+  // for why an arbitrary start offset is out of scope. The FULL narration
+  // audio file is reused unchanged (never re-synthesized, never re-cut):
+  // muxNarration's existing `-shortest` behavior bounds the muxed output
+  // to the (shorter) trimmed visual track for us, exactly as it already
+  // does for long-form.
+  const renderSpec = buildRenderSpec({
+    contentVersion,
+    narrationPath: longFormArtifact.narration_path,
+    narrationDurationSeconds: endSeconds,
+    visualTiming: shortVisualTiming,
+    captions: shortCaptionTiming,
+    width: SHORT_FORM_RENDER_DEFAULTS.WIDTH,
+    height: SHORT_FORM_RENDER_DEFAULTS.HEIGHT,
+    fps: RENDER_DEFAULTS.FPS,
+    outputFormat: RENDER_DEFAULTS.OUTPUT_FORMAT,
+    videoEncoder: RENDER_DEFAULTS.VIDEO_ENCODER,
+    audioEncoder: RENDER_DEFAULTS.AUDIO_ENCODER
+  });
+  const { json: renderSpecJson, checksum: renderSpecChecksumValue } = renderSpecChecksum(renderSpec);
+
+  // Same content_version directory long-form already uses (artifactStore.js
+  // conventions), but a distinct deterministic filename so the two
+  // artifacts never collide.
+  const dir = mediaDir(artifactsDir, contentVersion.id);
+  const silentVideoTmpPath = path.join(dir, `.silent-short.tmp-${process.pid}-${Date.now()}.mp4`);
+  const concatListTmpPath = path.join(dir, `.concat-short.tmp-${process.pid}-${Date.now()}.txt`);
+  const finalVideoTmpPath = path.join(dir, `.video-short.tmp-${process.pid}-${Date.now()}.mp4`);
+  const finalVideoPath = path.join(dir, 'video-short.mp4');
+  const captionsSrtTmpPath = shortCaptionTiming.length > 0
+    ? path.join(dir, `.captions-short.tmp-${process.pid}-${Date.now()}.srt`)
+    : null;
+
+  try {
+    if (captionsSrtTmpPath) {
+      writeSrtFile(shortCaptionTiming, captionsSrtTmpPath);
+    }
+    traceSync('child.ffmpeg.render.short', { segments: shortVisualTiming?.length }, () => renderSilentVideo({
+      visualTiming: shortVisualTiming,
+      width: SHORT_FORM_RENDER_DEFAULTS.WIDTH,
+      height: SHORT_FORM_RENDER_DEFAULTS.HEIGHT,
+      fps: RENDER_DEFAULTS.FPS,
+      videoEncoder: RENDER_DEFAULTS.VIDEO_ENCODER,
+      listPath: concatListTmpPath,
+      outputPath: silentVideoTmpPath,
+      subtitlesPath: captionsSrtTmpPath
+    }));
+    traceSync('child.ffmpeg.mux.short', {}, () => muxNarration({
+      silentVideoPath: silentVideoTmpPath,
+      narrationPath: longFormArtifact.narration_path,
+      audioEncoder: RENDER_DEFAULTS.AUDIO_ENCODER,
+      outputPath: finalVideoTmpPath
+    }));
+  } catch (err) {
+    fs.rmSync(silentVideoTmpPath, { force: true });
+    fs.rmSync(finalVideoTmpPath, { force: true });
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.RENDER_FAILED, reason: `short_form_render_failed_${err.message}`
+    }, nowISO);
+    return { outcome: OUTCOME.RENDER_FAILED, reason: err.message, mediaArtifact: null };
+  } finally {
+    fs.rmSync(silentVideoTmpPath, { force: true });
+    if (captionsSrtTmpPath) fs.rmSync(captionsSrtTmpPath, { force: true });
+  }
+
+  const validation = traceSync('child.ffprobe.validate.short', {}, () => validateMediaArtifact(finalVideoTmpPath, {
+    width: SHORT_FORM_RENDER_DEFAULTS.WIDTH,
+    height: SHORT_FORM_RENDER_DEFAULTS.HEIGHT,
+    videoCodecName: RENDER_DEFAULTS.VIDEO_CODEC_NAME,
+    audioCodecName: RENDER_DEFAULTS.AUDIO_CODEC_NAME
+  }));
+  if (!validation.valid) {
+    fs.rmSync(finalVideoTmpPath, { force: true });
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.VALIDATION_FAILED, reason: `short_form_validation_failed_${validation.reason}`
+    }, nowISO);
+    return { outcome: OUTCOME.VALIDATION_FAILED, reason: validation.reason, mediaArtifact: null };
+  }
+
+  finalizeArtifact(finalVideoTmpPath, finalVideoPath);
+  const artifactChecksum = sha256File(finalVideoPath);
+
+  const outcome = storage.transaction(() => {
+    // Same race-safety discipline as runMediaProduction above.
+    const raceExisting = storage.get('SELECT * FROM short_form_media_artifacts WHERE content_version_id = ?', [contentVersion.id]);
+    if (raceExisting) {
+      return { raced: true };
+    }
+    const stillLongForm = storage.get('SELECT * FROM media_artifacts WHERE id = ?', [longFormArtifact.id]);
+    if (!stillLongForm) {
+      throw new Error(`media_artifacts row ${longFormArtifact.id} no longer exists; refusing to persist short-form result.`);
+    }
+
+    const shortFormId = crypto.randomUUID();
+    storage.run(
+      `INSERT INTO short_form_media_artifacts
+        (id, media_artifact_id, content_version_id, segment_start_seconds, segment_end_seconds,
+         render_spec_json, render_spec_checksum, artifact_path, artifact_checksum,
+         duration_seconds, width, height, video_codec, audio_codec, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        shortFormId, longFormArtifact.id, contentVersion.id, 0, endSeconds,
+        renderSpecJson, renderSpecChecksumValue, finalVideoPath, artifactChecksum,
+        validation.duration, validation.width, validation.height, validation.videoCodec, validation.audioCodec,
+        nowISO()
+      ]
+    );
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.RENDERED, reason: `short_form_media_artifact_persisted_${shortFormId}`
+    }, nowISO);
+
+    return { shortFormId };
+  });
+
+  if (outcome.raced) {
+    const existing = storage.get('SELECT * FROM short_form_media_artifacts WHERE content_version_id = ?', [contentVersion.id]);
+    return { outcome: OUTCOME.ALREADY_RENDERED, mediaArtifact: existing ?? null };
+  }
+
+  const shortFormArtifact = storage.get('SELECT * FROM short_form_media_artifacts WHERE id = ?', [outcome.shortFormId]);
+  return { outcome: OUTCOME.RENDERED, mediaArtifact: shortFormArtifact };
 }

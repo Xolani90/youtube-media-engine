@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PUBLICATION_STAGE, PUBLICATION_STATUS, PUBLICATION_RESULT_STATUS, OUTCOME, DECISION_LOG_DECISION, THUMBNAIL_STATUS, publicationActionId, VISIBILITY_MISMATCH_FAILURE_REASON, REQUESTED_VISIBILITY_PUBLIC } from './constants.js';
+import { PUBLICATION_STAGE, PUBLICATION_STATUS, PUBLICATION_RESULT_STATUS, OUTCOME, DECISION_LOG_DECISION, THUMBNAIL_STATUS, publicationActionId, VISIBILITY_MISMATCH_FAILURE_REASON, REQUESTED_VISIBILITY_PUBLIC, publicationTargetForProvider } from './constants.js';
 import { generateThumbnail } from '../media/thumbnail.js';
 import { finalizeArtifact, sha256File } from '../media/artifactStore.js';
 import { resolveMediaForPublication } from './eligibility.js';
@@ -237,8 +237,13 @@ export async function runPublication({
   const nowISO = () => new Date().toISOString();
 
   // --- 1. Eligibility: resolve Script/content_brief + the Media
-  // Production artifact. ---
-  const eligibility = resolveMediaForPublication(storage, contentBriefId);
+  // Production artifact. Short-form derivative production (provider =
+  // 'youtube_shorts') resolves the short-form artifact instead of the
+  // long-form one -- see ./constants.js#publicationTargetForProvider
+  // and ../media/eligibility.js's `target` param. Every other provider
+  // is unaffected (defaults to 'LONGFORM', unchanged behavior). ---
+  const target = publicationTargetForProvider(provider);
+  const eligibility = resolveMediaForPublication(storage, contentBriefId, { target });
   if (!eligibility.eligible) {
     const decision = eligibility.reason === 'NOT_YET_RENDERED'
       ? DECISION_LOG_DECISION.NOT_YET_RENDERED

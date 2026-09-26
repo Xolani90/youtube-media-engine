@@ -135,3 +135,18 @@ export const VISIBILITY_MISMATCH_FAILURE_REASON = 'VISIBILITY_MISMATCH';
 
 // Visibility values the YouTube adapter supports (ADR-0030 open item 3).
 export const REQUESTED_VISIBILITY_PUBLIC = 'public';
+
+// Short-form derivative production: which media artifact target a given
+// provider id publishes. Every provider not listed here publishes the
+// long-form (default) artifact -- this map only needs an entry for a
+// provider that publishes the SHORT_FORM derivative instead (see
+// ../media/eligibility.js's `target` param and providerRegistry.js's
+// `youtube_shorts` entry, the only such provider at implementation
+// time).
+export const PUBLICATION_TARGET_BY_PROVIDER = Object.freeze({
+  youtube_shorts: 'SHORT_FORM'
+});
+
+export function publicationTargetForProvider(provider) {
+  return PUBLICATION_TARGET_BY_PROVIDER[provider] ?? 'LONGFORM';
+}

@@ -29,7 +29,12 @@ export const OUTCOME = Object.freeze({
   VALIDATION_FAILED: 'VALIDATION_FAILED',
   ALREADY_RENDERED: 'ALREADY_RENDERED',
   QUARANTINED: 'QUARANTINED',
-  RENDERED: 'RENDERED'
+  RENDERED: 'RENDERED',
+  // Short-form derivative production only: no valid bounded segment
+  // exists within SHORT_FORM_RENDER_DEFAULTS.MAX_DURATION_SECONDS (e.g.
+  // the source's very first caption/visual segment already exceeds the
+  // cap) -- see shortFormSelection.js. Fails safely; never invented.
+  NO_VALID_SEGMENT: 'NO_VALID_SEGMENT'
 });
 
 export const DECISION_LOG_DECISION = Object.freeze({
@@ -41,7 +46,8 @@ export const DECISION_LOG_DECISION = Object.freeze({
   NARRATION_FAILED: 'NARRATION_FAILED',
   RENDER_FAILED: 'RENDER_FAILED',
   VALIDATION_FAILED: 'VALIDATION_FAILED',
-  RENDERED: 'RENDERED'
+  RENDERED: 'RENDERED',
+  NO_VALID_SEGMENT: 'NO_VALID_SEGMENT'
 });
 
 // Asset types the renderer will display as a visual frame. Deliberately
@@ -105,4 +111,19 @@ export const CAPTION_DEFAULTS = Object.freeze({
 // a local heuristic threshold, not derived from any external source.
 export const SEQUENCING_DEFAULTS = Object.freeze({
   MIN_VISUAL_DURATION_SECONDS: 1.5
+});
+
+// Short-form derivative production (v1): a bounded-duration, vertical
+// derivative rendered FROM an already-rendered long-form media_artifacts
+// row (see pipeline.js#runShortFormProduction and shortFormSelection.js).
+// 1080x1920 is the conventional TikTok/Reels/Shorts portrait frame.
+// MAX_DURATION_SECONDS is deliberately conservative for this first
+// implementation -- comfortably inside every major short-form platform's
+// duration ceiling, not tuned to any one platform's exact maximum.
+// Reuses RENDER_DEFAULTS' fps/encoder/codec settings unchanged (only
+// width/height/duration cap differ for this derivative).
+export const SHORT_FORM_RENDER_DEFAULTS = Object.freeze({
+  WIDTH: 1080,
+  HEIGHT: 1920,
+  MAX_DURATION_SECONDS: 60
 });
