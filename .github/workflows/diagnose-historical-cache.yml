@@ -26,7 +26,7 @@ jobs:
         id: restore
         uses: actions/cache/restore@v4
         with:
-          path: data/media-engine.db
+          path: ${{ github.workspace }}/data/media-engine.db
           key: media-engine-sqlite-36226763460-1
           fail-on-cache-miss: true
 
