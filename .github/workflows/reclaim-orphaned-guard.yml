@@ -163,3 +163,5 @@ jobs:
         with:
           path: ${{ env.SQLITE_PATH }}
           key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
