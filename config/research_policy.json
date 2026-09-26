@@ -43,5 +43,8 @@
   },
   "completeness": {
     "overall_resolution_threshold": 0.7
+  },
+  "contradiction": {
+    "max_eligible_claims": 8
   }
 }

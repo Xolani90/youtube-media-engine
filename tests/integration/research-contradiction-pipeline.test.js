@@ -220,6 +220,78 @@ test('eligibility: a non-load-bearing FACT claim is excluded from the pair set (
   cleanup(storage, dbPath);
 });
 
+class NSourceProvider extends ResearchSourceProvider {
+  constructor(urls) {
+    super();
+    this.urls = urls;
+  }
+  get id() { return 'n-source-stub'; }
+  async healthCheck() { return true; }
+  async discoverCandidates() {
+    return { candidates: this.urls.map((url, i) => ({ url, title: `t${i}`, snippet: 's' })) };
+  }
+}
+
+test('contradiction workload ceiling: >8 eligible claims are capped before the pairwise loop (no full C(N,2))', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const opportunityId = seedHandedOffOpportunity(storage);
+
+  // 5 sources * 2 distinct FACT/load-bearing claims each = 10 eligible
+  // claims, i.e. more than the policy's max_eligible_claims (8) and more
+  // than research_policy.json's own max_sources_per_research_project (8),
+  // so the cap here must come from bounding claims-per-project, not from
+  // the acquisition budget capping sources.
+  const urls = Array.from({ length: 5 }, (_, i) => `https://acme.com/s${i}`);
+  const provider = new NSourceProvider(urls);
+  const payloads = Array.from({ length: 5 }, (_, i) => ([
+    { claim: `Fact ${i}a happened.`, claim_type: 'FACT', is_load_bearing: true },
+    { claim: `Fact ${i}b happened.`, claim_type: 'FACT', is_load_bearing: true }
+  ]));
+  const llmRouter = sequentialClaimRouter(payloads);
+
+  let detectorCalls = 0;
+  const result = await runResearchProject({
+    storage, opportunityId, sourceProvider: provider, llmRouter,
+    policy: researchPolicy,
+    classification: { authoritativeDomains: ['acme.com'] },
+    fetchImpl: fakeFetch({}),
+    detectContradiction: async () => { detectorCalls += 1; return CONTRADICTION_RESULT.NO_CONTRADICTION; }
+  });
+
+  assert.equal(result.claims.length, 10);
+  assert.ok(detectorCalls <= 28, `expected at most C(8,2)=28 detector calls, got ${detectorCalls}`);
+  assert.notEqual(detectorCalls, 45, 'must not run the full uncapped C(10,2)=45 pairwise check');
+  cleanup(storage, dbPath);
+});
+
+test('contradiction workload ceiling: policy field absent falls back to the safe default of 8', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const opportunityId = seedHandedOffOpportunity(storage);
+
+  const urls = Array.from({ length: 5 }, (_, i) => `https://acme.com/d${i}`);
+  const provider = new NSourceProvider(urls);
+  const payloads = Array.from({ length: 5 }, (_, i) => ([
+    { claim: `Default fact ${i}a happened.`, claim_type: 'FACT', is_load_bearing: true },
+    { claim: `Default fact ${i}b happened.`, claim_type: 'FACT', is_load_bearing: true }
+  ]));
+  const llmRouter = sequentialClaimRouter(payloads);
+  const { contradiction, ...policyWithoutContradiction } = researchPolicy;
+
+  let detectorCalls = 0;
+  await runResearchProject({
+    storage, opportunityId, sourceProvider: provider, llmRouter,
+    policy: policyWithoutContradiction,
+    classification: { authoritativeDomains: ['acme.com'] },
+    fetchImpl: fakeFetch({}),
+    detectContradiction: async () => { detectorCalls += 1; return CONTRADICTION_RESULT.NO_CONTRADICTION; }
+  });
+
+  assert.ok(detectorCalls <= 28, `expected default cap of 8 -> at most 28 calls, got ${detectorCalls}`);
+  cleanup(storage, dbPath);
+});
+
 test('eligibility: INFERENCE and OPINION claims are excluded even when load-bearing', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();

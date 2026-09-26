@@ -261,7 +261,15 @@ export async function runResearchProject({
       decision: CONTRADICTION_EXECUTION_STATE.NOT_CHECKED, reason: 'detector_not_configured'
     });
   } else {
-    const eligibleClaims = persistedClaims.filter((c) => c.claim_type === CLAIM_TYPE.FACT && c.is_load_bearing);
+    const allEligibleClaims = persistedClaims.filter((c) => c.claim_type === CLAIM_TYPE.FACT && c.is_load_bearing);
+    // Workload ceiling (post-eligibility): bounds the exhaustive pairwise
+    // loop below to at most C(maxEligibleClaims, 2) detector calls per
+    // project, preventing the combinatorial blowup seen with large
+    // eligible sets (e.g. 18 claims -> 153 calls) from exhausting both
+    // free LLM providers' quotas in one project. Uses the existing
+    // deterministic extraction order (no new ranking/scoring logic).
+    const maxEligibleClaims = policy?.contradiction?.max_eligible_claims ?? 8;
+    const eligibleClaims = allEligibleClaims.slice(0, maxEligibleClaims);
     if (eligibleClaims.length < 2) {
       logDecision(storage, {
         runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
