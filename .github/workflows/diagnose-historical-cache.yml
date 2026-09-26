@@ -1,5 +1,8 @@
 name: diagnose-historical-cache
 on:
+  push:
+    branches:
+      - diagnostic/historical-cache-36226763460
   workflow_dispatch: {}
 
 jobs:
