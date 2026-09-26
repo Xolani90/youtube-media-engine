@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { SqliteStorageDriver } from '../../src/storage/SqliteStorageDriver.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
 import { createBrief } from '../../src/brief/pipeline.js';
+import { setTraceSink } from '../../src/diagnostics/trace.js';
 import briefPolicy from '../../config/brief_policy.json' with { type: 'json' };
 
 function freshStorage() {
@@ -137,6 +138,51 @@ test('AC4: zero eligible key claims -> rejected, no Brief row created (D10)', as
   assert.equal(storage.all('SELECT * FROM content_briefs WHERE research_project_id = ?', [researchProjectId]).length, 0);
 
   cleanup(storage, dbPath);
+});
+
+test('diagnostic trace: each deterministic pre-generation rejection emits a brief.rejected trace event with gate/reason (observability-only)', async () => {
+  const lines = [];
+  const previousSink = setTraceSink((line) => lines.push(line));
+  const previousEnv = process.env.DIAGNOSTIC_TRACE;
+  process.env.DIAGNOSTIC_TRACE = 'true';
+
+  try {
+    // Gate: RESEARCH_ELIGIBILITY
+    {
+      const { storage, dbPath } = freshStorage();
+      await storage.migrate();
+      const { researchProjectId } = seedResearchProject(storage, { status: 'INSUFFICIENT_EVIDENCE' });
+      const router = routerReturning('should never be called');
+      const result = await createBrief({ storage, researchProjectId, llmRouter: router, policy: briefPolicy });
+      assert.equal(result.rejected, true);
+      const line = lines.find((l) => l.includes('brief.rejected') && l.includes(researchProjectId));
+      assert.ok(line, 'expected a brief.rejected trace event for the RESEARCH_ELIGIBILITY gate');
+      assert.match(line, /gate=RESEARCH_ELIGIBILITY/);
+      assert.match(line, /reason=INELIGIBLE_RESEARCH_STATUS_INSUFFICIENT_EVIDENCE/);
+      cleanup(storage, dbPath);
+    }
+
+    // Gate: KEY_CLAIMS
+    {
+      const { storage, dbPath } = freshStorage();
+      await storage.migrate();
+      const { researchProjectId } = seedResearchProject(storage);
+      insertClaim(storage, researchProjectId, { claim: 'Opinion only.', claimType: 'OPINION' });
+      const router = routerReturning('should never be called');
+      const result = await createBrief({ storage, researchProjectId, llmRouter: router, policy: briefPolicy });
+      assert.equal(result.rejected, true);
+      const line = lines.find((l) => l.includes('brief.rejected') && l.includes(researchProjectId));
+      assert.ok(line, 'expected a brief.rejected trace event for the KEY_CLAIMS gate');
+      assert.match(line, /gate=KEY_CLAIMS/);
+      assert.match(line, /reason=NO_ELIGIBLE_KEY_CLAIMS/);
+      assert.match(line, /eligibleClaims=0/);
+      cleanup(storage, dbPath);
+    }
+  } finally {
+    if (previousEnv === undefined) delete process.env.DIAGNOSTIC_TRACE;
+    else process.env.DIAGNOSTIC_TRACE = previousEnv;
+    setTraceSink(previousSink);
+  }
 });
 
 test('AC5: an LLM-proposed invalid/unknown claim id is never persisted -> bounded retry then rejection (D9)', async () => {

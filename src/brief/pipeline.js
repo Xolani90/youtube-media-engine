@@ -6,6 +6,7 @@ import { selectEligibleKeyClaims, validateKeyClaimIds } from './claims.js';
 import { generateBriefFields, validateGeneratedBrief } from './generate.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
 import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, FAILURE_NATURE, RETRY_STAGE } from '../state/StageRetryPolicy.js';
+import { traceEvent } from '../diagnostics/trace.js';
 
 /**
  * Records a decision_log entry, same shape/discipline as Research's and
@@ -86,6 +87,9 @@ export async function createBrief({ storage, researchProjectId, llmRouter, polic
       runId, stage: BRIEF_STAGE.ELIGIBILITY_CHECK, subjectType: 'research_project',
       subjectId: researchProjectId, decision: 'REJECTED', reason: eligibility.reason
     });
+    traceEvent('brief.rejected', {
+      researchProjectId, gate: 'RESEARCH_ELIGIBILITY', reason: eligibility.reason
+    });
     return { rejected: true, reason: eligibility.reason, created: false, regenerated: false };
   }
   logDecision(storage, {
@@ -99,6 +103,9 @@ export async function createBrief({ storage, researchProjectId, llmRouter, polic
     logDecision(storage, {
       runId, stage: BRIEF_STAGE.CORE_QUESTION_RESOLUTION, subjectType: 'research_project',
       subjectId: researchProjectId, decision: 'REJECTED', reason: coreQuestionResult.reason
+    });
+    traceEvent('brief.rejected', {
+      researchProjectId, gate: 'CORE_QUESTION', reason: coreQuestionResult.reason
     });
     return { rejected: true, reason: coreQuestionResult.reason, created: false, regenerated: false };
   }
@@ -114,6 +121,9 @@ export async function createBrief({ storage, researchProjectId, llmRouter, polic
     logDecision(storage, {
       runId, stage: BRIEF_STAGE.KEY_CLAIM_ELIGIBILITY, subjectType: 'research_project',
       subjectId: researchProjectId, decision: 'REJECTED', reason: 'NO_ELIGIBLE_KEY_CLAIMS'
+    });
+    traceEvent('brief.rejected', {
+      researchProjectId, gate: 'KEY_CLAIMS', reason: 'NO_ELIGIBLE_KEY_CLAIMS', eligibleClaims: eligibleClaims.length
     });
     return { rejected: true, reason: 'NO_ELIGIBLE_KEY_CLAIMS', created: false, regenerated: false };
   }
