@@ -407,7 +407,7 @@ test('pacing: does not interfere with the existing 429 retry -- retry delay and 
   assert.equal(second.text, 'Retried successfully.');
 });
 
-test('complete(): a request that never resolves is aborted after LLM_REQUEST_TIMEOUT_MS, rejecting instead of hanging forever', async (t) => {
+test('complete(): a request that never resolves is aborted after GEMINI_REQUEST_TIMEOUT_MS (60s), rejecting instead of hanging forever', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
 
   let capturedSignal;
@@ -430,10 +430,50 @@ test('complete(): a request that never resolves is aborted after LLM_REQUEST_TIM
   // this test is about is even registered.
   await Promise.resolve();
   await Promise.resolve();
+
+  // A genuinely hung request must NOT have been aborted yet at the old
+  // 30-second mark -- this is the exact production failure (run
+  // 36219518358) this fix corrects: a still-working Gemini call was killed
+  // at 30s. It must still be pending here.
   t.mock.timers.tick(30000);
+  assert.equal(capturedSignal.aborted, false, 'must not abort at the old 30s timeout -- a legitimate request may still be in flight');
+
+  // ...but a request that never resolves is still bounded: it must be
+  // aborted once the full, larger timeout elapses.
+  t.mock.timers.tick(30000); // total elapsed: 60000ms
   await pending;
 
-  assert.equal(capturedSignal.aborted, true, 'the request signal must be aborted once the timeout elapses');
+  assert.equal(capturedSignal.aborted, true, 'the request signal must be aborted once GEMINI_REQUEST_TIMEOUT_MS elapses');
+});
+
+test('complete(): a request that resolves after the old 30s timeout, but before the new 60s ceiling, completes successfully without being aborted', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  let capturedSignal;
+  let resolveFetch;
+  const fetchImpl = (url, init) => {
+    capturedSignal = init.signal;
+    return new Promise((resolve) => { resolveFetch = resolve; });
+  };
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  const pending = provider.complete({ prompt: 'hi' });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // Simulate a legitimate, slower Gemini response -- e.g. the ~8888-char
+  // research claim-extraction prompt from run 36219518358 -- that takes
+  // 45s, past the old 30s timeout but under the new 60s ceiling.
+  t.mock.timers.tick(45000);
+  assert.equal(capturedSignal.aborted, false, 'a legitimate 45s response must not have been aborted by the old 30s timeout');
+
+  resolveFetch(jsonResponse(200, {
+    candidates: [{ content: { parts: [{ text: 'Completed after 45s.' }] } }]
+  }));
+
+  const result = await pending;
+  assert.equal(result.text, 'Completed after 45s.');
+  assert.equal(capturedSignal.aborted, false, 'a request that completed within the new timeout must never be aborted');
 });
 
 // --- Phase 1: provider cooldown / health-memory ---

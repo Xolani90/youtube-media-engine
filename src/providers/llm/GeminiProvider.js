@@ -30,11 +30,24 @@ const FALLBACK_RETRY_DELAY_MS = 2000;
 // can't block complete() -- and therefore the sequential callers above it
 // (e.g. Research claim extraction) and LLMRouter's failover -- forever.
 // Applied per attempt (each 429 retry gets its own fresh timeout), same
-// AbortController pattern already used by retrieveSource()/RssSource.js,
-// just with a larger budget appropriate for a text-generation completion
-// rather than a plain page fetch. Not a retry: a timeout still throws,
-// exactly like any other fetch failure.
-const LLM_REQUEST_TIMEOUT_MS = 30000;
+// AbortController pattern already used by retrieveSource()/RssSource.js
+// and by GroqProvider.js. Not a retry: a timeout still throws, exactly
+// like any other fetch failure.
+//
+// Provider-specific, not shared with GroqProvider.js's own identically-
+// named-in-spirit constant (each provider module defines its own copy).
+// Originally 30000ms, matching Groq's budget. GitHub Actions run
+// 36219518358 showed a legitimate Gemini claim-extraction call
+// (promptChars=8888, during Research's Groq-cooldown -> Gemini-fallback
+// path) aborted at exactly that 30s mark with no non-2xx response ever
+// received -- i.e. Gemini was still working, not hung, when the timeout
+// fired. Raised to 60000ms so a real, larger research prompt has room to
+// complete; a request that is genuinely hung is still bounded, just at a
+// larger, explicit ceiling. This does not touch GroqProvider.js's own
+// constant/behavior (its MAX_429_RETRY_DELAY_MS is untouched) and does not
+// change Gemini's 429 retry count, retry-delay sourcing, or cooldown logic
+// below.
+const GEMINI_REQUEST_TIMEOUT_MS = 60000;
 
 // Provider-local pacing floor, added after a real GitHub Actions run hit
 // Gemini's confirmed free-tier limit of 15 requests/minute for
@@ -259,7 +272,7 @@ export class GeminiProvider extends LLMProvider {
     let res;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_ON_429; attempt++) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
+      const timer = setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
       try {
         res = await traceAsync('llm.http.request', { provider: 'gemini-free', model: this._model, attempt }, () => this._fetch(url, {
           method: 'POST',
