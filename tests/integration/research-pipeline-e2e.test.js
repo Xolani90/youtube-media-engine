@@ -172,6 +172,74 @@ test('zero load-bearing claims extracted -> INSUFFICIENT_EVIDENCE', async () => 
   cleanup(storage, dbPath);
 });
 
+// --- Stopping-condition contract (Owner decision: max_acquisition_attempts
+// is a safety/resource ceiling, not evidence acquisition completed) ---
+
+test('STOPPING CONDITION: source cap reached with candidates remaining still reaches RESEARCH_COMPLETE', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const opportunityId = seedHandedOffOpportunity(storage, { coreQuestionType: 'FACTUAL' });
+
+  // 3 candidates offered, but the source cap is 1 — acquisition stops after
+  // the first, with 2 candidates never visited. This must still count as a
+  // legitimate stop (the source cap was reached), independent of
+  // candidatesExhausted being false.
+  const urls = ['https://acme.com/a', 'https://acme.com/b', 'https://acme.com/c'];
+  const provider = new SingleSourceProvider(urls);
+  const llmRouter = claimRouter([{ claim: 'Acme reported $1B in Q3 revenue.', claim_type: 'FACT', is_load_bearing: true }]);
+  const policy = { ...researchPolicy, acquisition: { ...researchPolicy.acquisition, max_sources_per_research_project: 1 } };
+
+  const result = await runResearchProject({
+    storage, opportunityId, sourceProvider: provider, llmRouter, policy,
+    classification: { authoritativeDomains: ['acme.com'] },
+    fetchImpl: fakeFetch({ [urls[0]]: '<html><body>Acme reported one billion dollars in Q3 revenue.</body></html>' })
+  });
+
+  assert.equal(result.project.status, 'RESEARCH_COMPLETE');
+  assert.equal(result.stopReason, 'COMPLETENESS_CRITERIA_MET');
+  assert.equal(result.sources.length, 1, 'acquisition must have stopped at the source cap, not visited the other 2 candidates');
+
+  cleanup(storage, dbPath);
+});
+
+test('STOPPING CONDITION: max_acquisition_attempts reached with candidates remaining and source cap not reached does NOT reach RESEARCH_COMPLETE', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const opportunityId = seedHandedOffOpportunity(storage, { coreQuestionType: 'FACTUAL' });
+
+  // 5 candidates offered, source cap is a generous 8 (never reached). The
+  // first candidate succeeds (1 attempt) producing a VERIFIED load-bearing
+  // FACT claim, satisfying every other completeness requirement on its
+  // own. The second candidate then fails every retry (3 attempts: 1 +
+  // max_retries_per_source=2), bringing attemptsUsed to 4 — exactly
+  // max_acquisition_attempts. The loop then breaks with 3 of the 5
+  // candidates never visited: candidatesExhausted=false, source cap not
+  // reached. This must NOT be treated as a legitimate stop.
+  const urls = ['https://acme.com/a', 'https://acme.com/b', 'https://acme.com/c', 'https://acme.com/d', 'https://acme.com/e'];
+  const provider = new SingleSourceProvider(urls);
+  const llmRouter = claimRouter([{ claim: 'Acme reported $1B in Q3 revenue.', claim_type: 'FACT', is_load_bearing: true }]);
+  const policy = { ...researchPolicy, acquisition: { ...researchPolicy.acquisition, max_acquisition_attempts: 4 } };
+
+  const fetchImpl = async (url) => {
+    if (url === urls[0]) {
+      return { ok: true, status: 200, headers: { get: () => 'text/html' }, text: async () => '<html><body>Acme reported one billion dollars in Q3 revenue.</body></html>' };
+    }
+    return { ok: false, status: 500, headers: { get: () => 'text/html' }, text: async () => '' };
+  };
+
+  const result = await runResearchProject({
+    storage, opportunityId, sourceProvider: provider, llmRouter, policy,
+    classification: { authoritativeDomains: ['acme.com'] },
+    fetchImpl
+  });
+
+  assert.equal(result.project.status, 'INSUFFICIENT_EVIDENCE');
+  assert.equal(result.stopReason, 'STOPPING_CONDITION_NOT_MET');
+  assert.equal(result.sources.length, 2, 'only 2 of 5 candidates should have been visited before the attempt cap fired');
+
+  cleanup(storage, dbPath);
+});
+
 test('rejects an opportunity that has not actually been handed to Research', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();

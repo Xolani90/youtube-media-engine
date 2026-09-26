@@ -24,8 +24,18 @@ import { traceAsync, safeHost } from '../diagnostics/trace.js';
  * @param {object} deps.policy - research_policy.json
  * @param {function} [deps.retrieveImpl] - injectable for testing (defaults to retrieveSource)
  * @param {function} [deps.fetchImpl] - forwarded to retrieveImpl
- * @returns {Promise<{acquired: Array, attemptsUsed: number, candidatesConsidered: number, discoveryFailed: boolean, discoveryError: string|null}>}
+ * @returns {Promise<{acquired: Array, attemptsUsed: number, candidatesConsidered: number, candidatesExhausted: boolean, discoveryFailed: boolean, discoveryError: string|null}>}
  *   `acquired` entries: { url, title, snippet, publishedAt, status, content, error, attemptCount }
+ *   `candidatesExhausted`: true iff every discovered candidate was visited
+ *   by the loop below — i.e. the loop ran out of candidates on its own,
+ *   rather than being cut short by `max_sources_per_research_project` or
+ *   `max_acquisition_attempts`. Used by the Research pipeline to determine
+ *   whether the acquisition pass reached a legitimate stopping boundary
+ *   (candidate exhaustion or the source cap) as opposed to merely hitting
+ *   the attempts safety ceiling while candidates remained (Owner decision:
+ *   see docs/DECISIONS/RESEARCH-GOVERNANCE-BASELINE.md §10, §15 — the
+ *   attempts cap is a resource/safety ceiling, not evidence the bounded
+ *   acquisition pass was completed).
  */
 export async function acquireSources({ provider, query, policy, retrieveImpl = retrieveSource, fetchImpl }) {
   const maxSources = policy.acquisition.max_sources_per_research_project;
@@ -48,15 +58,21 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
     // distinction — this is the "discovery failure" case).
     discoveryFailed = true;
     discoveryError = err.message;
-    return { acquired: [], attemptsUsed: 0, candidatesConsidered: 0, discoveryFailed, discoveryError };
+    return { acquired: [], attemptsUsed: 0, candidatesConsidered: 0, candidatesExhausted: false, discoveryFailed, discoveryError };
   }
 
   const acquired = [];
   let attemptsUsed = 0;
+  // Counts candidates the loop actually entered (i.e. neither break below
+  // fired before reaching them). Compared against candidates.length after
+  // the loop to determine candidatesExhausted — see the returns-JSDoc note
+  // above for why this distinction matters.
+  let candidatesVisited = 0;
 
   for (const candidate of candidates) {
     if (acquired.length >= maxSources) break;
     if (attemptsUsed >= maxAttempts) break;
+    candidatesVisited++;
 
     let result = null;
     let attemptCount = 0;
@@ -92,5 +108,7 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
     });
   }
 
-  return { acquired, attemptsUsed, candidatesConsidered: candidates.length, discoveryFailed, discoveryError };
+  const candidatesExhausted = candidatesVisited === candidates.length;
+
+  return { acquired, attemptsUsed, candidatesConsidered: candidates.length, candidatesExhausted, discoveryFailed, discoveryError };
 }

@@ -378,11 +378,21 @@ export async function runResearchProject({
   }
 
   // --- Completeness evaluation ---
-  // Stopping condition: acquisition ran to its bound (either exhausted
-  // candidates or hit the configured cap) and every acquired source has
-  // been processed for claim extraction — i.e. there is no more bounded
-  // work left to do in this pass.
-  const stoppingConditionMet = true;
+  // Stopping condition (Owner decision — see
+  // docs/DECISIONS/RESEARCH-GOVERNANCE-BASELINE.md §10, §15): true only
+  // when acquisition reached a legitimate research boundary — every
+  // discovered candidate was visited (candidatesExhausted) or the
+  // configured source cap was reached. Hitting max_acquisition_attempts
+  // while candidates still remained and the source cap was not reached is
+  // NOT a legitimate stop: max_acquisition_attempts is a safety/resource
+  // ceiling on retrieval calls, not evidence that the bounded acquisition
+  // pass was completed. Every acquired source has already been processed
+  // for claim extraction by this point (the loop above always runs to
+  // completion before this line), so that half of the condition needs no
+  // separate check.
+  const stoppingConditionMet =
+    acquisitionResult.candidatesExhausted ||
+    acquisitionResult.acquired.length >= policy.acquisition.max_sources_per_research_project;
   const completenessResult = evaluateCompleteness({
     claims: persistedClaims, policy, coreQuestionType, stoppingConditionMet
   });
