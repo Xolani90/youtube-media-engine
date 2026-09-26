@@ -1,0 +1,92 @@
+# Read-only diagnostic: inspect the ADR-0024 single-run guard as it exists
+# in the SQLite state cache the scheduled autonomous workflow restores, WITHOUT
+# invoking the autonomous entrypoint, acquiring the guard, reclaiming any run,
+# or writing back to the cache store.
+#
+# This workflow exists solely to answer "does system_runs currently have a
+# RUNNING row, and if so what is it?" using the repository's own existing,
+# Owner-only inspection mechanism (scripts/reclaim-autonomous-run.js --list).
+# It performs no mutation of any kind: no --run-id, no reclamation, no
+# checkpoint, no cache save.
+#
+# Deliberately isolated from .github/workflows/scheduled-run.yml: separate
+# trigger (manual only), separate concurrency group, no schedule, no push/PR
+# trigger, so it can never queue behind, block, or be blocked by a real
+# scheduled autonomous run, and can never itself acquire the guard.
+
+name: Diagnose Autonomous Run Guard
+
+on:
+  workflow_dispatch: {}
+
+# Distinct from the scheduled workflow's "autonomous-scheduled-run" group on
+# purpose: this diagnostic must never share a queue with, wait behind, or
+# interact with a real scheduled/manual autonomous invocation.
+concurrency:
+  group: diagnose-autonomous-run-guard
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore SQLite state cache (read-only)
+        # Same path and same key/restore-key convention as
+        # scheduled-run.yml's restore step, so this resolves to the exact
+        # same cache entry that workflow would restore. Intentionally uses
+        # actions/cache/restore@v4 (restore-only) rather than the
+        # actions/cache@v4 composite action, which would auto-save a new
+        # entry on a `post` step -- that auto-save behavior is exactly what
+        # must not happen here.
+        id: sqlite_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.SQLITE_PATH }}
+          key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            media-engine-sqlite-
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+
+      - name: Report cache restore result
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+          CACHE_HIT: ${{ steps.sqlite_cache_restore.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.sqlite_cache_restore.outputs.cache-matched-key }}
+        run: |
+          echo "SQLITE_PATH=$SQLITE_PATH"
+          if [ -n "$CACHE_MATCHED_KEY" ]; then
+            echo "SQLite cache: HIT (matched key: $CACHE_MATCHED_KEY; exact-key hit: ${CACHE_HIT:-false})"
+            if [ -f "$SQLITE_PATH" ]; then
+              echo "Restored database at SQLITE_PATH=$SQLITE_PATH ($(wc -c < "$SQLITE_PATH") bytes)"
+            else
+              echo "::warning::SQLite cache reported a hit but no file exists at SQLITE_PATH=$SQLITE_PATH"
+            fi
+          else
+            echo "SQLite cache: MISS (no cache matched prefix media-engine-sqlite-); no prior state to inspect."
+          fi
+
+      - name: List RUNNING autonomous runs (read-only, no mutation)
+        # scripts/reclaim-autonomous-run.js --list runs a single SELECT
+        # against system_runs and takes no --run-id/--actor/--reason
+        # arguments in this mode, so it cannot acquire, mutate, or reclaim
+        # anything. This is the only application code invoked by this
+        # workflow; src/index.js (the autonomous entrypoint) is never run.
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+        run: |
+          echo "Running: node scripts/reclaim-autonomous-run.js --list"
+          node scripts/reclaim-autonomous-run.js --list
