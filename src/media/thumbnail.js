@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Phase 2B: deterministic YouTube thumbnail generation.
@@ -7,10 +9,14 @@ import { execFileSync } from 'node:child_process';
  * Media Production (see ./render.js, ./narration.js) — no new
  * dependency, no AI image provider, no external image API. A single
  * 1280x720 PNG frame is synthesized from FFmpeg's `color` lavfi source
- * plus one `drawtext` filter per wrapped line of the title (the same
- * `DejaVu Sans` family already used for burned-in captions,
- * constants.js#CAPTION_DEFAULTS.FONT_NAME, so no new font dependency
- * either).
+ * plus one `drawtext` filter per wrapped line of the title, rendered
+ * with a DejaVu Sans Bold font file bundled in this repository (see
+ * assets/fonts/DejaVuSans-Bold.ttf) and referenced via `fontfile=`
+ * rather than relying on the host's fontconfig to resolve a
+ * `font='DejaVu Sans'` family name -- that family lookup succeeds on
+ * Linux/CI (where the family happens to be installed) but is not
+ * guaranteed to resolve on Windows, which previously made thumbnail
+ * generation host-dependent.
  *
  * Deterministic by construction: identical title text always produces
  * an identical filter graph and therefore identical output bytes (no
@@ -46,6 +52,26 @@ const AVG_CHAR_WIDTH_RATIO = 0.62;
 
 const BACKGROUND_COLOR = '0x14181f';
 const TEXT_COLOR = 'white';
+
+// Bundled font (portability fix): rather than depend on the host's
+// fontconfig resolving the family name 'DejaVu Sans' (present on
+// Linux/CI, not guaranteed on Windows), drawtext is pointed at this
+// repository-local font file. Resolved relative to this module's own
+// location, not process.cwd(), so it works regardless of the caller's
+// working directory.
+const FONT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'assets', 'fonts');
+const FONT_FILENAME = 'DejaVuSans-Bold.ttf';
+
+// Windows-specific fix (same pattern as ./render.js's `subtitles` filter
+// handling): FFmpeg's filtergraph parser splits an option value on any
+// colon it encounters, so an absolute Windows path like
+// 'C:\...\DejaVuSans-Bold.ttf' can never appear inside the filtergraph
+// itself. Instead, FFmpeg's working directory is set to the font's own
+// directory (see generateThumbnail below) and only the bare, colon-free
+// filename is referenced in `fontfile=`.
+function escapeFilterPath(p) {
+  return p.replace(/\\/g, '/').replace(/'/g, "'\\''");
+}
 
 function estimateTextWidth(text, fontSize) {
   return text.length * fontSize * AVG_CHAR_WIDTH_RATIO;
@@ -132,8 +158,9 @@ function buildFilterGraph({ fontSize, lines, lineHeight }) {
   const drawtextFilters = lines.map((line, i) => {
     const y = Math.round(startY + i * (lineHeight + LINE_GAP));
     const escaped = escapeDrawtext(line);
+    const escapedFontFile = escapeFilterPath(FONT_FILENAME);
     return (
-      `drawtext=font='DejaVu Sans':text='${escaped}':fontcolor=${TEXT_COLOR}:` +
+      `drawtext=fontfile='${escapedFontFile}':text='${escaped}':fontcolor=${TEXT_COLOR}:` +
       `fontsize=${fontSize}:borderw=4:bordercolor=black@0.85:` +
       `x=(w-text_w)/2:y=${y}`
     );
@@ -169,8 +196,8 @@ export function generateThumbnail(title, outputPath) {
     '-i', `color=c=${BACKGROUND_COLOR}:s=${THUMBNAIL_WIDTH}x${THUMBNAIL_HEIGHT}:d=1`,
     '-vf', drawtextChain,
     '-frames:v', '1',
-    outputPath
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+    path.resolve(outputPath)
+  ], { stdio: ['ignore', 'ignore', 'pipe'], cwd: FONT_DIR });
 
   return outputPath;
 }
