@@ -70,7 +70,7 @@ function ensureThumbnailArtifact(storage, { mediaArtifact, title, runId, nowISO 
   }
   const dir = path.dirname(mediaArtifact.artifact_path);
   const finalPath = path.join(dir, 'thumbnail.png');
-  const tmpPath = path.join(dir, `.thumbnail.png.tmp-${process.pid}-${Date.now()}`);
+  const tmpPath = path.join(dir, `.thumbnail-${process.pid}-${Date.now()}.png`);
   try {
     generateThumbnail(title, tmpPath);
     finalizeArtifact(tmpPath, finalPath);
