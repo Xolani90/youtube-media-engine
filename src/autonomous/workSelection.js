@@ -167,7 +167,7 @@ export function selectEligibleFinalCompliance(storage) {
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
-export function selectEligiblePublications(storage) {
+export function selectEligiblePublications(storage, provider = 'youtube') {
   // Publication's own structural eligibility (src/publication/eligibility.js,
   // resolveMediaForPublication) additionally requires an existing
   // media_artifacts row for this content_version -- Media Production
@@ -197,14 +197,43 @@ export function selectEligiblePublications(storage) {
   // provider). The one exception is a PRODUCED item that ALREADY has a
   // publications row: it is selected only so the pipeline's existing
   // short-circuit/reconciliation (PENDING -> AMBIGUOUS, etc.) can run.
+  //
+  // Multi-provider publication: a PUBLISHED content_version is also
+  // selected -- PUBLISHED means at least one provider has already
+  // succeeded (see ../publication/constants.js), never that every
+  // intended provider has. This lets a run configured for a DIFFERENT
+  // provider (`provider`, sourced from deps.publication.provider by the
+  // one caller -- src/autonomous/runner.js's buildStages) reach the
+  // pipeline for its own, independent (content_version_id, provider)
+  // attempt. It is scoped by THIS run's own provider (excluded below,
+  // via a NOT EXISTS on a PUBLISHED row for exactly that provider) rather
+  // than left unscoped, so a run repeatedly configured for the SAME
+  // provider stops seeing an already-PUBLISHED-by-it item on the very
+  // next sweep -- preserving the existing no_work/no_progress sweep
+  // termination in src/autonomous/runner.js (an unscoped PUBLISHED
+  // selection would otherwise never stop being "eligible," turning every
+  // completed run into an infinite no-progress loop instead of a clean
+  // no_work stop). This is a pure efficiency pre-filter, same as every
+  // other clause here: runPublication()'s own step-3 idempotency check
+  // (keyed on (content_version_id, provider), unique-indexed in
+  // 0010_publication.sql) remains the actual authority and still no-ops
+  // (ALREADY_PUBLISHED, no new insert) on any redundant call this filter
+  // fails to catch -- it creates no duplicate row either way. A FAILED or
+  // AMBIGUOUS row for THIS provider on an otherwise-PUBLISHED item is
+  // still selected for reconciliation/retry, exactly as the pre-existing
+  // FAILED/AMBIGUOUS handling above already does for PRODUCED items.
   return storage
     .all(
       `SELECT content_brief_id FROM content_versions
        WHERE (state = 'FINAL_COMPLIANCE'
+              OR (state = 'PUBLISHED' AND id NOT IN (
+                    SELECT content_version_id FROM publications WHERE provider = ? AND status = 'PUBLISHED'
+                  ))
               OR (state = 'PRODUCED' AND id IN (SELECT content_version_id FROM publications)))
        AND id IN (SELECT content_version_id FROM media_artifacts)
        AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'PUBLICATION' AND quarantined_at IS NOT NULL)
-       AND id NOT IN (SELECT content_version_id FROM publications WHERE status = 'FAILED' AND failure_reason = 'VISIBILITY_MISMATCH')`
+       AND id NOT IN (SELECT content_version_id FROM publications WHERE status = 'FAILED' AND failure_reason = 'VISIBILITY_MISMATCH')`,
+      [provider]
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }

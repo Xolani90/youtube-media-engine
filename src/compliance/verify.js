@@ -46,7 +46,19 @@ export function verifyGate2Pass(storage, contentVersionId) {
   const ctx = resolveGate2Context(storage, contentVersionId);
   const { contentVersion, script, brief, production, media } = ctx;
   if (!contentVersion) return fail(NON_AUTHORIZING.CONTENT_VERSION_NOT_FOUND);
-  if (contentVersion.state !== 'FINAL_COMPLIANCE') {
+  // Multi-provider publication: PUBLISHED means at least one provider has
+  // already succeeded for this content_version (see
+  // ../publication/pipeline.js), not that every intended provider has
+  // published. A different provider's own publication attempt (or the
+  // final-compliance stage's own ALREADY_VALID re-check) must still be
+  // able to find a currently-authorizing PASS on an already-PUBLISHED
+  // item -- so PUBLISHED is accepted here on the same footing as
+  // FINAL_COMPLIANCE. This does not weaken anything below: PUBLISHED by
+  // itself never authorizes anything; every one of the following eleven
+  // checks (compliance record, decision, every binding, the actual file
+  // checksum, policy version, rule-ID set, evidence) still runs in full
+  // and must independently pass.
+  if (contentVersion.state !== 'FINAL_COMPLIANCE' && contentVersion.state !== 'PUBLISHED') {
     return fail(NON_AUTHORIZING.STATE_NOT_FINAL_COMPLIANCE, `state_${contentVersion.state}`);
   }
 

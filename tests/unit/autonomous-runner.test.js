@@ -221,7 +221,7 @@ test('per-content_versions-state work-selection queries return exactly the conte
   cleanup(storage, dbPath);
 });
 
-test('selectEligiblePublications: FINAL_COMPLIANCE+media (new attempt) and PRODUCED with an existing publication row (reconciliation) only; ADR-0032', async () => {
+test('selectEligiblePublications: FINAL_COMPLIANCE+media (new attempt), PUBLISHED+media (a different provider\'s new attempt), and PRODUCED with an existing publication row (reconciliation) only; ADR-0032', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
 
@@ -259,16 +259,27 @@ test('selectEligiblePublications: FINAL_COMPLIANCE+media (new attempt) and PRODU
   insertMediaArtifact(storage, producedMismatch.contentVersionId, videoFile);
   addPublication(producedMismatch, 'FAILED', 'VISIBILITY_MISMATCH');
 
-  // Other exclusions: PRODUCED without media, PUBLISHED, NEEDS_REVIEW.
-  const withoutMedia = seedChainAtState(storage, 'PRODUCED');
+  // Multi-provider publication: a PUBLISHED item + media is ALSO a NEW-attempt
+  // candidate -- PUBLISHED means at least one provider already succeeded, not
+  // that every intended provider has (see ../src/compliance/verify.js and
+  // ../src/autonomous/workSelection.js). This creates no duplicate row: it is
+  // runPublication()'s own (content_version_id, provider) idempotency check
+  // that decides, per-run, whether the configured provider already has a
+  // PUBLISHED row here -- this selector does not and must not know that.
   const published = seedChainAtState(storage, 'PUBLISHED');
   insertMediaArtifact(storage, published.contentVersionId, videoFile);
+
+  // Other exclusions: PRODUCED without media, NEEDS_REVIEW.
+  const withoutMedia = seedChainAtState(storage, 'PRODUCED');
   const needsReview = seedChainAtState(storage, 'NEEDS_REVIEW');
   insertMediaArtifact(storage, needsReview.contentVersionId, videoFile);
 
   const result = selectEligiblePublications(storage).map((r) => r.contentBriefId).sort();
-  assert.deepEqual(result, [finalCompliance.contentBriefId, producedPending.contentBriefId, producedAmbiguous.contentBriefId].sort());
-  for (const excluded of [producedNoRow, producedMismatch, withoutMedia, published, needsReview]) {
+  assert.deepEqual(
+    result,
+    [finalCompliance.contentBriefId, producedPending.contentBriefId, producedAmbiguous.contentBriefId, published.contentBriefId].sort()
+  );
+  for (const excluded of [producedNoRow, producedMismatch, withoutMedia, needsReview]) {
     assert.ok(!result.includes(excluded.contentBriefId));
   }
 

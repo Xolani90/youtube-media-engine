@@ -262,12 +262,17 @@ export async function runPublication({
   // an existing publication record are let through so the short-circuits
   // below (PUBLISHED / AMBIGUOUS / VISIBILITY_MISMATCH / PENDING /
   // quarantine) behave exactly as before: PUBLISHED (a media_artifacts row +
-  // PUBLISHED state is the normal steady state after a successful prior run),
-  // FINAL_COMPLIANCE (ADR-0032: the only state from which an upload may
-  // proceed) and PRODUCED (legacy items whose publication record may already
-  // be AMBIGUOUS / VISIBILITY_MISMATCH / PENDING). Admitting PRODUCED here does
-  // NOT let it publish: step 4.7 (Gate 2) requires FINAL_COMPLIANCE and a
-  // currently valid PASS before authorization, the claim or the provider. ---
+  // PUBLISHED state is the normal steady state after a successful prior run
+  // -- of ANY provider; multi-provider publication means this ALSO covers a
+  // different provider's own first attempt on the same content_version, not
+  // only this same provider's idempotent retry/thumbnail-retry path -- see
+  // step 3's existing-row lookup, keyed on (content_version_id, provider)),
+  // FINAL_COMPLIANCE (ADR-0032: the only state from which a NEW provider's
+  // upload may proceed) and PRODUCED (legacy items whose publication record
+  // may already be AMBIGUOUS / VISIBILITY_MISMATCH / PENDING). Admitting
+  // PRODUCED here does NOT let it publish: step 4.7 (Gate 2) requires
+  // FINAL_COMPLIANCE-or-PUBLISHED and a currently valid PASS before
+  // authorization, the claim or the provider. ---
   if (contentVersion.state !== 'PRODUCED' && contentVersion.state !== 'FINAL_COMPLIANCE' && contentVersion.state !== 'PUBLISHED') {
     logDecision(storage, {
       runId, subjectType: 'content_version', subjectId: contentVersion.id,

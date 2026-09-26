@@ -239,31 +239,34 @@ test('short-form production before the long-form artifact exists -> NOT_YET_PROD
   cleanup(storage, dbPath, productionArtifactsDir, mediaArtifactsDir, assetsDir);
 });
 
-// --- YouTube Shorts publication ---
+// --- YouTube Shorts + YouTube publication, same content_version ---
 //
-// NOTE ON TEST SHAPE: the two publish scenarios below deliberately use
-// SEPARATE content_versions rather than publishing 'youtube_shorts' then
-// 'youtube' back-to-back on the same one. That sequential shape was
-// tried first and surfaced a genuine, pre-existing cross-provider
-// interaction in ADR-0032's Gate 2 boundary (src/compliance/verify.js):
-// Gate 2 requires content_version.state === 'FINAL_COMPLIANCE' and is
-// checked BEFORE D-C2 authorization (publication/pipeline.js step 4.7
-// vs step 5); the FIRST successful publish (any provider) transitions
-// FINAL_COMPLIANCE -> PUBLISHED unconditionally (step 8, no
-// provider-scoping), so a SECOND provider attempted afterwards on that
-// same content_version fails at Gate 2 (GATE2_NOT_AUTHORIZING) rather
-// than reaching D-C2 authorization at all. This is a latent one-shot
-// assumption in the existing state machine that predates this task
-// (only one provider, 'youtube', ever existed before youtube_shorts),
-// not something introduced here, and it will identically affect TikTok
-// and Facebook Reels later. Per this task's explicit instruction to
-// report rather than invent an architectural fix, it is NOT patched
-// here -- these tests instead prove each provider's short-form-vs-long-
-// form artifact selection and independent D-C2 authorization correctly,
-// each on its own content_version, and the finding is carried into the
-// final report as a known cross-provider limitation.
+// NOTE ON TEST SHAPE: this used to be two tests on SEPARATE content_versions,
+// because publishing 'youtube_shorts' then 'youtube' back-to-back on the same
+// one surfaced a genuine, pre-existing cross-provider gap in ADR-0032's Gate 2
+// boundary (src/compliance/verify.js): Gate 2 required
+// content_version.state === 'FINAL_COMPLIANCE' exactly, checked BEFORE D-C2
+// authorization (publication/pipeline.js step 4.7 vs step 5); the FIRST
+// successful publish (any provider) transitions FINAL_COMPLIANCE -> PUBLISHED
+// unconditionally (step 8, no provider-scoping), so a SECOND provider
+// attempted afterwards on that same content_version failed at Gate 2
+// (GATE2_NOT_AUTHORIZING) rather than reaching D-C2 authorization at all.
+//
+// That gap is now closed: verifyGate2Pass() accepts PUBLISHED on the same
+// footing as FINAL_COMPLIANCE (every other one of its twelve checks still
+// runs in full -- PUBLISHED alone never authorizes anything), and
+// selectEligiblePublications() now also selects a PUBLISHED content_version
+// so a different provider's automated run can reach it. PUBLISHED still
+// means "at least one provider has published," never "every provider has" --
+// no new state was introduced and FINAL_COMPLIANCE -> PUBLISHED is still the
+// only, one-time state transition. This test now proves the intended
+// end-to-end shape directly: youtube_shorts publishes first (moving the
+// content_version to PUBLISHED), then youtube independently publishes the
+// SAME content_version afterwards, each with its own D-C2 authorization,
+// its own provider call, its own artifact selection, and its own durable
+// publications row -- with no duplicate row for either provider.
 
-test('YouTube Shorts publication: publishes the short-form artifact via the unmodified YouTubeAdapter shape', async () => {
+test('multi-provider publication: youtube_shorts publishes first (FINAL_COMPLIANCE -> PUBLISHED), then youtube independently publishes the SAME content_version afterwards', async () => {
   const { storage, dbPath } = freshStorage();
   const productionArtifactsDir = freshDir('shortform-e2e-production');
   const mediaArtifactsDir = freshDir('shortform-e2e-media');
@@ -282,9 +285,10 @@ test('YouTube Shorts publication: publishes the short-form artifact via the unmo
   recordVerification(storage, assetA, 'VERIFIED');
   recordVerification(storage, assetB, 'VERIFIED');
   passGate2(storage, contentVersionId);
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'FINAL_COMPLIANCE');
 
-  // YouTube Shorts publication needs its OWN D-C2 authorization entry --
-  // distinct action id, distinct from the long-form 'youtube' action.
+  // --- Provider 1: youtube_shorts. Needs its OWN D-C2 authorization entry --
+  // distinct action id, distinct from the long-form 'youtube' action. ---
   const shortsDenied = await runPublication({
     storage, contentBriefId, provider: 'youtube_shorts',
     adapter: new MockYouTube({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'youtube_shorts', providerItemId: 'SHOULD_NOT_BE_USED', providerUrl: 'x' })
@@ -304,37 +308,22 @@ test('YouTube Shorts publication: publishes the short-form artifact via the unmo
   assert.equal(shortsPublished.publication.provider, 'youtube_shorts');
   assert.equal(shortsPublished.publication.provider_item_id, 'SHORT_VIDEO_ID');
 
-  const rows = storage.all('SELECT provider, status, provider_item_id FROM publications WHERE content_version_id = ?', [contentVersionId]);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].provider, 'youtube_shorts');
-  assert.equal(rows[0].status, 'PUBLISHED');
+  // The FIRST successful provider is what moves the content_version on --
+  // and, per the fixed multi-provider semantics, that does NOT block a
+  // second provider's own attempt afterwards.
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PUBLISHED');
 
-  cleanup(storage, dbPath, productionArtifactsDir, mediaArtifactsDir, assetsDir);
-});
-
-test('existing long-form YouTube publication is unaffected: unchanged authorization + provider behavior on its own content_version', async () => {
-  const { storage, dbPath } = freshStorage();
-  const productionArtifactsDir = freshDir('shortform-e2e-production');
-  const mediaArtifactsDir = freshDir('shortform-e2e-media');
-  const assetsDir = freshDir('shortform-e2e-assets');
-  await storage.migrate();
-
-  const { contentBriefId, contentVersionId } = seedContentVersion(storage);
-  const assetA = seedVisualAsset(storage, contentVersionId, makeFixtureImage(assetsDir, 'a.png', 'blue'));
-
-  runProduction({ storage, contentBriefId, artifactsDir: productionArtifactsDir });
-  const longFormResult = runMediaProduction({ storage, contentBriefId, artifactsDir: mediaArtifactsDir });
-  // Deliberately no runShortFormProduction() call -- long-form publication
-  // must not require a short-form derivative to exist.
-
-  recordVerification(storage, assetA, 'VERIFIED');
-  passGate2(storage, contentVersionId);
-
+  // --- Provider 2: youtube, on the SAME content_version, AFTER it is
+  // already PUBLISHED. This is exactly the previously-blocked path: Gate 2
+  // must independently re-verify the still-valid PASS (not merely see
+  // PUBLISHED and wave it through), D-C2 authorization is still required
+  // for youtube's own distinct action id, and the provider is still never
+  // reached without it. ---
   const longFormDenied = await runPublication({
     storage, contentBriefId, provider: 'youtube',
     adapter: new MockYouTube({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'youtube', providerItemId: 'SHOULD_NOT_BE_USED', providerUrl: 'x' })
   });
-  assert.equal(longFormDenied.outcome, 'AUTHORIZATION_DENIED');
+  assert.equal(longFormDenied.outcome, 'AUTHORIZATION_DENIED', 'PUBLISHED does not itself authorize a second provider');
 
   const longFormPublished = await withLiveAuthorized([`publish:youtube:${contentVersionId}`], async () => {
     const adapter = new MockYouTube({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'youtube', providerItemId: 'LONG_VIDEO_ID', providerUrl: 'https://youtu.be/LONG_VIDEO_ID' });
@@ -346,6 +335,22 @@ test('existing long-form YouTube publication is unaffected: unchanged authorizat
   assert.equal(longFormPublished.outcome, 'PUBLISHED');
   assert.equal(longFormPublished.publication.provider, 'youtube');
   assert.equal(longFormPublished.publication.provider_item_id, 'LONG_VIDEO_ID');
+
+  // Still PUBLISHED -- no new state was introduced, and the second
+  // provider's success does not re-transition or duplicate anything.
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PUBLISHED');
+
+  // Exactly one durable row per provider, both PUBLISHED, on the ONE
+  // content_version -- no duplicate row for either provider.
+  const rows = storage.all(
+    'SELECT provider, status, provider_item_id FROM publications WHERE content_version_id = ? ORDER BY provider',
+    [contentVersionId]
+  );
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.provider).sort(), ['youtube', 'youtube_shorts']);
+  assert.ok(rows.every((r) => r.status === 'PUBLISHED'));
+  assert.equal(rows.find((r) => r.provider === 'youtube').provider_item_id, 'LONG_VIDEO_ID');
+  assert.equal(rows.find((r) => r.provider === 'youtube_shorts').provider_item_id, 'SHORT_VIDEO_ID');
 
   cleanup(storage, dbPath, productionArtifactsDir, mediaArtifactsDir, assetsDir);
 });

@@ -261,7 +261,15 @@ function buildStages(deps, startedMode) {
       // assertExternalActionAllowed({ action, mode }) call use this
       // run's actual persisted mode (D-C2) instead of silently falling
       // back to process-global config.runMode.
-      select: selectEligiblePublications,
+      //
+      // Multi-provider publication: this run's own provider (the same
+      // deps.publication?.provider passed to runPublication below) must
+      // also be threaded into selection, so a PUBLISHED item is only
+      // re-selected for a provider that hasn't published it yet --
+      // preserving the sweep's no_work/no_progress termination for a
+      // run repeatedly configured for the same provider (see
+      // selectEligiblePublications in workSelection.js).
+      select: (storage) => selectEligiblePublications(storage, deps.publication?.provider),
       isSuccess: (result) =>
         result?.outcome === PUBLICATION_OUTCOME.PUBLISHED || result?.outcome === PUBLICATION_OUTCOME.ALREADY_PUBLISHED,
       // ADR-0023: a Publication attempt is one confirmed provider

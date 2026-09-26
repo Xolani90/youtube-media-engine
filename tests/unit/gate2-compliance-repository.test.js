@@ -1041,4 +1041,66 @@ describe('ADR-0032 Gate 2 compliance persistence and exact PASS binding (Batch 4
       });
     });
   });
+
+  // ---------------------------------------------------------------- 17. multi-provider publication: PUBLISHED content_versions
+
+  describe('17. a PUBLISHED content_version (a different provider\'s own attempt; multi-provider publication)', () => {
+    test('PUBLISHED + a currently-valid PASS is authorizing, identically to FINAL_COMPLIANCE, with every other check still enforced', async () => {
+      await withPassedFixture((fx, pass) => {
+        // Simulate provider A's confirmed success having already moved this
+        // content_version on, exactly as ../src/publication/pipeline.js does
+        // (FINAL_COMPLIANCE -> PUBLISHED) -- the compliance record itself is
+        // untouched by that transition.
+        fx.storage.run(`UPDATE content_versions SET state = 'PUBLISHED' WHERE id = ?`, [fx.contentVersionId]);
+
+        const result = verify(fx);
+        assert.equal(result.authorizing, true, 'a currently-valid PASS still authorizes once PUBLISHED');
+        assert.equal(result.record.id, pass.id);
+
+        // Read-only, same as every other verification: no row inserted/updated,
+        // no re-transition, PUBLISHED is left exactly as it is.
+        assert.equal(rows(fx).length, 1);
+        assert.equal(stateOf(fx), 'PUBLISHED');
+      });
+    });
+
+    test('PUBLISHED + a stale checksum (media re-rendered after publication) is non-authorizing, exactly as it would be from FINAL_COMPLIANCE', async () => {
+      await withPassedFixture((fx) => {
+        fx.storage.run(`UPDATE content_versions SET state = 'PUBLISHED' WHERE id = ?`, [fx.contentVersionId]);
+        setMediaChecksum(fx, sha256Hex(Buffer.from('a-different-re-rendered-file')));
+
+        assertNonAuthorizing(verify(fx), NON_AUTHORIZING.MEDIA_CHECKSUM_MISMATCH);
+        assert.equal(stateOf(fx), 'PUBLISHED', 'a non-authorizing check never reverts or transitions PUBLISHED');
+      });
+    });
+
+    test('PUBLISHED + a newer REVIEW/BLOCK superseding the PASS is non-authorizing (a later compliance re-run invalidated it)', async () => {
+      await withPassedFixture((fx) => {
+        fx.storage.run(`UPDATE content_versions SET state = 'PUBLISHED' WHERE id = ?`, [fx.contentVersionId]);
+        appendRecord(fx, RESULT.REVIEW);
+
+        assertNonAuthorizing(verify(fx), NON_AUTHORIZING.NEWEST_RECORD_NOT_PASS, `newest_${RESULT.REVIEW}`);
+      });
+    });
+
+    test('PUBLISHED + a stale policy version is non-authorizing, exactly as it would be from FINAL_COMPLIANCE', async () => {
+      await withPassedFixture((fx) => {
+        fx.storage.run(`UPDATE content_versions SET state = 'PUBLISHED' WHERE id = ?`, [fx.contentVersionId]);
+        writePolicy({ version: V2 });
+
+        assertNonAuthorizing(verify(fx), NON_AUTHORIZING.POLICY_VERSION_MISMATCH, `bound_${V1}_current_${V2}`);
+
+        writeRawPolicy(REAL_POLICY_TEXT);
+      });
+    });
+
+    test('PUBLISHED never authorizes by itself: a PUBLISHED item with no compliance record at all is refused with NO_COMPLIANCE_RECORD, not fabricated as passing', async () => {
+      await withGate2Fixture((fx) => {
+        fx.storage.run(`UPDATE content_versions SET state = 'PUBLISHED' WHERE id = ?`, [fx.contentVersionId]);
+        assert.equal(rows(fx).length, 0, 'no compliance record exists for this item');
+
+        assertNonAuthorizing(verify(fx), NON_AUTHORIZING.NO_COMPLIANCE_RECORD);
+      });
+    });
+  });
 });
