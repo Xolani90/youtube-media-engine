@@ -121,3 +121,54 @@ test('the acquisition loop always terminates deterministically even with unlimit
   assert.equal(result.acquired.length, 8);
   assert.equal(calls, 8);
 });
+
+// --- candidatesExhausted (Owner decision: stopping-condition contract) ---
+
+test('candidatesExhausted is true when every discovered candidate is visited before either cap fires', async () => {
+  const provider = new StubProvider(candidates(3));
+  const retrieveImpl = async () => ({ status: 'SUCCESS', content: 'ok', error: null });
+  const policy = policyWith({ acquisition: { max_sources_per_research_project: 8, max_acquisition_attempts: 100 } });
+  const result = await acquireSources({ provider, query: 'q', policy, retrieveImpl });
+  assert.equal(result.acquired.length, 3);
+  assert.equal(result.candidatesExhausted, true);
+});
+
+test('candidatesExhausted is true when the source cap is reached exactly as the last candidate is visited', async () => {
+  const provider = new StubProvider(candidates(3));
+  const retrieveImpl = async () => ({ status: 'SUCCESS', content: 'ok', error: null });
+  const policy = policyWith({ acquisition: { max_sources_per_research_project: 3, max_acquisition_attempts: 100 } });
+  const result = await acquireSources({ provider, query: 'q', policy, retrieveImpl });
+  assert.equal(result.acquired.length, 3);
+  assert.equal(result.candidatesExhausted, true);
+});
+
+test('candidatesExhausted is false when the source cap is reached with candidates still remaining', async () => {
+  const provider = new StubProvider(candidates(20));
+  const retrieveImpl = async () => ({ status: 'SUCCESS', content: 'ok', error: null });
+  const policy = policyWith({ acquisition: { max_sources_per_research_project: 3, max_acquisition_attempts: 100 } });
+  const result = await acquireSources({ provider, query: 'q', policy, retrieveImpl });
+  assert.equal(result.acquired.length, 3);
+  assert.equal(result.candidatesExhausted, false);
+});
+
+test('candidatesExhausted is false when max_acquisition_attempts is reached with candidates still remaining and the source cap not reached', async () => {
+  const provider = new StubProvider(candidates(20));
+  let calls = 0;
+  // Every attempt fails, forcing retries, so the attempt cap fires well
+  // before all 20 candidates (or the generous source cap) are reached.
+  const retrieveImpl = async () => { calls++; return { status: 'FAILED', content: null, error: 'boom' }; };
+  const policy = policyWith({ acquisition: { max_sources_per_research_project: 8, max_acquisition_attempts: 12 }, retry: { max_retries_per_source: 2 } });
+  const result = await acquireSources({ provider, query: 'q', policy, retrieveImpl });
+  assert.equal(result.attemptsUsed, 12);
+  assert.ok(result.acquired.length < 8, 'source cap must not have been reached');
+  assert.equal(result.candidatesExhausted, false);
+});
+
+test('candidatesExhausted is true (vacuously) when discovery returns zero candidates without a discovery failure', async () => {
+  const provider = new StubProvider([]);
+  const retrieveImpl = async () => ({ status: 'SUCCESS', content: 'ok', error: null });
+  const result = await acquireSources({ provider, query: 'q', policy: policyWith({}), retrieveImpl });
+  assert.equal(result.acquired.length, 0);
+  assert.equal(result.discoveryFailed, false);
+  assert.equal(result.candidatesExhausted, true);
+});
