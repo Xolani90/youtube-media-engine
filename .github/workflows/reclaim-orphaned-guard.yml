@@ -99,7 +99,7 @@ jobs:
           SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
         run: |
           node scripts/reclaim-autonomous-run.js \
-            --run-id 55e998aa-de6b-457d-b331-a01b6b32a456 \
+            --run-id aecd75b7-1bec-4d8c-9287-680fb0426436 \
             --actor OWNER \
             --reason "orphaned by cancelled workflow run 36202028056"
 
@@ -110,11 +110,11 @@ jobs:
           echo "Running: node scripts/reclaim-autonomous-run.js --list"
           OUTPUT="$(node scripts/reclaim-autonomous-run.js --list)"
           echo "$OUTPUT"
-          if echo "$OUTPUT" | grep -q "55e998aa-de6b-457d-b331-a01b6b32a456"; then
-            echo "::error::Reclaimed UUID 55e998aa-de6b-457d-b331-a01b6b32a456 is still reported as RUNNING after reclaim."
+          if echo "$OUTPUT" | grep -q "aecd75b7-1bec-4d8c-9287-680fb0426436"; then
+            echo "::error::Reclaimed UUID aecd75b7-1bec-4d8c-9287-680fb0426436 is still reported as RUNNING after reclaim."
             exit 1
           fi
-          echo "Confirmed: 55e998aa-de6b-457d-b331-a01b6b32a456 is no longer reported as RUNNING."
+          echo "Confirmed: aecd75b7-1bec-4d8c-9287-680fb0426436 is no longer reported as RUNNING."
 
       - name: Checkpoint SQLite WAL before saving
         # Same convention as scheduled-run.yml: fold the WAL into the main
