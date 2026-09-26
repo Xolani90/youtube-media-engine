@@ -42,12 +42,28 @@ const FALLBACK_RETRY_DELAY_MS = 2000;
 // path) aborted at exactly that 30s mark with no non-2xx response ever
 // received -- i.e. Gemini was still working, not hung, when the timeout
 // fired. Raised to 60000ms so a real, larger research prompt has room to
-// complete; a request that is genuinely hung is still bounded, just at a
-// larger, explicit ceiling. This does not touch GroqProvider.js's own
-// constant/behavior (its MAX_429_RETRY_DELAY_MS is untouched) and does not
-// change Gemini's 429 retry count, retry-delay sourcing, or cooldown logic
-// below.
-const GEMINI_REQUEST_TIMEOUT_MS = 60000;
+// complete.
+//
+// Run 36221741079 then showed the same pattern recur at the new ceiling: a
+// real 19109-char claim-extraction prompt (more than double the 8888-char
+// case above) was aborted at exactly 60001ms, again with no non-2xx
+// response ever received. This is the same request-still-in-flight
+// failure mode as before, just at a larger prompt size, and there is no
+// per-caller way to scope the timeout to claim extraction specifically:
+// GeminiProvider.complete() is invoked uniformly by every caller
+// (Discovery, Research claim extraction, contradiction detection) through
+// the shared LLMProvider/LLMRouter contract, which does not thread a
+// per-call timeout override through `request` today (see router.js) --
+// doing so would mean changing that shared contract and every provider,
+// which is a larger change than the actual evidence calls for. Raised
+// again to 120000ms, the same doubling this constant already went through
+// once, so a real prompt more than double the size of the one that
+// justified 60000ms still has comfortable headroom. A request that is
+// genuinely hung is still bounded, just at a larger, explicit ceiling.
+// This does not touch GroqProvider.js's own constant/behavior (its
+// MAX_429_RETRY_DELAY_MS is untouched) and does not change Gemini's 429
+// retry count, retry-delay sourcing, or cooldown logic below.
+const GEMINI_REQUEST_TIMEOUT_MS = 120000;
 
 // Provider-local pacing floor, added after a real GitHub Actions run hit
 // Gemini's confirmed free-tier limit of 15 requests/minute for
