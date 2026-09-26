@@ -144,7 +144,9 @@ export const REQUESTED_VISIBILITY_PUBLIC = 'public';
 // `youtube_shorts` entry, the only such provider at implementation
 // time).
 export const PUBLICATION_TARGET_BY_PROVIDER = Object.freeze({
-  youtube_shorts: 'SHORT_FORM'
+  youtube_shorts: 'SHORT_FORM',
+  tiktok: 'SHORT_FORM',
+  facebook_reels: 'SHORT_FORM'
 });
 
 export function publicationTargetForProvider(provider) {

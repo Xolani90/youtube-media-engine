@@ -1,4 +1,6 @@
 import { YouTubeAdapter } from './youtube/YouTubeAdapter.js';
+import { TikTokAdapter } from './tiktok/TikTokAdapter.js';
+import { FacebookReelsAdapter } from './facebook/FacebookReelsAdapter.js';
 
 /**
  * Provider id -> adapter factory. Mirrors
@@ -8,10 +10,10 @@ import { YouTubeAdapter } from './youtube/YouTubeAdapter.js';
  * entry here and one more adapter file under src/publication/<provider>/
  * — never a change to ./pipeline.js's own adapter.publish(request) call
  * against the PublicationProvider interface. (A provider id that
- * publishes the SHORT_FORM derivative instead, like `youtube_shorts`
- * below, additionally needs one entry in ./constants.js's
- * PUBLICATION_TARGET_BY_PROVIDER — the adapter contract itself is
- * unchanged either way.)
+ * publishes the SHORT_FORM derivative instead, like `youtube_shorts`,
+ * `tiktok`, and `facebook_reels` below, additionally needs one entry in
+ * ./constants.js's PUBLICATION_TARGET_BY_PROVIDER — the adapter contract
+ * itself is unchanged either way.)
  */
 export const PROVIDER_REGISTRY = {
   youtube: () => new YouTubeAdapter(),
@@ -25,7 +27,16 @@ export const PROVIDER_REGISTRY = {
   // model (0010_publication.sql, D-C2 action ids) gives long-form and
   // short-form publication attempts fully independent tracking, with
   // zero YouTube-specific code duplicated or changed.
-  youtube_shorts: () => new YouTubeAdapter()
+  youtube_shorts: () => new YouTubeAdapter(),
+  // TikTok and Facebook Reels ARE separate provider integrations (each
+  // platform has its own upload API, credentials, and async
+  // publish-confirmation flow) -- see TikTokAdapter.js / 
+  // FacebookReelsAdapter.js for each one's own documented protocol.
+  // Both publish the SHORT_FORM derivative by default (see
+  // ./constants.js's PUBLICATION_TARGET_BY_PROVIDER); both platforms
+  // are short-form/vertical-first, same as youtube_shorts.
+  tiktok: () => new TikTokAdapter(),
+  facebook_reels: () => new FacebookReelsAdapter()
 };
 
 export function resolveProvider(providerId) {
