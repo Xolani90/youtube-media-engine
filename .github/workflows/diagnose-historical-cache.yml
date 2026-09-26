@@ -1,0 +1,49 @@
+name: diagnose-historical-cache
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout diagnostic branch
+        uses: actions/checkout@v4
+        with:
+          ref: diagnostic/historical-cache-36226763460
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore EXACT historical cache (no prefix fallback)
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: data/media-engine.db
+          key: media-engine-sqlite-36226763460-1
+          fail-on-cache-miss: true
+
+      - name: Fail loudly if wrong cache restored
+        run: |
+          if [ "${{ steps.restore.outputs.cache-hit }}" != "true" ]; then
+            echo "::error::Exact historical cache media-engine-sqlite-36226763460-1 was NOT restored. Aborting rather than falling back to another cache."
+            exit 1
+          fi
+          echo "Confirmed exact cache hit: media-engine-sqlite-36226763460-1"
+
+      - name: Inspect file exists
+        run: ls -lh data/media-engine.db
+
+      - name: Run read-only diagnostic query
+        run: node scripts/diagnostic-cache-inspect.mjs
+
+      - name: Upload diagnostic artifact only
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-cache-diagnostic
+          path: historical-cache-diagnostic.txt
+          if-no-files-found: error
