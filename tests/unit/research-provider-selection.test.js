@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { selectDefaultResearchSourceProvider } from '../../src/index.js';
 import { TavilySearchProvider } from '../../src/providers/research/TavilySearchProvider.js';
 import { GoogleNewsRssSearchProvider } from '../../src/providers/research/GoogleNewsRssSearchProvider.js';
+import { DuckDuckGoSearchProvider } from '../../src/providers/research/DuckDuckGoSearchProvider.js';
+import { FallbackResearchSourceProvider } from '../../src/providers/research/FallbackResearchSourceProvider.js';
 
 function withTavilyKey(value, fn) {
   const previous = process.env.TAVILY_API_KEY;
@@ -23,9 +25,18 @@ test('selects GoogleNewsRssSearchProvider (R0 default) when TAVILY_API_KEY is no
   });
 });
 
-test('selects TavilySearchProvider when TAVILY_API_KEY is configured', () => {
+test('selects a FallbackResearchSourceProvider wrapping Tavily+DuckDuckGo when TAVILY_API_KEY is configured', () => {
   withTavilyKey('tvly-test-key', () => {
     const provider = selectDefaultResearchSourceProvider();
-    assert.ok(provider instanceof TavilySearchProvider);
+    assert.ok(provider instanceof FallbackResearchSourceProvider);
+    assert.ok(provider._primary instanceof TavilySearchProvider);
+    assert.ok(provider._fallback instanceof DuckDuckGoSearchProvider);
+  });
+});
+
+test('does not select a bare TavilySearchProvider when TAVILY_API_KEY is configured (fallback wrapper is used instead)', () => {
+  withTavilyKey('tvly-test-key', () => {
+    const provider = selectDefaultResearchSourceProvider();
+    assert.ok(!(provider instanceof TavilySearchProvider));
   });
 });

@@ -6,6 +6,8 @@ import { RssSource } from './providers/opportunity/RssSource.js';
 import { PixabayAssetSourceProvider } from './providers/asset/PixabayAssetSourceProvider.js';
 import { TavilySearchProvider } from './providers/research/TavilySearchProvider.js';
 import { GoogleNewsRssSearchProvider } from './providers/research/GoogleNewsRssSearchProvider.js';
+import { DuckDuckGoSearchProvider } from './providers/research/DuckDuckGoSearchProvider.js';
+import { FallbackResearchSourceProvider } from './providers/research/FallbackResearchSourceProvider.js';
 import { runDiscoveryPipeline } from './discovery/pipeline.js';
 import { runAutonomousOperation } from './autonomous/runner.js';
 import { computeRawFeatures } from './discovery/featureComputation.js';
@@ -37,9 +39,23 @@ export const REFUSED_EXIT_CODE = 3;
  * remains available (unchanged) as a separate, explicitly-selected
  * provider; it is simply no longer the no-key default. Exported for
  * tests; not part of the public module surface.
+ *
+ * When TAVILY_API_KEY IS configured, TavilySearchProvider is wrapped in
+ * FallbackResearchSourceProvider with DuckDuckGoSearchProvider (R0,
+ * genuinely $0/no-key) as its fallback: if Tavily produces a
+ * provider-level failure or an unusable (empty) discovery result,
+ * DuckDuckGo is attempted once. This is the smallest fallback needed --
+ * it does not change GoogleNewsRssSearchProvider's no-key default path
+ * at all.
  */
 export function selectDefaultResearchSourceProvider() {
-  return process.env.TAVILY_API_KEY ? new TavilySearchProvider() : new GoogleNewsRssSearchProvider();
+  if (process.env.TAVILY_API_KEY) {
+    return new FallbackResearchSourceProvider({
+      primary: new TavilySearchProvider(),
+      fallback: new DuckDuckGoSearchProvider()
+    });
+  }
+  return new GoogleNewsRssSearchProvider();
 }
 
 /**
