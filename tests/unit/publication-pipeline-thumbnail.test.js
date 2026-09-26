@@ -144,7 +144,7 @@ test('successful publish generates a thumbnail artifact and uploads it after the
     thumbnailResultOrFn: { status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock' }
   });
 
-  await withLiveAuthorized([{ action: `publish:mock:${contentVersionId}` }], async () => {
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
     const result = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
     assert.equal(result.outcome, 'PUBLISHED');
     assert.equal(result.publication.thumbnail_status, 'SUCCESS');
@@ -177,7 +177,7 @@ test('thumbnail failure does not falsely report a failed or unpublished video, a
     thumbnailResultOrFn: { status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, provider: 'mock', errorClass: 'BAD_IMAGE', retryable: false }
   });
 
-  await withLiveAuthorized([{ action: `publish:mock:${contentVersionId}` }], async () => {
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
     const result = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
     assert.equal(result.outcome, 'PUBLISHED', 'video publication itself must still report success');
     assert.equal(result.publication.status, 'PUBLISHED');
@@ -207,7 +207,7 @@ test('resume/retry after a thumbnail failure retries only the thumbnail and neve
     }
   });
 
-  await withLiveAuthorized([{ action: `publish:mock:${contentVersionId}` }], async () => {
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
     const first = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
     assert.equal(first.outcome, 'PUBLISHED');
     assert.equal(first.publication.thumbnail_status, 'FAILED');
@@ -237,7 +237,7 @@ test('a successful thumbnail is never re-uploaded on a subsequent call (idempote
     thumbnailResultOrFn: { status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock' }
   });
 
-  await withLiveAuthorized([{ action: `publish:mock:${contentVersionId}` }], async () => {
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
     await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
     await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
     assert.equal(adapter.publishCalls.length, 1);
@@ -254,7 +254,7 @@ test('provider without publishThumbnail support: publication behaves exactly as 
   const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath });
   const adapter = new MockAdapterNoThumbnail({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'VIDXYZ', providerUrl: 'https://youtu.be/VIDXYZ' });
 
-  await withLiveAuthorized([{ action: `publish:mock:${contentVersionId}` }], async () => {
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
     const result = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
     assert.equal(result.outcome, 'PUBLISHED');
     assert.equal(result.publication.status, 'PUBLISHED');
@@ -276,7 +276,7 @@ test('thumbnail upload is never attempted before a confirmed provider video id e
     thumbnailResultOrFn: { status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock' }
   });
 
-  await withLiveAuthorized([{ action: `publish:mock:${contentVersionId}` }], async () => {
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
     const result = await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
     assert.equal(result.outcome, 'PROVIDER_FAILURE');
     assert.equal(adapter.thumbnailCalls.length, 0, 'no video id was ever confirmed, so no thumbnail call should be made');
