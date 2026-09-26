@@ -1,0 +1,165 @@
+# Owner-authorized reclaim of a single, confirmed-orphaned ADR-0024 guard
+# row, using the repository's existing reclaim script exactly as designed.
+#
+# Evidence establishing the orphan (see chat record / commit history, not
+# re-derived here):
+#   - GitHub Actions run 36202028056 started ~2026-09-25T23:42:12Z, its
+#     autonomous entrypoint acquired system_runs guard
+#     55e998aa-de6b-457d-b331-a01b6b32a456 (started_at 2026-09-25T23:42:32.393Z,
+#     mode SIMULATION), then ran 1h 7m 28s before being forcibly cancelled --
+#     never reaching its own checkpoint/save/release path.
+#   - Later run 36206810587 correctly refused with AUTONOMOUS_RUN_ACTIVE and
+#     re-persisted the same still-RUNNING row forward into the cache.
+#   - The read-only "Diagnose Autonomous Run Guard" workflow confirmed via
+#     --list that this is the ONLY RUNNING row.
+#
+# This workflow reclaims exactly that one row, per ADR-0024 D5 (Owner-only,
+# explicit reclamation; historical evidence of the previous run preserved by
+# the script itself, not by this workflow). It performs no other mutation
+# and never invokes the autonomous entrypoint (src/index.js) at all.
+#
+# Isolated from both scheduled-run.yml and diagnose-guard.yml: manual
+# trigger only, its own concurrency group, so it can never queue behind or
+# interact with either.
+
+name: Reclaim Orphaned Autonomous Guard
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: reclaim-orphaned-autonomous-guard
+  cancel-in-progress: false
+
+jobs:
+  reclaim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore SQLite state cache
+        # Same path and key/restore-key convention as scheduled-run.yml and
+        # diagnose-guard.yml, so this restores the exact same cache entry
+        # those workflows read/wrote -- the one carrying the orphaned
+        # RUNNING row this workflow is authorized to clear.
+        id: sqlite_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.SQLITE_PATH }}
+          key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            media-engine-sqlite-
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+
+      - name: Report cache restore result
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+          CACHE_HIT: ${{ steps.sqlite_cache_restore.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.sqlite_cache_restore.outputs.cache-matched-key }}
+        run: |
+          echo "SQLITE_PATH=$SQLITE_PATH"
+          if [ -n "$CACHE_MATCHED_KEY" ]; then
+            echo "SQLite cache: HIT (matched key: $CACHE_MATCHED_KEY; exact-key hit: ${CACHE_HIT:-false})"
+            if [ -f "$SQLITE_PATH" ]; then
+              echo "Restored database at SQLITE_PATH=$SQLITE_PATH ($(wc -c < "$SQLITE_PATH") bytes)"
+            else
+              echo "::error::SQLite cache reported a hit but no file exists at SQLITE_PATH=$SQLITE_PATH"
+              exit 1
+            fi
+          else
+            echo "::error::SQLite cache MISS (no cache matched prefix media-engine-sqlite-); nothing to reclaim against. Refusing to proceed."
+            exit 1
+          fi
+
+      - name: List RUNNING autonomous runs BEFORE reclaim
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+        run: |
+          echo "Running: node scripts/reclaim-autonomous-run.js --list"
+          node scripts/reclaim-autonomous-run.js --list
+
+      - name: Reclaim the confirmed-orphaned guard (Owner-authorized, single run only)
+        # Reclaims exactly one run: the UUID confirmed orphaned by the prior
+        # read-only diagnostic. No other run-id is referenced anywhere in
+        # this workflow. --actor is exactly OWNER (a governance-context
+        # assertion per the script's own docstring, not authentication).
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+        run: |
+          node scripts/reclaim-autonomous-run.js \
+            --run-id 55e998aa-de6b-457d-b331-a01b6b32a456 \
+            --actor OWNER \
+            --reason "orphaned by cancelled workflow run 36202028056"
+
+      - name: List RUNNING autonomous runs AFTER reclaim (verify cleared)
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+        run: |
+          echo "Running: node scripts/reclaim-autonomous-run.js --list"
+          OUTPUT="$(node scripts/reclaim-autonomous-run.js --list)"
+          echo "$OUTPUT"
+          if echo "$OUTPUT" | grep -q "55e998aa-de6b-457d-b331-a01b6b32a456"; then
+            echo "::error::Reclaimed UUID 55e998aa-de6b-457d-b331-a01b6b32a456 is still reported as RUNNING after reclaim."
+            exit 1
+          fi
+          echo "Confirmed: 55e998aa-de6b-457d-b331-a01b6b32a456 is no longer reported as RUNNING."
+
+      - name: Checkpoint SQLite WAL before saving
+        # Same convention as scheduled-run.yml: fold the WAL into the main
+        # file before caching it, and refuse to save an incomplete
+        # checkpoint over a good state.
+        id: sqlite_checkpoint
+        if: always()
+        env:
+          SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+        run: |
+          if [ ! -f "$SQLITE_PATH" ]; then
+            echo "::warning::No SQLite database at SQLITE_PATH=$SQLITE_PATH; nothing to checkpoint or save."
+            echo "saveable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! node --input-type=module - <<'NODE'
+          import Database from 'better-sqlite3';
+          const db = new Database(process.env.SQLITE_PATH, { fileMustExist: true });
+          try {
+            const [r] = db.pragma('wal_checkpoint(TRUNCATE)');
+            console.log(`[sqlite-persistence] wal_checkpoint(TRUNCATE): busy=${r.busy} wal_frames=${r.log} checkpointed_frames=${r.checkpointed}`);
+            if (r.busy !== 0) {
+              console.error('[sqlite-persistence] checkpoint did not complete (database busy); refusing to save.');
+              process.exitCode = 1;
+            }
+          } finally {
+            db.close();
+          }
+          NODE
+          then
+            echo "::error::SQLite WAL checkpoint did not complete for SQLITE_PATH=$SQLITE_PATH; failing this step and NOT saving the cache."
+            echo "saveable=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "[sqlite-persistence] database ready to save: $SQLITE_PATH ($(wc -c < "$SQLITE_PATH") bytes)"
+          echo "saveable=true" >> "$GITHUB_OUTPUT"
+
+      - name: Save cleared SQLite state cache (new key, does not overwrite prior entries)
+        # actions/cache/save@v4 with the job's own unique key -- GitHub
+        # Actions cache entries are immutable, so this can never overwrite
+        # or mutate media-engine-sqlite-36206810587-1 or any other prior
+        # entry; it only adds a new one that later runs' restore-keys
+        # prefix match will pick up as the most recent.
+        if: always() && steps.sqlite_checkpoint.outputs.saveable == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.SQLITE_PATH }}
+          key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
