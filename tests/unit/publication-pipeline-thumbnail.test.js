@@ -137,6 +137,7 @@ class MockAdapterNoThumbnail extends PublicationProvider {
 test('successful publish generates a thumbnail artifact and uploads it after the video id is confirmed', async () => {
   const mediaFilePath = tmpMediaFile();
   const { storage, dbPath } = freshStorage();
+  await storage.migrate();
   const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath, workingTitle: 'A Great Video Title' });
   const adapter = new MockAdapterWithThumbnail({
     publishResult: { status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'VID123', providerUrl: 'https://youtu.be/VID123' },
@@ -169,6 +170,7 @@ test('successful publish generates a thumbnail artifact and uploads it after the
 test('thumbnail failure does not falsely report a failed or unpublished video, and does not revert PUBLISHED', async () => {
   const mediaFilePath = tmpMediaFile();
   const { storage, dbPath } = freshStorage();
+  await storage.migrate();
   const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath });
   const adapter = new MockAdapterWithThumbnail({
     publishResult: { status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'VID456', providerUrl: 'https://youtu.be/VID456' },
@@ -192,6 +194,7 @@ test('thumbnail failure does not falsely report a failed or unpublished video, a
 test('resume/retry after a thumbnail failure retries only the thumbnail and never uploads a second video', async () => {
   const mediaFilePath = tmpMediaFile();
   const { storage, dbPath } = freshStorage();
+  await storage.migrate();
   const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath });
   let thumbnailAttempt = 0;
   const adapter = new MockAdapterWithThumbnail({
@@ -227,6 +230,7 @@ test('resume/retry after a thumbnail failure retries only the thumbnail and neve
 test('a successful thumbnail is never re-uploaded on a subsequent call (idempotent)', async () => {
   const mediaFilePath = tmpMediaFile();
   const { storage, dbPath } = freshStorage();
+  await storage.migrate();
   const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath });
   const adapter = new MockAdapterWithThumbnail({
     publishResult: { status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'VIDABC', providerUrl: 'https://youtu.be/VIDABC' },
@@ -246,6 +250,7 @@ test('a successful thumbnail is never re-uploaded on a subsequent call (idempote
 test('provider without publishThumbnail support: publication behaves exactly as before Phase 2B', async () => {
   const mediaFilePath = tmpMediaFile();
   const { storage, dbPath } = freshStorage();
+  await storage.migrate();
   const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath });
   const adapter = new MockAdapterNoThumbnail({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'VIDXYZ', providerUrl: 'https://youtu.be/VIDXYZ' });
 
@@ -264,6 +269,7 @@ test('provider without publishThumbnail support: publication behaves exactly as 
 test('thumbnail upload is never attempted before a confirmed provider video id exists', async () => {
   const mediaFilePath = tmpMediaFile();
   const { storage, dbPath } = freshStorage();
+  await storage.migrate();
   const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath });
   const adapter = new MockAdapterWithThumbnail({
     publishResult: { status: PUBLICATION_RESULT_STATUS.EXPLICIT_FAILURE, provider: 'mock', errorClass: 'REJECTED', retryable: true },
