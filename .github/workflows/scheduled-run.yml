@@ -61,13 +61,31 @@ jobs:
       # Optional provider credentials (ADR-0035 §6). The engine's default
       # R0 operating mode (ADR-0001) does not require any of these to run;
       # if a secret is not configured, the corresponding provider is simply
-      # unavailable and the pipeline continues without it. YouTube OAuth
-      # credentials are deliberately never referenced here — real
-      # publication is not authorized by ADR-0035.
+      # unavailable and the pipeline continues without it.
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
       GROQ_FREE_API_KEY: ${{ secrets.GROQ_FREE_API_KEY }}
       GEMINI_FREE_API_KEY: ${{ secrets.GEMINI_FREE_API_KEY }}
+      # YouTube/Facebook publication credentials, wired here so a future
+      # deliberate LIVE run does not additionally require a workflow edit.
+      # Referencing these secrets does NOT by itself authorize publication:
+      # RUN_MODE stays SIMULATION and AUTONOMOUS_ENABLED stays 'false' above
+      # (unchanged by this edit), and a real publish additionally requires a
+      # per-content-version entry in config/authorized_external_actions.json
+      # (ADR-0008/ADR-0030). This narrows the exclusion ADR-0035 §6
+      # previously documented for YouTube; TikTok credentials remain
+      # deliberately unwired since TikTok is parked and excluded from
+      # PUBLICATION_PROVIDER_PRIORITY for this V1 run. NOTE: ADR-0035's own
+      # text should be updated by the Owner to reflect this narrowed
+      # exclusion — that update is not made here (docs/ADR changes are
+      # outside this patch's scope) and is called out under Remaining
+      # Pre-Run Requirements.
+      PUBLICATION_PROVIDER_PRIORITY: 'youtube_shorts,facebook_reels'
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+      FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
