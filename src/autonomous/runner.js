@@ -1,4 +1,5 @@
 import { SystemRunRecorder } from '../state/SystemRun.js';
+import { config } from '../config/index.js';
 import { runResearchProject } from '../research/pipeline.js';
 import { createBrief } from '../brief/pipeline.js';
 import { createScript } from '../script/pipeline.js';
@@ -11,6 +12,7 @@ import { runRightsVerification } from '../rights-verification/pipeline.js';
 import { runMediaProduction } from '../media/pipeline.js';
 import { runFinalCompliance } from '../compliance/pipeline.js';
 import { runPublication } from '../publication/pipeline.js';
+import { PROVIDER_REGISTRY } from '../publication/providerRegistry.js';
 import { OUTCOME as PRODUCTION_OUTCOME } from '../production/constants.js';
 import { OUTCOME as PUBLICATION_OUTCOME } from '../publication/constants.js';
 import { OUTCOME as ASSET_PROVISIONING_OUTCOME } from '../asset-provisioning/constants.js';
@@ -250,44 +252,113 @@ function buildStages(deps, startedMode) {
           runId
         })
     },
-    {
-      name: 'publication',
-      // FROZEN -- see checkpoint §3/§13. Called exactly as any other
-      // caller would: same function, same parameters, no bypass of
-      // assertExternalActionAllowed, no write to
-      // config/authorized_external_actions.json from here. The one
-      // addition, `mode: startedMode`, is not a bypass -- it is what
-      // lets runPublication's existing, unmodified
-      // assertExternalActionAllowed({ action, mode }) call use this
-      // run's actual persisted mode (D-C2) instead of silently falling
-      // back to process-global config.runMode.
-      //
-      // Multi-provider publication: this run's own provider (the same
-      // deps.publication?.provider passed to runPublication below) must
-      // also be threaded into selection, so a PUBLISHED item is only
-      // re-selected for a provider that hasn't published it yet --
-      // preserving the sweep's no_work/no_progress termination for a
-      // run repeatedly configured for the same provider (see
-      // selectEligiblePublications in workSelection.js).
-      select: (storage) => selectEligiblePublications(storage, deps.publication?.provider),
-      isSuccess: (result) =>
-        result?.outcome === PUBLICATION_OUTCOME.PUBLISHED || result?.outcome === PUBLICATION_OUTCOME.ALREADY_PUBLISHED,
-      // ADR-0023: a Publication attempt is one confirmed provider
-      // EXPLICIT_FAILURE persisted as FAILED, surfaced by runPublication()
-      // as OUTCOME.PROVIDER_FAILURE. AMBIGUOUS, AUTHORIZATION_DENIED and
-      // every other outcome deliberately do NOT consume the slot.
-      consumedRetryAttempt: (result) => result?.outcome === PUBLICATION_OUTCOME.PROVIDER_FAILURE,
-      run: (item, runId) =>
-        (fn.publication ?? runPublication)({
-          storage: deps.storage,
-          contentBriefId: item.contentBriefId,
-          provider: deps.publication?.provider,
-          adapter: deps.publication?.adapter,
-          requestedPublishAt: deps.publication?.requestedPublishAt,
-          runId,
-          mode: startedMode
-        })
-    }
+    // FROZEN stage logic -- see checkpoint §3/§13. Called exactly as any
+    // other caller would: same function, same parameters, no bypass of
+    // assertExternalActionAllowed, no write to
+    // config/authorized_external_actions.json from here. The one
+    // addition, `mode: startedMode`, is not a bypass -- it is what lets
+    // runPublication's existing, unmodified
+    // assertExternalActionAllowed({ action, mode }) call use this run's
+    // actual persisted mode (D-C2) instead of silently falling back to
+    // process-global config.runMode.
+    //
+    // V1 production-wiring audit fix: previously this was a single stage
+    // entry hardcoded to `deps.publication?.provider`, which src/index.js
+    // never supplied -- so every real production invocation silently
+    // published only to runPublication's own 'youtube' default, and
+    // youtube_shorts/tiktok/facebook_reels were unreachable regardless of
+    // how many sweeps ran. `publicationProviders` below resolves, in
+    // order: an explicit multi-provider override (`deps.publication.providers`),
+    // a caller-supplied single provider (`deps.publication.provider` --
+    // preserves every existing single-provider test byte-for-byte,
+    // including its adapter injection and the literal stage name
+    // 'publication' that `result.processed` assertions and
+    // `deps.stageFns.publication` key off of), or -- the real production
+    // default -- `config.publicationProviderPriority` (the V1 target
+    // list). One publication sub-stage is built per resolved provider so
+    // a single invocation's sweep loop attempts every configured
+    // provider for each eligible item; each sub-stage keeps its own
+    // per-provider selection (see selectEligiblePublications in
+    // workSelection.js) so a PUBLISHED item is only re-selected for a
+    // provider that hasn't published it yet, preserving the sweep's
+    // no_work/no_progress termination.
+    ...(() => {
+      const requestedProviders =
+        deps.publication?.providers ??
+        (deps.publication?.provider
+          ? [deps.publication.provider]
+          : (deps.publication?.adapter ? ['youtube'] : config.publicationProviderPriority));
+      // Unlike config.publicationProviderPriority (validated against
+      // PROVIDER_REGISTRY at config-load time by envPublicationProviders in
+      // src/config/index.js) and deps.publication.provider (resolved by
+      // runPublication itself), an explicit deps.publication.providers
+      // override reached this point with no registry check at all -- an
+      // unknown id would otherwise only surface as a thrown "Unknown
+      // provider" error deep inside runPublication, at first-sweep time for
+      // that provider, not here at stage-build time. Reject it immediately
+      // instead, same as the config path.
+      if (deps.publication?.providers) {
+        // An explicitly-supplied empty array (`providers: []`) would
+        // otherwise pass both checks below vacuously -- zero unknown ids,
+        // zero duplicates -- and reach the `.map()` beyond this block with
+        // zero elements, silently building zero publication stages for
+        // this invocation. Reject it here, analogous to the empty-list
+        // error in envPublicationProviders (src/config/index.js).
+        if (deps.publication.providers.length === 0) {
+          throw new Error(
+            'deps.publication.providers was supplied as an empty array, which would silently ' +
+            'disable all publication for this invocation. Supply at least one known provider id, ' +
+            'or omit deps.publication.providers entirely to use deps.publication.provider or the ' +
+            'config.publicationProviderPriority default.'
+          );
+        }
+        const unknown = deps.publication.providers.filter(
+          (id) => !Object.prototype.hasOwnProperty.call(PROVIDER_REGISTRY, id)
+        );
+        if (unknown.length > 0) {
+          throw new Error(
+            `deps.publication.providers contains unknown publication provider id(s): ${unknown.join(', ')}. ` +
+            `Known provider ids: ${Object.keys(PROVIDER_REGISTRY).join(', ')}.`
+          );
+        }
+      }
+      // Defensive de-duplication: config.publicationProviderPriority is
+      // already deduped at config-load time (see envPublicationProviders in
+      // src/config/index.js), but a caller-supplied deps.publication.providers
+      // override bypasses that validation entirely -- de-dupe here too so a
+      // caller passing e.g. ['tiktok', 'tiktok'] can never build two
+      // identical sub-stages racing the same (content_version, provider) row.
+      const publicationProviders = [...new Set(requestedProviders)];
+      const singleProvider = publicationProviders.length === 1;
+
+      return publicationProviders.map((provider) => ({
+        name: singleProvider ? 'publication' : `publication:${provider}`,
+        select: (storage) => selectEligiblePublications(storage, provider),
+        isSuccess: (result) =>
+          result?.outcome === PUBLICATION_OUTCOME.PUBLISHED || result?.outcome === PUBLICATION_OUTCOME.ALREADY_PUBLISHED,
+        // ADR-0023: a Publication attempt is one confirmed provider
+        // EXPLICIT_FAILURE persisted as FAILED, surfaced by
+        // runPublication() as OUTCOME.PROVIDER_FAILURE. AMBIGUOUS,
+        // AUTHORIZATION_DENIED and every other outcome deliberately do
+        // NOT consume the slot.
+        consumedRetryAttempt: (result) => result?.outcome === PUBLICATION_OUTCOME.PROVIDER_FAILURE,
+        run: (item, runId) =>
+          (fn.publication ?? runPublication)({
+            storage: deps.storage,
+            contentBriefId: item.contentBriefId,
+            provider,
+            // An explicit test/controlled-caller adapter override only
+            // applies when there is exactly one configured provider (its
+            // original single-provider shape); a multi-provider fan-out
+            // always resolves each provider's real adapter via
+            // providerRegistry.js inside runPublication.
+            adapter: singleProvider ? deps.publication?.adapter : undefined,
+            requestedPublishAt: deps.publication?.requestedPublishAt,
+            runId,
+            mode: startedMode
+          })
+      }));
+    })()
   ];
 }
 
@@ -340,11 +411,11 @@ function eligibilitySignature(sweepEligible) {
  * @param {object} [deps.production] - { artifactsDir }
  * @param {object} [deps.assetProvisioning] - { provider } -- Asset Provisioning-stage AssetSourceProvider override
  * @param {object} [deps.media] - { artifactsDir }
- * @param {object} [deps.publication] - { provider, adapter, requestedPublishAt }
+ * @param {object} [deps.publication] - { provider, providers, adapter, requestedPublishAt }. `providers` (array) fans out to one publication sub-stage per id; a single `provider` string preserves the original single-stage behavior (name 'publication', adapter override honored); neither supplied falls back to config.publicationProviderPriority (V1 production default: youtube_shorts, tiktok, facebook_reels).
  * @param {string} [deps.mode] - 'SIMULATION' | 'LIVE', forwarded to SystemRunRecorder.start(); defaults to config.runMode there
  * @param {SystemRunRecorder} [deps.systemRunRecorder] - injectable for tests; defaults to `new SystemRunRecorder(deps.storage)`
  * @param {(stageName: string, item: object, error: Error) => void} [deps.onStageError] - if provided, a thrown stage error is reported here and swallowed so the sweep continues with the next item; without it, a thrown error aborts the whole run (the system_runs record is marked FAILED) and is rethrown to the caller
- * @param {object} [deps.stageFns] - test-only per-stage function substitutes, keyed by stage name ('research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production', 'asset-provisioning', 'rights-verification', 'media-production', 'final-compliance', 'publication'). Never used in normal operation.
+ * @param {object} [deps.stageFns] - test-only per-stage function substitutes, keyed by stage name ('research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production', 'asset-provisioning', 'rights-verification', 'media-production', 'final-compliance', 'publication'). `stageFns.publication` substitutes runPublication for every publication sub-stage: with a single resolved provider the one stage is literally named 'publication'; with a multi-provider fan-out each dynamically-named sub-stage (`publication:<provider>`) still resolves its run function through this same `stageFns.publication` key (not a per-provider key) and is called with that sub-stage's own `provider` argument, so a substitute needing per-provider behavior must branch on the `provider` it receives. Never used in normal operation.
  * @returns {Promise<{ runId: string, mode: string, sweeps: number, processed: Array<{ stage: string, count: number }>, stopReason: 'no_work' | 'no_progress' }>}
  */
 export async function runAutonomousOperation(deps) {

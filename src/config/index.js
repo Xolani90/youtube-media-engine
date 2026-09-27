@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PROVIDER_REGISTRY } from '../publication/providerRegistry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -52,6 +53,57 @@ function envList(name, fallback) {
   const v = process.env[name];
   if (!v) return fallback;
   return v.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+// V1 production-wiring audit (Part 1): PUBLICATION_PROVIDER_PRIORITY must
+// fail closed on anything that could silently misconfigure the autonomous
+// runner's publication fan-out (src/autonomous/runner.js#buildStages):
+//   - an id not in PROVIDER_REGISTRY would only surface as a thrown
+//     "Unknown publication provider" error deep inside runPublication, at
+//     first sweep time, not at config load -- reject it here instead so a
+//     bad env var is caught immediately and loudly.
+//   - a duplicate id would silently build two identical publication
+//     sub-stages (same provider, same selector, same adapter), each
+//     independently attempting/racing the same (content_version, provider)
+//     row -- de-duplicate, preserving the first occurrence's position so
+//     ordering stays deterministic and intentional.
+//   - an explicitly-supplied env var that resolves to zero usable ids
+//     (empty string, whitespace-only, or "," alone) must not silently
+//     disable publication or silently fall back to the default -- fail
+//     loudly instead, since falling back would hide a real config typo and
+//     silently disabling would hide a missing feature.
+function envPublicationProviders(name, fallback) {
+  // envList() treats an explicitly-supplied empty string as "not set" (its
+  // own `if (!v) return fallback` guard) and returns `fallback` before ever
+  // reaching the empty-list check below -- which would silently defeat the
+  // "explicitly empty must fail loudly" contract above for that one input.
+  // Route that case around envList() directly; every other explicit value
+  // (whitespace-only, ",", a real list) still goes through envList() as
+  // before, and an actually-absent variable is unaffected.
+  const raw = process.env[name];
+  const ids = raw === '' ? [] : envList(name, fallback);
+  const seen = new Set();
+  const deduped = [];
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    deduped.push(id);
+  }
+  const unknown = deduped.filter((id) => !Object.prototype.hasOwnProperty.call(PROVIDER_REGISTRY, id));
+  if (unknown.length > 0) {
+    throw new Error(
+      `${name} contains unknown publication provider id(s): ${unknown.join(', ')}. ` +
+      `Known provider ids: ${Object.keys(PROVIDER_REGISTRY).join(', ')}. ` +
+      'Fix or unset the variable to use the default.'
+    );
+  }
+  if (deduped.length === 0) {
+    throw new Error(
+      `${name} resolved to an empty publication-provider list, which would silently disable all ` +
+      'publication. Unset the variable to use the V1 default, or supply at least one known provider id.'
+    );
+  }
+  return deduped;
 }
 
 function loadScoringWeights() {
@@ -129,6 +181,22 @@ export const config = {
   llmProviderPriority: envList('LLM_PROVIDER_PRIORITY', ['gemini-free', 'groq-free', 'openrouter-free']),
 
   opportunityProviderPriority: envList('OPPORTUNITY_PROVIDER_PRIORITY', ['rss']),
+
+  // V1 production-wiring audit fix: the autonomous production entrypoint
+  // (src/index.js) previously never supplied deps.publication.provider,
+  // so runAutonomousOperation's publication stage always fell back to
+  // its single hardcoded 'youtube' default (src/publication/pipeline.js,
+  // src/autonomous/workSelection.js#selectEligiblePublications) --
+  // youtube_shorts, tiktok, and facebook_reels were registered
+  // (src/publication/providerRegistry.js) but structurally unreachable
+  // through the real production path. This is the ordered list of
+  // publication provider ids the autonomous runner fans out to, one
+  // publication sub-stage per provider (see buildStages in
+  // src/autonomous/runner.js), so a single production invocation's
+  // sweep loop attempts every V1 target for each eligible content
+  // version. Configurable for ops; defaults to exactly the V1
+  // publication targets.
+  publicationProviderPriority: envPublicationProviders('PUBLICATION_PROVIDER_PRIORITY', ['youtube_shorts', 'tiktok', 'facebook_reels']),
 
   // D-C2 (ADR-0002 / ADR-0008): path to the Owner-controlled external
   // side-effect authorization file. Deliberately NOT loaded/cached here —
