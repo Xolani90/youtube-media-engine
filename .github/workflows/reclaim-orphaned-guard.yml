@@ -99,9 +99,9 @@ jobs:
           SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
         run: |
           node scripts/reclaim-autonomous-run.js \
-            --run-id aecd75b7-1bec-4d8c-9287-680fb0426436 \
+            --run-id 5ed395a4-f386-4896-9869-bef7c1d23c96 \
             --actor OWNER \
-            --reason "orphaned by cancelled workflow run 36202028056"
+            --reason "orphaned guard from workflow run 36483385581 (acquired 2026-09-28T21:02:51Z, never released; run no longer visible in GitHub)"
 
       - name: List RUNNING autonomous runs AFTER reclaim (verify cleared)
         env:
@@ -110,11 +110,11 @@ jobs:
           echo "Running: node scripts/reclaim-autonomous-run.js --list"
           OUTPUT="$(node scripts/reclaim-autonomous-run.js --list)"
           echo "$OUTPUT"
-          if echo "$OUTPUT" | grep -q "aecd75b7-1bec-4d8c-9287-680fb0426436"; then
-            echo "::error::Reclaimed UUID aecd75b7-1bec-4d8c-9287-680fb0426436 is still reported as RUNNING after reclaim."
+          if echo "$OUTPUT" | grep -q "5ed395a4-f386-4896-9869-bef7c1d23c96"; then
+            echo "::error::Reclaimed UUID 5ed395a4-f386-4896-9869-bef7c1d23c96 is still reported as RUNNING after reclaim."
             exit 1
           fi
-          echo "Confirmed: aecd75b7-1bec-4d8c-9287-680fb0426436 is no longer reported as RUNNING."
+          echo "Confirmed: 5ed395a4-f386-4896-9869-bef7c1d23c96 is no longer reported as RUNNING."
 
       - name: Checkpoint SQLite WAL before saving
         # Same convention as scheduled-run.yml: fold the WAL into the main
