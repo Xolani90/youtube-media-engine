@@ -322,7 +322,7 @@ export async function runPublication({
   if (isVisibilityMismatchRow(existing)) {
     return visibilityMismatchResult(existing);
   }
-  if (existing?.status === PUBLICATION_STATUS.PENDING) {
+  if (existing?.status === PUBLICATION_STATUS.PENDING && !existing.provider_state_json) {
     const interrupted = storage.transaction(() => {
       storage.run(
         `UPDATE publications SET status = ?, result_json = ?, updated_at = ? WHERE id = ? AND status = 'PENDING'`,
@@ -504,6 +504,17 @@ export async function runPublication({
       [contentVersion.id, provider]
     );
     if (raceExisting) {
+      // A PENDING row with durable provider state is already the claimed
+      // attempt. Re-enter the provider using that state rather than
+      // treating the row as a concurrent race. Provider-specific state
+      // remains opaque to the publication core.
+      if (raceExisting.status === PUBLICATION_STATUS.PENDING && raceExisting.provider_state_json) {
+        return {
+          publicationId: raceExisting.id,
+          providerStateJson: raceExisting.provider_state_json
+        };
+      }
+
       // ADR-0030: a VISIBILITY_MISMATCH FAILED row is deliberately excluded
       // from reclaim (falls through to `raced` below, never flipped to
       // PENDING, never re-uploaded). All other FAILED rows are unchanged.
@@ -521,7 +532,8 @@ export async function runPublication({
         // handles by re-reading and mapping non-PUBLISHED -> AMBIGUOUS.
         const reclaim = storage.run(
           `UPDATE publications
-             SET status = 'PENDING', request_json = ?, attempt_count = attempt_count + 1, updated_at = ?
+             SET status = 'PENDING', request_json = ?, provider_state_json = NULL,
+                 attempt_count = attempt_count + 1, updated_at = ?
            WHERE id = ? AND status = 'FAILED'`,
           [requestJson, nowISO(), raceExisting.id]
         );
@@ -619,7 +631,31 @@ export async function runPublication({
   // result -- only the normalized PUBLICATION_RESULT_STATUS contract. ---
   let result;
   try {
-    result = await adapter.publish(request);
+    const providerState = claim.providerStateJson
+      ? JSON.parse(claim.providerStateJson)
+      : null;
+
+    const saveProviderState = (state) => {
+      const serialized = state == null ? null : JSON.stringify(state);
+      const saved = storage.run(
+        `UPDATE publications
+            SET provider_state_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'PENDING'`,
+        [serialized, nowISO(), claim.publicationId]
+      );
+      // Persisting state must not silently no-op (e.g. the row was moved out
+      // of PENDING by a concurrent writer): the adapter relies on this being
+      // durable before it sends any media byte. Clearing (null) against a row
+      // that already left PENDING is a legitimate no-op and stays silent.
+      if (serialized !== null && saved?.changes !== 1) {
+        throw new Error('provider_state_not_persisted');
+      }
+    };
+
+    result = await adapter.publish(request, {
+      providerState,
+      saveProviderState
+    });
   } catch (err) {
     // A provider adapter throwing is a programmer/contract error (see
     // PublicationProvider.js docstring), not a normal outcome -- but we
@@ -649,7 +685,7 @@ export async function runPublication({
     // quarantine record commit together; failure propagates.
     const { row, retry } = storage.transaction(() => {
       storage.run(
-        `UPDATE publications SET status = 'FAILED', result_json = ?, failure_reason = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE publications SET status = 'FAILED', result_json = ?, failure_reason = ?, provider_state_json = NULL, updated_at = ? WHERE id = ?`,
         [JSON.stringify(result), result.errorClass ?? 'PROVIDER_FAILURE', nowISO(), claim.publicationId]
       );
       const retryResult = recordFailedAttempt(storage, {
@@ -706,7 +742,7 @@ export async function runPublication({
     const confirmed = result.confirmedVisibility ?? null;
     const mismatchRow = storage.transaction(() => {
       storage.run(
-        `UPDATE publications SET status = 'FAILED', result_json = ?, failure_reason = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE publications SET status = 'FAILED', result_json = ?, failure_reason = ?, provider_state_json = NULL, updated_at = ? WHERE id = ?`,
         [
           JSON.stringify({ ...result, visibilityMismatch: { requested: request.requestedVisibility, confirmed } }),
           VISIBILITY_MISMATCH_FAILURE_REASON, nowISO(), claim.publicationId
@@ -739,7 +775,7 @@ export async function runPublication({
     }
     storage.run(
       `UPDATE publications
-        SET status = 'PUBLISHED', provider_item_id = ?, provider_url = ?, result_json = ?, updated_at = ?
+        SET status = 'PUBLISHED', provider_item_id = ?, provider_url = ?, result_json = ?, provider_state_json = NULL, updated_at = ?
        WHERE id = ?`,
       [result.providerItemId, result.providerUrl ?? null, JSON.stringify(result), nowISO(), claim.publicationId]
     );

@@ -52,9 +52,15 @@ export class PublicationProvider {
    *   never a guess dressed up as a confirmed id.
    *
    * @param {object} request - see ./PublicationRequest.js
+   * @param {object} [context] - provider-attempt persistence context
+   * @param {object|null} [context.providerState] - previously persisted,
+   *   provider-owned transient state for this publication attempt
+   * @param {(state: object|null) => void} [context.saveProviderState] -
+   *   callback for durably replacing provider-owned transient state.
+   *   The callback must never receive secrets such as access tokens.
    * @returns {Promise<{status: string, provider: string, [key: string]: any}>}
    */
-  async publish(request) {
+  async publish(request, context = {}) {
     throw new Error('not implemented');
   }
 }

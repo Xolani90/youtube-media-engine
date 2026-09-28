@@ -120,9 +120,11 @@ class MockAdapter extends PublicationProvider {
   get id() {
     return 'mock';
   }
-  async publish(request) {
-    this.calls.push(request);
-    return typeof this._resultOrFn === 'function' ? this._resultOrFn(request) : this._resultOrFn;
+  async publish(request, context = {}) {
+    this.calls.push({ request, context });
+    return typeof this._resultOrFn === 'function'
+      ? this._resultOrFn(request, context)
+      : this._resultOrFn;
   }
 }
 
@@ -250,6 +252,126 @@ test('ambiguous provider result: no transition, never blindly retried on the nex
     const second = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: adapter2 });
     assert.equal(second.outcome, 'AMBIGUOUS');
     assert.equal(adapter2.calls.length, 0, 'an ambiguous result must never be auto-retried');
+  });
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('durable provider state: adapter can persist and recover provider-owned state for a PENDING publication', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId, mediaArtifactId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    const persistedState = {
+      sessionUrl: 'https://upload.example/session/abc',
+      contentLength: 15
+    };
+
+    const firstAdapter = new MockAdapter(async (_request, context) => {
+      assert.equal(context.providerState, null);
+      assert.equal(typeof context.saveProviderState, 'function');
+
+      context.saveProviderState(persistedState);
+
+      return {
+        status: PUBLICATION_RESULT_STATUS.AMBIGUOUS,
+        provider: 'mock',
+        reconciliationInfo: { note: 'simulated_interrupted_upload' }
+      };
+    });
+
+    const first = await runPublication({
+      storage, contentBriefId, provider: 'mock', adapter: firstAdapter
+    });
+
+    assert.equal(first.outcome, 'AMBIGUOUS');
+
+    const firstRow = storage.get(
+      'SELECT * FROM publications WHERE content_version_id = ? AND provider = ?',
+      [contentVersionId, 'mock']
+    );
+    assert.equal(firstRow.status, 'AMBIGUOUS');
+
+    // The provider-state callback is deliberately only valid while the
+    // publication is PENDING. Once the adapter returns AMBIGUOUS, the
+    // publication core has moved beyond that state.
+    assert.equal(firstRow.provider_state_json, JSON.stringify(persistedState));
+
+    // Recreate the exact recoverable shape a resumable provider would leave
+    // behind: PENDING plus durable provider-owned state.
+    storage.run(
+      `UPDATE publications
+          SET status = 'PENDING', result_json = NULL, failure_reason = NULL,
+              provider_state_json = ?, updated_at = ?
+        WHERE id = ?`,
+      [JSON.stringify(persistedState), nowISO(), firstRow.id]
+    );
+
+    const secondAdapter = new MockAdapter(async (_request, context) => {
+      assert.deepEqual(context.providerState, persistedState);
+      assert.equal(typeof context.saveProviderState, 'function');
+
+      return {
+        status: PUBLICATION_RESULT_STATUS.SUCCESS,
+        provider: 'mock',
+        providerItemId: 'resumed-video',
+        providerUrl: 'https://example.com/resumed-video'
+      };
+    });
+
+    const second = await runPublication({
+      storage, contentBriefId, provider: 'mock', adapter: secondAdapter
+    });
+
+    assert.equal(second.outcome, 'PUBLISHED');
+    assert.equal(secondAdapter.calls.length, 1);
+
+    const finalRow = storage.get(
+      'SELECT * FROM publications WHERE content_version_id = ? AND provider = ?',
+      [contentVersionId, 'mock']
+    );
+    assert.equal(finalRow.status, 'PUBLISHED');
+    assert.equal(finalRow.provider_item_id, 'resumed-video');
+    assert.equal(finalRow.provider_state_json, null);
+  });
+
+  cleanup(storage, dbPath, videoFile);
+});
+
+test('durable provider state: persisting state for a row that is no longer PENDING throws (never a silent no-op); clearing it stays silent', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const videoFile = path.join(os.tmpdir(), `pub-video-${crypto.randomUUID()}.mp4`);
+  fs.writeFileSync(videoFile, 'fake mp4 bytes');
+  const { contentBriefId, contentVersionId } = seedFullyEligibleContent(storage, { mediaFilePath: videoFile });
+
+  await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
+    let threw = null;
+    let clearThrew = null;
+
+    const adapter = new MockAdapter(async (_request, context) => {
+      // A concurrent writer moves the claimed row out of PENDING.
+      storage.run(
+        `UPDATE publications SET status = 'AMBIGUOUS' WHERE content_version_id = ? AND provider = 'mock'`,
+        [contentVersionId]
+      );
+      try { context.saveProviderState({ sessionUrl: 'https://upload.example/session/lost' }); } catch (err) { threw = err; }
+      try { context.saveProviderState(null); } catch (err) { clearThrew = err; }
+      return { status: PUBLICATION_RESULT_STATUS.AMBIGUOUS, provider: 'mock', reconciliationInfo: { note: 'probe' } };
+    });
+
+    await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
+
+    assert.match(String(threw?.message), /provider_state_not_persisted/);
+    assert.equal(clearThrew, null, 'clearing against a row that already left PENDING is a legitimate no-op');
+    const row = storage.get(
+      'SELECT * FROM publications WHERE content_version_id = ? AND provider = ?',
+      [contentVersionId, 'mock']
+    );
+    assert.equal(row.provider_state_json, null, 'the lost write left nothing behind');
   });
 
   cleanup(storage, dbPath, videoFile);
@@ -1053,7 +1175,7 @@ test('ADR-0030: standing grant authorizes a YouTube publish, supplies PUBLIC, pr
   assert.equal(result.publication.status, 'PUBLISHED');
   assert.equal(result.publication.provider_item_id, 'yt-vid-1');
   assert.equal(adapter.calls.length, 1);
-  assert.equal(adapter.calls[0].requestedVisibility, 'public', 'standing grant supplies PUBLIC');
+  assert.equal(adapter.calls[0].request.requestedVisibility, 'public', 'standing grant supplies PUBLIC');
   assert.equal(JSON.parse(result.publication.request_json).requestedVisibility, 'public');
   assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'PUBLISHED');
 
@@ -1075,7 +1197,7 @@ test('ADR-0030: exact per-item grant keeps baseline semantics -- no requested vi
 
   // A private confirmation is NOT a mismatch when PUBLIC was never requested.
   assert.equal(result.outcome, 'PUBLISHED');
-  assert.equal(adapter.calls[0].requestedVisibility, null);
+  assert.equal(adapter.calls[0].request.requestedVisibility, null);
   const logs = grantLogs(storage, contentVersionId);
   assert.equal(logs.length, 1);
   assert.match(logs[0].reason, /authorization_grant_PER_ITEM_/);
@@ -1093,7 +1215,7 @@ test('ADR-0030: when both grants match, the exact per-item grant takes precedenc
   const result = await withLiveAuthorized([STANDING, `publish:youtube:${contentVersionId}`], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
 
   assert.equal(result.outcome, 'PUBLISHED');
-  assert.equal(adapter.calls[0].requestedVisibility, null);
+  assert.equal(adapter.calls[0].request.requestedVisibility, null);
   assert.match(grantLogs(storage, contentVersionId)[0].reason, /authorization_grant_PER_ITEM_/);
 
   cleanup(storage, dbPath, videoFile);
@@ -1110,7 +1232,7 @@ test('ADR-0030: caller-supplied visibility/authorization arguments cannot select
     storage, contentBriefId, provider: 'youtube', adapter,
     requestedVisibility: 'public', visibility: 'public', grant: 'STANDING_YOUTUBE_PUBLIC', authorized: true
   }));
-  assert.equal(adapter.calls[0].requestedVisibility, null, 'runPublication has no visibility parameter; extra args are ignored');
+  assert.equal(adapter.calls[0].request.requestedVisibility, null, 'runPublication has no visibility parameter; extra args are ignored');
   assert.match(grantLogs(storage, contentVersionId)[0].reason, /PER_ITEM/);
 
   cleanup(storage, dbPath, videoFile);
@@ -1215,6 +1337,28 @@ for (const [label, confirmed] of [['private', 'private'], ['unlisted', 'unlisted
     cleanup(storage, dbPath, videoFile);
   });
 }
+
+test('ADR-0030: VISIBILITY_MISMATCH terminal FAILED clears durable provider state (defence in depth; core must not rely on the adapter)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { videoFile, contentBriefId } = seedYt(storage);
+
+  // A provider that persists resumable state and, unlike the YouTube adapter,
+  // never clears it itself before returning a confirmed (mismatched) SUCCESS.
+  const adapter = new MockAdapter((_request, context) => {
+    context.saveProviderState({ sessionUrl: 'https://upload.example/session/mismatch' });
+    return successResult('private', 'yt-mismatch-state');
+  });
+  const result = await withLiveAuthorized([STANDING], () => runPublication({ storage, contentBriefId, provider: 'youtube', adapter }));
+
+  assert.equal(result.outcome, 'VISIBILITY_MISMATCH');
+  const row = storage.get('SELECT * FROM publications WHERE id = ?', [result.publication.id]);
+  assert.equal(row.status, 'FAILED');
+  assert.equal(row.failure_reason, 'VISIBILITY_MISMATCH');
+  assert.equal(row.provider_state_json, null);
+
+  cleanup(storage, dbPath, videoFile);
+});
 
 test('ADR-0030: VISIBILITY_MISMATCH is terminal -- a later run (standing still present) never reclaims, re-uploads, or re-claims; row unchanged', async () => {
   const { storage, dbPath } = freshStorage();
