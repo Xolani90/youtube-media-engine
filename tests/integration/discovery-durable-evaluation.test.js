@@ -108,39 +108,55 @@ const count = (storage, table) => storage.get(`SELECT COUNT(*) n FROM ${table}`)
 const ledger = (storage) => Object.fromEntries(storage.all('SELECT * FROM discovery_observations').map((r) => [r.identity_value, r]));
 const evaluations = (storage) => storage.all('SELECT * FROM discovery_evaluations');
 
-test('H/J. a run that fails at candidate 3 keeps evaluations 1-2, records no ledger outcome and no selection; the next run reuses 1-2 and resumes', async () => {
+test('H/J. a candidate whose feature computation fails is rejected individually: evaluations for the others stay durable, the ledger records outcomes only after selection, and the next run re-evaluates the rejected candidate', async () => {
   const h = harness();
   try {
-    await assert.rejects(h.run({ failOn: 'g-3' }, T0), /exploded on g-3/);
+    const first = await h.run({ failOn: 'g-3' }, T0);
 
-    // Durable evaluations survive the failed run.
-    assert.equal(evaluations(h.storage).length, 2);
-    assert.equal(h.counters.proposition, 3);
-    assert.equal(h.counters.rawFeatures, 3);
+    // Per-candidate rejection: the run completes; only g-3 is rejected.
+    assert.equal(first.discovery.stats.featureRejected, 1);
+    assert.equal(first.discovery.stats.scored, 4);
+    assert.equal(first.discovery.stats.selected, 2);
+    assert.equal(h.storage.get('SELECT status FROM system_runs ORDER BY started_at DESC LIMIT 1').status, 'COMPLETED');
+    assert.equal(h.counters.proposition, 5);
+    assert.equal(h.counters.rawFeatures, 5);
 
-    // Failure safety: no partial selection, no ledger outcome, no opportunity.
-    assert.equal(count(h.storage, 'opportunities'), 0);
-    const rows = Object.values(ledger(h.storage));
-    assert.equal(rows.length, 5);
-    assert.ok(rows.every((r) => r.evaluation_outcome === 'NOT_EVALUATED' && r.last_evaluated_at === null && r.opportunity_id === null),
-      'ledger untouched by evaluation completion: still NOT_EVALUATED, no evaluation time, no opportunity');
-    assert.equal(h.storage.get('SELECT status FROM system_runs ORDER BY started_at DESC LIMIT 1').status, 'FAILED', 'Discovery failure is not converted to success');
+    // Durable evaluations: committed for every candidate that completed; none for g-3.
+    const evalKeys = evaluations(h.storage).map((r) => r.identity_key).join('|');
+    assert.equal(evaluations(h.storage).length, 4);
+    assert.ok(!evalKeys.includes('g-3'), 'the rejected candidate has no durable evaluation');
+    const rejected = h.storage.all("SELECT reason FROM decision_log WHERE stage = 'FEATURE_COMPUTATION' AND decision = 'REJECTED'");
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].reason, 'INELIGIBLE_FEATURE_COMPUTATION_FAILED');
 
+    // Ledger outcomes are recorded only after selection over the scored population;
+    // the rejected candidate is non-suppressing (NOT_SCORED_UNRESOLVED) with no opportunity.
+    const after1 = ledger(h.storage);
+    assert.equal(after1['g-1'].evaluation_outcome, 'SELECTED');
+    assert.equal(after1['g-2'].evaluation_outcome, 'SELECTED');
+    assert.equal(after1['g-4'].evaluation_outcome, 'SCORED_NOT_SELECTED');
+    assert.equal(after1['g-5'].evaluation_outcome, 'SCORED_NOT_SELECTED');
+    assert.equal(after1['g-3'].evaluation_outcome, 'NOT_SCORED_UNRESOLVED');
+    assert.equal(after1['g-3'].opportunity_id, null);
+    assert.equal(count(h.storage, 'opportunities'), 4, 'only scored candidates are persisted; g-3 never becomes an opportunity');
+    assert.ok(!h.storage.all('SELECT title FROM opportunities').some((r) => r.title === STORIES[2].title));
+
+    // Later run (1h): SELECTED identities and the unresolved g-3 are re-admitted;
+    // g-4/g-5 remain inside their cooldown and are not evaluated again.
     const second = await h.run({}, T0 + HOUR);
-    assert.equal(h.counters.proposition, 3 + 3, 'g-1 and g-2 were NOT regenerated; only g-3..g-5 needed proposition calls');
-    assert.equal(h.counters.rawFeatures, 3 + 3, 'only g-3..g-5 needed feature calls');
-    assert.equal(second.discovery.stats.scored, 5);
-    assert.equal(second.discovery.stats.selected, 2);
-    assert.equal(evaluations(h.storage).length, 5);
+    assert.equal(second.discovery.stats.discovered, 3);
+    assert.equal(second.discovery.stats.featureRejected, 0);
+    assert.equal(second.discovery.stats.scored, 3);
+    assert.equal(h.counters.proposition, 5 + 3, 'g-3 is evaluated fresh; g-1/g-2 begin a new cycle (their record is not after the recorded outcome)');
+    assert.equal(h.counters.rawFeatures, 5 + 3);
+    assert.equal(evaluations(h.storage).length, 5, 'g-3 now has a durable evaluation');
 
-    // Outcomes are recorded only now, after selection over the whole admitted population.
-    const after = ledger(h.storage);
-    assert.deepEqual(Object.values(after).map((r) => r.evaluation_outcome).sort(),
-      ['SCORED_NOT_SELECTED', 'SCORED_NOT_SELECTED', 'SCORED_NOT_SELECTED', 'SELECTED', 'SELECTED']);
-    assert.equal(after['g-1'].evaluation_outcome, 'SELECTED');
-    assert.equal(after['g-2'].evaluation_outcome, 'SELECTED');
-    assert.equal(count(h.storage, 'opportunities'), 5);
-    assert.equal(h.storage.get(`SELECT COUNT(*) n FROM decision_log WHERE decision = 'REUSED'`).n, 2);
+    const after2 = ledger(h.storage);
+    assert.notEqual(after2['g-3'].evaluation_outcome, 'NOT_SCORED_UNRESOLVED', 'g-3 was re-evaluated and classified');
+    assert.equal(after2['g-3'].evaluation_outcome, 'SCORED_NOT_SELECTED');
+    assert.equal(after2['g-1'].evaluation_outcome, 'SELECTED');
+    assert.equal(after2['g-2'].evaluation_outcome, 'SELECTED');
+    assert.equal(after2['g-4'].last_evaluated_at, after1['g-4'].last_evaluated_at, 'cooldown clock of g-4 not reset');
   } finally { h.cleanup(); }
 });
 
@@ -166,8 +182,13 @@ test('J. while evaluations are being committed the ledger is untouched (no outco
 test('I. current-population boundary: a durable evaluation for an identity absent from the current fetch is never selected', async () => {
   const h = harness();
   try {
-    await assert.rejects(h.run({ failOn: 'g-5' }, T0), /exploded on g-5/);
-    assert.equal(evaluations(h.storage).length, 4, 'g-1..g-4 are durably evaluated');
+    const first = await h.run({ failOn: 'g-5' }, T0);
+    assert.equal(first.discovery.stats.featureRejected, 1);
+    assert.equal(evaluations(h.storage).length, 4, 'g-1..g-4 are durably evaluated; g-5 was rejected and has none');
+    const firstOpps = new Set(h.storage.all('SELECT id FROM opportunities').map((r) => r.id));
+    assert.equal(firstOpps.size, 4);
+    const firstLedger = ledger(h.storage);
+    assert.equal(firstLedger['g-5'].evaluation_outcome, 'NOT_SCORED_UNRESOLVED');
 
     const rawBefore = h.counters.rawFeatures;
     const second = await h.run({ stories: [STORIES[4], EXTRA], topK: 5 }, T0 + HOUR);
@@ -176,32 +197,50 @@ test('I. current-population boundary: a durable evaluation for an identity absen
     assert.equal(second.discovery.stats.selected, 2);
     assert.equal(h.counters.rawFeatures - rawBefore, 2, 'only g-5 and g-6 were evaluated');
 
-    const titles = h.storage.all('SELECT title FROM opportunities').map((r) => r.title).sort();
-    assert.deepEqual(titles, [EXTRA.title, STORIES[4].title].sort(), 'g-1..g-4 have durable evaluations but were not selected or inserted');
+    // Only g-5 and g-6 were selected/inserted by the second run; g-1..g-4 (durable
+    // evaluations, absent from this fetch) gained nothing.
+    const newOpps = h.storage.all('SELECT id, title FROM opportunities').filter((r) => !firstOpps.has(r.id));
+    assert.deepEqual(newOpps.map((r) => r.title).sort(), [EXTRA.title, STORIES[4].title].sort());
+    assert.equal(count(h.storage, 'opportunities'), 6);
     const by = ledger(h.storage);
     for (const guid of ['g-1', 'g-2', 'g-3', 'g-4']) {
-      assert.equal(by[guid].evaluation_outcome, 'NOT_EVALUATED', `${guid} untouched`);
+      assert.equal(by[guid].evaluation_outcome, firstLedger[guid].evaluation_outcome, `${guid} outcome untouched by the second run`);
+      assert.equal(by[guid].last_evaluated_at, firstLedger[guid].last_evaluated_at, `${guid} evaluation time untouched`);
       assert.equal(by[guid].times_seen, 1, `${guid} was not admitted this run`);
     }
+    assert.equal(by['g-5'].evaluation_outcome, 'SELECTED', 'g-5, previously rejected, is re-evaluated and selected');
   } finally { h.cleanup(); }
 });
 
 test('K. resume comes from the evaluation store, not decision_log', async () => {
+  // A candidate rejected for feature failure has no durable evaluation, so the
+  // next run must evaluate it fresh; which OTHER records exist is decided by the
+  // evaluation store (and ledger), never by decision_log audit rows.
   const h = harness();
   try {
-    await assert.rejects(h.run({ failOn: 'g-3' }, T0), /exploded on g-3/);
+    const first = await h.run({ failOn: 'g-3' }, T0);
+    assert.equal(first.discovery.stats.featureRejected, 1);
+    assert.equal(evaluations(h.storage).length, 4);
+    const suppressedAt = ledger(h.storage)['g-4'].last_evaluated_at;
+
     h.storage.run('DELETE FROM decision_log');
-    await h.run({}, T0 + HOUR);
-    assert.equal(h.counters.proposition, 3 + 3, 'decision_log wiped: g-1 and g-2 still reused');
+    const second = await h.run({}, T0 + HOUR);
+    assert.equal(h.counters.proposition, 5 + 3, 'decision_log wiped: g-3 (no evaluation) and re-admitted g-1/g-2 evaluated fresh');
+    assert.equal(second.discovery.stats.scored, 3);
+    assert.equal(evaluations(h.storage).length, 5, 'store still holds g-4/g-5 and now g-3');
+    assert.equal(ledger(h.storage)['g-4'].last_evaluated_at, suppressedAt, 'g-4 suppression comes from the ledger/store, unaffected by the audit wipe');
   } finally { h.cleanup(); }
 
   const h2 = harness();
   try {
-    await assert.rejects(h2.run({ failOn: 'g-3' }, T0), /exploded on g-3/);
+    await h2.run({ failOn: 'g-3' }, T0);
     assert.ok(count(h2.storage, 'decision_log') > 0, 'audit rows exist for the completed work');
     h2.storage.run('DELETE FROM discovery_evaluations');
-    await h2.run({}, T0 + HOUR);
-    assert.equal(h2.counters.proposition, 3 + 5, 'store wiped: audit rows alone do not enable resume');
+    const second = await h2.run({}, T0 + HOUR);
+    assert.equal(h2.counters.proposition, 5 + 3, 'store wiped: audit rows alone provide no reusable evaluation');
+    assert.equal(second.discovery.stats.reused, 0);
+    assert.equal(evaluations(h2.storage).length, 3, 'store rebuilt only from the evaluations this run actually performed (g-1, g-2, g-3)');
+    assert.equal(h2.storage.get(`SELECT COUNT(*) n FROM decision_log WHERE decision = 'REUSED'`).n, 0);
   } finally { h2.cleanup(); }
 });
 

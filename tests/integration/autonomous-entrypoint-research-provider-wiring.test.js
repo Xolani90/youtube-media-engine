@@ -10,6 +10,9 @@ import { LLMRouter } from '../../src/providers/llm/router.js';
 import { OpportunitySource } from '../../src/providers/opportunity/OpportunitySource.js';
 import { TavilySearchProvider } from '../../src/providers/research/TavilySearchProvider.js';
 import { GdeltSearchProvider } from '../../src/providers/research/GdeltSearchProvider.js';
+import { DuckDuckGoSearchProvider } from '../../src/providers/research/DuckDuckGoSearchProvider.js';
+import { GoogleNewsRssSearchProvider } from '../../src/providers/research/GoogleNewsRssSearchProvider.js';
+import { FallbackResearchSourceProvider } from '../../src/providers/research/FallbackResearchSourceProvider.js';
 import { runAutonomousEntrypoint } from '../../src/index.js';
 
 // No Discovery work in these tests -- only the Research stage's
@@ -91,7 +94,7 @@ function baseDeps({ storage, capturedProviders, research }) {
   };
 }
 
-test('autonomous entrypoint supplies a default TavilySearchProvider to the research stage when TAVILY_API_KEY is configured and none is injected', async () => {
+test('autonomous entrypoint supplies a default Tavily-primary/DuckDuckGo-fallback FallbackResearchSourceProvider to the research stage when TAVILY_API_KEY is configured and none is injected', async () => {
   const { dir, dbPath } = tempDbPath();
   const storage = new SqliteStorageDriver({ dbPath });
   const capturedProviders = [];
@@ -107,7 +110,10 @@ test('autonomous entrypoint supplies a default TavilySearchProvider to the resea
     );
 
     assert.equal(capturedProviders.length, 1);
-    assert.ok(capturedProviders[0] instanceof TavilySearchProvider);
+    const provider = capturedProviders[0];
+    assert.ok(provider instanceof FallbackResearchSourceProvider);
+    assert.ok(provider._primary instanceof TavilySearchProvider);
+    assert.ok(provider._fallback instanceof DuckDuckGoSearchProvider);
   } finally {
     if (previousKey === undefined) delete process.env.TAVILY_API_KEY;
     else process.env.TAVILY_API_KEY = previousKey;
@@ -116,7 +122,7 @@ test('autonomous entrypoint supplies a default TavilySearchProvider to the resea
   }
 });
 
-test('autonomous entrypoint supplies a default GdeltSearchProvider (R0) to the research stage when TAVILY_API_KEY is not configured and none is injected', async () => {
+test('autonomous entrypoint supplies a default GoogleNewsRssSearchProvider (R0) to the research stage when TAVILY_API_KEY is not configured and none is injected', async () => {
   const { dir, dbPath } = tempDbPath();
   const storage = new SqliteStorageDriver({ dbPath });
   const capturedProviders = [];
@@ -132,7 +138,10 @@ test('autonomous entrypoint supplies a default GdeltSearchProvider (R0) to the r
     );
 
     assert.equal(capturedProviders.length, 1);
-    assert.ok(capturedProviders[0] instanceof GdeltSearchProvider);
+    assert.ok(capturedProviders[0] instanceof GoogleNewsRssSearchProvider);
+    // GDELT is no longer the no-key default; it stays explicitly selectable only.
+    assert.ok(!(capturedProviders[0] instanceof GdeltSearchProvider));
+    assert.ok(!(capturedProviders[0] instanceof FallbackResearchSourceProvider));
   } finally {
     if (previousKey === undefined) delete process.env.TAVILY_API_KEY;
     else process.env.TAVILY_API_KEY = previousKey;

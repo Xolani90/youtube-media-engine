@@ -192,18 +192,25 @@ test('observations without any deterministic identity reach Discovery on every r
   } finally { h.cleanup(); }
 });
 
-test('Discovery throwing leaves every admitted row NOT_EVALUATED (non-suppressing) and the next run re-evaluates', async () => {
+test('Discovery rejecting every candidate on feature failure leaves every admitted row non-suppressing (NOT_SCORED_UNRESOLVED, no opportunity) and the next run re-evaluates', async () => {
   const h = harness();
   try {
     const boom = () => { throw new Error('feature computation exploded'); };
-    await assert.rejects(h.run({ rawFeatures: boom }, T0), /exploded/);
+    const failed = await h.run({ rawFeatures: boom }, T0);
+    // Per-candidate rejection: the run completes rather than aborting.
+    assert.equal(failed.discovery.stats.featureRejected, 5);
+    assert.equal(failed.discovery.stats.scored, 0);
+    assert.equal(count(h.storage, 'opportunities'), 0);
     const rows = h.storage.all('SELECT * FROM discovery_observations');
     assert.equal(rows.length, 5);
-    assert.ok(rows.every((r) => r.evaluation_outcome === 'NOT_EVALUATED' && r.last_evaluated_at === null));
+    assert.ok(rows.every((r) => r.evaluation_outcome === 'NOT_SCORED_UNRESOLVED' && r.opportunity_id === null),
+      'nothing was scored, so nothing is SCORED_NOT_SELECTED (the only suppressing outcome)');
 
     const rerun = await h.run({}, T0 + 1);
     assert.equal(rerun.discovery.memory.suppressedIdentities, 0);
     assert.equal(rerun.discovery.stats.discovered, 5);
+    assert.equal(rerun.discovery.stats.featureRejected, 0);
+    assert.equal(rerun.discovery.stats.scored, 5, 'all five re-evaluated on the next run');
   } finally { h.cleanup(); }
 });
 
