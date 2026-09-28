@@ -33,9 +33,9 @@ test('FACTUAL: an unresolved (UNSUPPORTED) load-bearing claim blocks completion 
   assert.equal(result.stopReason, 'UNSUPPORTED_LOAD_BEARING_CLAIM');
 });
 
-test('SENTIMENT: a verified load-bearing claim (any type) satisfies completeness', () => {
+test('SENTIMENT: a verified load-bearing FACT satisfies completeness', () => {
   const result = evaluateCompleteness({
-    claims: [claim({ id: 'c1', claim_type: 'OPINION', evidence_status: 'VERIFIED' })],
+    claims: [claim({ id: 'c1', claim_type: 'FACT', evidence_status: 'VERIFIED' })],
     policy: researchPolicy, coreQuestionType: 'SENTIMENT', stoppingConditionMet: true
   });
   assert.equal(result.status, 'RESEARCH_COMPLETE');
@@ -94,12 +94,13 @@ test('OPINION can never satisfy a FACTUAL requirement, regardless of evidence_st
   assert.equal(result.stopReason, 'FACTUAL_REQUIREMENT_UNMET');
 });
 
-test('a VERIFIED OPINION satisfies SENTIMENT (the resolved concrete example from v0.4)', () => {
+test('a VERIFIED OPINION alone cannot complete Research because Brief has no eligible key claim', () => {
   const result = evaluateCompleteness({
     claims: [claim({ id: 'c1', claim_type: 'OPINION', evidence_status: 'VERIFIED' })],
     policy: researchPolicy, coreQuestionType: 'SENTIMENT', stoppingConditionMet: true
   });
-  assert.equal(result.status, 'RESEARCH_COMPLETE');
+  assert.equal(result.status, 'INSUFFICIENT_EVIDENCE');
+  assert.equal(result.stopReason, 'NO_BRIEF_ELIGIBLE_CLAIMS');
 });
 
 test('INFERENCE claim satisfies FACTUAL at VERIFIED per policy default', () => {

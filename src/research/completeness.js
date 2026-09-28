@@ -110,5 +110,22 @@ export function evaluateCompleteness({ claims, policy, coreQuestionType, stoppin
     return { status: 'INSUFFICIENT_EVIDENCE', stopReason: 'OVERALL_RESOLUTION_THRESHOLD_NOT_MET' };
   }
 
+  // Research completion must guarantee that Brief has at least one
+  // eligible key claim. Brief eligibility requires VERIFIED FACT or
+  // INFERENCE claims, so Research must not complete with only OPINION
+  // or PARTIALLY_SUPPORTED claims.
+  const briefEligibleClaims = claims.filter(
+    (c) =>
+      c.evidence_status === EVIDENCE_STATUS.VERIFIED &&
+      (c.claim_type === CLAIM_TYPE.FACT || c.claim_type === CLAIM_TYPE.INFERENCE)
+  );
+
+  if (briefEligibleClaims.length === 0) {
+    return {
+      status: 'INSUFFICIENT_EVIDENCE',
+      stopReason: 'NO_BRIEF_ELIGIBLE_CLAIMS'
+    };
+  }
+
   return { status: 'RESEARCH_COMPLETE', stopReason: 'COMPLETENESS_CRITERIA_MET' };
 }

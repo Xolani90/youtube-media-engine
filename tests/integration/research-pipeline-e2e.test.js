@@ -126,6 +126,32 @@ test('MIXED: distinct factual + sentiment sources together reach RESEARCH_COMPLE
   cleanup(storage, dbPath);
 });
 
+test('SENTIMENT: VERIFIED OPINION alone cannot reach RESEARCH_COMPLETE because Brief has no eligible key claim', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const opportunityId = seedHandedOffOpportunity(storage, { coreQuestionType: 'SENTIMENT' });
+
+  const url = 'https://acme.com/press-release';
+  const provider = new SingleSourceProvider([url]);
+  const llmRouter = claimRouter([
+    { claim: 'Commentators called the launch a triumph.', claim_type: 'OPINION', is_load_bearing: true }
+  ]);
+
+  const result = await runResearchProject({
+    storage, opportunityId, sourceProvider: provider, llmRouter, policy: researchPolicy,
+    classification: { authoritativeDomains: ['acme.com'] },
+    fetchImpl: fakeFetch({ [url]: '<html><body>Commentators called the launch a triumph.</body></html>' })
+  });
+
+  assert.equal(result.project.status, 'INSUFFICIENT_EVIDENCE');
+  assert.equal(result.stopReason, 'NO_BRIEF_ELIGIBLE_CLAIMS');
+  assert.equal(result.claims.length, 1);
+  assert.equal(result.claims[0].claim_type, 'OPINION');
+  assert.equal(result.claims[0].evidence_status, 'VERIFIED');
+
+  cleanup(storage, dbPath);
+});
+
 test('MIXED: only a factual claim (no sentiment component) does NOT reach RESEARCH_COMPLETE', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
