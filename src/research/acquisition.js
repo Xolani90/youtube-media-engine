@@ -91,6 +91,7 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
       attemptCount++;
 
       if (result.status !== RETRIEVAL_STATUS.FAILED) break; // SUCCESS or CONTENT_UNPARSEABLE: stop, no retry
+      if (result.retryable === false) break; // access denial (HTTP 401/403): identical retries cannot recover
       if (attemptCount >= maxAttemptsPerSource) break; // exhausted this source's retry budget
     }
 

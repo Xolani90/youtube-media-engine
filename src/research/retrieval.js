@@ -1,6 +1,20 @@
 import { RETRIEVAL_STATUS } from './constants.js';
 import { traceAsync, safeHost } from '../diagnostics/trace.js';
 
+// Sent on every article retrieval. Many publishers reject Node's default
+// (header-less) fetch with HTTP 403; a descriptive, browser-compatible
+// request identity and a normal document Accept header avoid that class of
+// deterministic rejection. No browser automation or rendering is involved.
+export const RETRIEVAL_REQUEST_HEADERS = Object.freeze({
+  'User-Agent': 'Mozilla/5.0 (compatible; MediaEngineResearchBot/1.0; +https://github.com/Xolani90/youtube-media-engine)',
+  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5'
+});
+
+// HTTP statuses that are access denials, not transient failures. Repeating
+// the identical request cannot recover, so the result is flagged
+// `retryable: false` (status stays FAILED; acquisition.js skips retries).
+const NON_RETRYABLE_HTTP_STATUSES = Object.freeze([401, 403]);
+
 /**
  * Deterministic HTTP retrieval + text extraction (Research Subsystem
  * Specification v0.3 S3). Deliberately NOT a pluggable provider — a plain
@@ -10,7 +24,8 @@ import { traceAsync, safeHost } from '../diagnostics/trace.js';
  * requires JS rendering is CONTENT_UNPARSEABLE, not a trigger to build
  * rendering infrastructure.
  *
- * @returns {Promise<{status: 'SUCCESS'|'FAILED'|'CONTENT_UNPARSEABLE', content: string|null, error: string|null}>}
+ * @returns {Promise<{status: 'SUCCESS'|'FAILED'|'CONTENT_UNPARSEABLE', content: string|null, error: string|null, retryable?: false}>}
+ *   `retryable: false` is present only on HTTP 401/403 FAILED results.
  */
 export async function retrieveSource(url, { fetchImpl = fetch, timeoutMs = 10000 } = {}) {
   let res;
@@ -18,7 +33,7 @@ export async function retrieveSource(url, { fetchImpl = fetch, timeoutMs = 10000
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      res = await traceAsync('research.retrieve.http.request', { host: safeHost(url) }, () => fetchImpl(url, { signal: controller.signal }), (r) => ({ status: r?.status }));
+      res = await traceAsync('research.retrieve.http.request', { host: safeHost(url) }, () => fetchImpl(url, { signal: controller.signal, headers: RETRIEVAL_REQUEST_HEADERS }), (r) => ({ status: r?.status }));
     } finally {
       clearTimeout(timer);
     }
@@ -27,7 +42,9 @@ export async function retrieveSource(url, { fetchImpl = fetch, timeoutMs = 10000
   }
 
   if (!res.ok) {
-    return { status: RETRIEVAL_STATUS.FAILED, content: null, error: `HTTP ${res.status}` };
+    const failure = { status: RETRIEVAL_STATUS.FAILED, content: null, error: `HTTP ${res.status}` };
+    if (NON_RETRYABLE_HTTP_STATUSES.includes(res.status)) failure.retryable = false;
+    return failure;
   }
 
   let raw;

@@ -172,3 +172,34 @@ test('candidatesExhausted is true (vacuously) when discovery returns zero candid
   assert.equal(result.discoveryFailed, false);
   assert.equal(result.candidatesExhausted, true);
 });
+
+for (const status of [401, 403]) {
+  test(`HTTP ${status} (retryable:false) is attempted once, not retried, and consumes one attempt slot`, async () => {
+    const provider = new StubProvider(candidates(2));
+    const callsPerUrl = {};
+    const retrieveImpl = async (url) => {
+      callsPerUrl[url] = (callsPerUrl[url] || 0) + 1;
+      return { status: 'FAILED', content: null, error: `HTTP ${status}`, retryable: false };
+    };
+    const policy = policyWith({ acquisition: { max_sources_per_research_project: 8, max_acquisition_attempts: 100 }, retry: { max_retries_per_source: 2 } });
+    const out = await acquireSources({ provider, query: 'q', policy, retrieveImpl });
+
+    for (const url of Object.keys(callsPerUrl)) assert.equal(callsPerUrl[url], 1, `no retries for ${url}`);
+    assert.equal(out.attemptsUsed, 2);
+    assert.ok(out.acquired.every((a) => a.status === 'FAILED' && a.attemptCount === 1));
+  });
+}
+
+test('a transient FAILED without retryable:false still retries and can succeed on retry', async () => {
+  const provider = new StubProvider(candidates(1));
+  let calls = 0;
+  const retrieveImpl = async () => {
+    calls++;
+    return calls < 3
+      ? { status: 'FAILED', content: null, error: 'HTTP 503' }
+      : { status: 'SUCCESS', content: 'ok', error: null };
+  };
+  const out = await acquireSources({ provider, query: 'q', policy: policyWith({}), retrieveImpl });
+  assert.equal(calls, 3);
+  assert.equal(out.acquired[0].status, 'SUCCESS');
+});

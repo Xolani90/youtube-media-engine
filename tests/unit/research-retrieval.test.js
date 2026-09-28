@@ -125,3 +125,64 @@ test('isGoogleNewsRssWrapperPage requires host, path, bare "Google News" title, 
     false
   );
 });
+
+function recordingFetch(response = {}) {
+  const calls = [];
+  const impl = async (url, init) => {
+    calls.push({ url, init });
+    return fakeFetch(response)(url);
+  };
+  impl.calls = calls;
+  return impl;
+}
+
+test('retrieveSource sends a descriptive User-Agent header', async () => {
+  const fetchImpl = recordingFetch();
+  await retrieveSource('https://example.com/a', { fetchImpl });
+  const ua = fetchImpl.calls[0].init.headers['User-Agent'];
+  assert.match(ua, /^Mozilla\/5\.0 \(compatible; MediaEngineResearchBot\/1\.0; \+https:\/\/github\.com\/Xolani90\/youtube-media-engine\)$/);
+});
+
+test('retrieveSource sends an Accept header that requests HTML documents', async () => {
+  const fetchImpl = recordingFetch();
+  await retrieveSource('https://example.com/a', { fetchImpl });
+  assert.match(fetchImpl.calls[0].init.headers.Accept, /text\/html/);
+});
+
+test('retrieveSource still passes an AbortSignal to fetch alongside the headers', async () => {
+  const fetchImpl = recordingFetch();
+  await retrieveSource('https://example.com/a', { fetchImpl });
+  assert.ok(fetchImpl.calls[0].init.signal instanceof AbortSignal);
+});
+
+test('retrieveSource aborts and returns FAILED when the request exceeds timeoutMs', async () => {
+  const fetchImpl = (url, { signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('aborted')));
+  });
+  const result = await retrieveSource('https://example.com/slow', { fetchImpl, timeoutMs: 20 });
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.error, 'aborted');
+  assert.equal(result.retryable, undefined);
+});
+
+test('retrieveSource marks HTTP 403 as FAILED and non-retryable', async () => {
+  const result = await retrieveSource('https://example.com/a', { fetchImpl: fakeFetch({ ok: false, status: 403 }) });
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.error, 'HTTP 403');
+  assert.equal(result.retryable, false);
+});
+
+test('retrieveSource marks HTTP 401 as FAILED and non-retryable', async () => {
+  const result = await retrieveSource('https://example.com/a', { fetchImpl: fakeFetch({ ok: false, status: 401 }) });
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.error, 'HTTP 401');
+  assert.equal(result.retryable, false);
+});
+
+test('retrieveSource does not mark transient statuses (429, 500, 503) as non-retryable', async () => {
+  for (const status of [429, 500, 503]) {
+    const result = await retrieveSource('https://example.com/a', { fetchImpl: fakeFetch({ ok: false, status }) });
+    assert.equal(result.status, 'FAILED');
+    assert.equal(result.retryable, undefined, `status ${status}`);
+  }
+});
