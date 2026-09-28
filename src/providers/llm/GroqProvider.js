@@ -272,6 +272,11 @@ export class GroqProvider extends LLMProvider {
       throw new Error('GroqProvider received a response with no usable completion text.');
     }
 
+    // Observability only: surfaced when Groq reports one (OpenAI-compatible
+    // `choices[0].finish_reason`, e.g. 'stop' or 'length'). Added to the
+    // result only when present, so the result shape is otherwise unchanged.
+    const finishReason = data?.choices?.[0]?.finish_reason;
+
     return {
       text: choice,
       model: data.model ?? this._model,
@@ -279,7 +284,8 @@ export class GroqProvider extends LLMProvider {
       inputTokens: data.usage?.prompt_tokens ?? null,
       outputTokens: data.usage?.completion_tokens ?? null,
       estimatedCost: 0,
-      isPaid: false
+      isPaid: false,
+      ...(typeof finishReason === 'string' ? { finishReason } : {})
     };
   }
 }

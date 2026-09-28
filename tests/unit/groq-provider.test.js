@@ -397,3 +397,49 @@ test('Phase 1: existing 429 retry/Retry-After/bounded-attempt behavior is unchan
   assert.equal(sleepCalls.length, 1, 'still exactly one retry sleep, unchanged');
   assert.deepEqual(sleepCalls, [5000], 'Retry-After parsing unchanged');
 });
+
+// Observability: Groq's OpenAI-compatible `choices[0].finish_reason` is
+// surfaced as `finishReason` when present; otherwise the result shape is
+// exactly what it was before (the deepEqual test above still holds).
+test('complete(): exposes choices[0].finish_reason as finishReason when Groq reports one', async () => {
+  const fetchImpl = async () => jsonResponse(200, {
+    id: 'req-len',
+    model: 'openai/gpt-oss-20b',
+    choices: [{ message: { content: '[{"claim":"trunc' }, finish_reason: 'length' }],
+    usage: { prompt_tokens: 1296, completion_tokens: 2048 }
+  });
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  const result = await provider.complete({ prompt: 'hi' });
+
+  assert.equal(result.finishReason, 'length');
+  assert.equal(result.text, '[{"claim":"trunc');
+  assert.equal(result.outputTokens, 2048);
+});
+
+test('complete(): no finish_reason in the response -> no finishReason key, rest of the result unchanged', async () => {
+  const fetchImpl = async () => jsonResponse(200, {
+    id: 'req-nofr',
+    model: 'openai/gpt-oss-20b',
+    choices: [{ message: { content: 'ok' } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1 }
+  });
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  const result = await provider.complete({ prompt: 'hi' });
+
+  assert.equal('finishReason' in result, false);
+  assert.deepEqual(result, {
+    text: 'ok', model: 'openai/gpt-oss-20b', requestId: 'req-nofr',
+    inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false
+  });
+});
+
+test('complete(): a null finish_reason is treated as absent', async () => {
+  const fetchImpl = async () => jsonResponse(200, {
+    choices: [{ message: { content: 'ok' }, finish_reason: null }]
+  });
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+  const result = await provider.complete({ prompt: 'hi' });
+  assert.equal('finishReason' in result, false);
+});

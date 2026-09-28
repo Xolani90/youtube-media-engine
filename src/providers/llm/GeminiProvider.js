@@ -349,6 +349,11 @@ export class GeminiProvider extends LLMProvider {
       throw new Error('GeminiProvider received a response with no usable completion text.');
     }
 
+    // Observability only: Gemini's `candidates[0].finishReason` (e.g. 'STOP',
+    // 'MAX_TOKENS'), added only when present so the result shape is otherwise
+    // unchanged.
+    const finishReason = data?.candidates?.[0]?.finishReason;
+
     return {
       text,
       model: data.modelVersion ?? this._model,
@@ -356,7 +361,8 @@ export class GeminiProvider extends LLMProvider {
       inputTokens: data.usageMetadata?.promptTokenCount ?? null,
       outputTokens: data.usageMetadata?.candidatesTokenCount ?? null,
       estimatedCost: 0,
-      isPaid: false
+      isPaid: false,
+      ...(typeof finishReason === 'string' ? { finishReason } : {})
     };
   }
 }

@@ -1,7 +1,20 @@
 import { CLAIM_TYPE } from './constants.js';
 import { untrustedSourceBlock } from '../providers/llm/promptTrust.js';
+import { traceEvent } from '../diagnostics/trace.js';
 
 const CLAIM_TYPES = Object.values(CLAIM_TYPE);
+
+// Observability only (no behavior depends on these). Distinguishes the ways
+// an extraction completion can end up as a given number of claims, because
+// a parse failure and a genuine "[]" are both turned into zero claims below
+// and were previously indistinguishable in every log and decision row.
+export const EXTRACTION_PARSE_OUTCOME = Object.freeze({
+  PARSED_CLAIMS: 'parsed_claims',           // valid JSON array, >= 1 element
+  PARSED_ZERO_CLAIMS: 'parsed_zero_claims', // valid JSON array, 0 elements
+  PARSED_NON_ARRAY: 'parsed_non_array',     // valid JSON, but not an array (treated as no claims)
+  EMPTY_CONTENT: 'empty_content',           // model content empty/whitespace-only
+  PARSE_FAILED: 'parse_failed'              // non-empty content that is not valid JSON (e.g. truncated)
+});
 
 // Recognizes a response that is EXACTLY one Markdown code fence wrapping
 // the whole payload and nothing else: optional ```json / ```JSON / bare
@@ -34,7 +47,11 @@ function unwrapRecognizedFence(text) {
  * it (see src/research/sourceClassification.js), rather than being
  * flattened into ordinary instruction text.
  *
- * @returns {Promise<{claims: Array<{claim, claim_type, is_load_bearing}>, providerUsed, model, rawOutput, estimatedCost, isPaid}>}
+ * `diagnostics` is metadata-only observability (provider, model, token counts,
+ * content length, finish reason, parse outcome, proposed claim count); it never
+ * carries model output or source text and no caller behavior depends on it.
+ *
+ * @returns {Promise<{claims: Array<{claim, claim_type, is_load_bearing}>, providerUsed, model, rawOutput, estimatedCost, isPaid, diagnostics: {provider, model, inputTokens, outputTokens, contentLength, finishReason, parseOutcome, proposedClaimCount}}>}
  */
 export async function extractClaims({ sourceText, coreQuestion, sourceRole = null, sourceUrl = null }, llmRouter) {
   const prompt = [
@@ -55,13 +72,26 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
 
   const { result, providerUsed } = await llmRouter.complete({ prompt });
 
+  // Observability: `parseOutcome` is recorded alongside the existing parse,
+  // never instead of it. The try/catch and the non-array fallback below are
+  // exactly as before -- an unparseable, empty or non-array response still
+  // becomes [] and never throws.
   let parsed;
+  let parseOutcome;
   try {
     parsed = JSON.parse(unwrapRecognizedFence(result.text));
+    parseOutcome = EXTRACTION_PARSE_OUTCOME.PARSED_CLAIMS; // refined below
   } catch {
     parsed = [];
+    const isEmpty = typeof result.text !== 'string' || result.text.trim().length === 0;
+    parseOutcome = isEmpty ? EXTRACTION_PARSE_OUTCOME.EMPTY_CONTENT : EXTRACTION_PARSE_OUTCOME.PARSE_FAILED;
   }
-  if (!Array.isArray(parsed)) parsed = [];
+  if (!Array.isArray(parsed)) {
+    if (parseOutcome === EXTRACTION_PARSE_OUTCOME.PARSED_CLAIMS) {
+      parseOutcome = EXTRACTION_PARSE_OUTCOME.PARSED_NON_ARRAY;
+    }
+    parsed = [];
+  }
 
   const claims = parsed.map((c) => ({
     claim: typeof c?.claim === 'string' ? c.claim : null,
@@ -69,13 +99,36 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
     is_load_bearing: typeof c?.is_load_bearing === 'boolean' ? c.is_load_bearing : null
   }));
 
+  if (parseOutcome === EXTRACTION_PARSE_OUTCOME.PARSED_CLAIMS && claims.length === 0) {
+    parseOutcome = EXTRACTION_PARSE_OUTCOME.PARSED_ZERO_CLAIMS;
+  }
+
+  // Metadata only: never the model response or source text (see also the
+  // trace module's own safe-token filtering). `finishReason` is null when
+  // the provider did not report one.
+  const diagnostics = {
+    provider: providerUsed,
+    model: result.model ?? null,
+    inputTokens: result.inputTokens ?? null,
+    outputTokens: result.outputTokens ?? null,
+    contentLength: typeof result.text === 'string' ? result.text.length : 0,
+    finishReason: result.finishReason ?? null,
+    parseOutcome,
+    proposedClaimCount: claims.length
+  };
+  traceEvent('research.claimExtraction.result', {
+    ...diagnostics,
+    finishReason: diagnostics.finishReason ?? 'absent'
+  });
+
   return {
     claims,
     providerUsed,
     model: result.model,
     rawOutput: result.text,
     estimatedCost: result.estimatedCost,
-    isPaid: result.isPaid
+    isPaid: result.isPaid,
+    diagnostics
   };
 }
 

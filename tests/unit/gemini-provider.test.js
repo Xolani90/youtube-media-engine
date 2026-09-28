@@ -543,3 +543,38 @@ test('Phase 1: existing 429 retry/retryDelay/bounded-attempt behavior is unchang
   assert.equal(sleepCalls.length, 1, 'still exactly one retry sleep, unchanged');
   assert.deepEqual(sleepCalls, [5000], 'Retry-After parsing unchanged');
 });
+
+// Observability: Gemini's `candidates[0].finishReason` is surfaced as
+// `finishReason` when present; otherwise the result shape is unchanged.
+test('complete(): exposes candidates[0].finishReason as finishReason when Gemini reports one', async () => {
+  const fetchImpl = async () => jsonResponse(200, {
+    responseId: 'req-max',
+    modelVersion: 'gemini-3.5-flash-lite',
+    candidates: [{ content: { parts: [{ text: '[{"claim":"trunc' }] }, finishReason: 'MAX_TOKENS' }],
+    usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 4 }
+  });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl: async () => {} });
+
+  const result = await provider.complete({ prompt: 'hi' });
+
+  assert.equal(result.finishReason, 'MAX_TOKENS');
+  assert.equal(result.text, '[{"claim":"trunc');
+});
+
+test('complete(): no finishReason in the response -> no finishReason key, rest of the result unchanged', async () => {
+  const fetchImpl = async () => jsonResponse(200, {
+    responseId: 'req-nofr',
+    modelVersion: 'gemini-3.5-flash-lite',
+    candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+    usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 }
+  });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl: async () => {} });
+
+  const result = await provider.complete({ prompt: 'hi' });
+
+  assert.equal('finishReason' in result, false);
+  assert.deepEqual(result, {
+    text: 'ok', model: 'gemini-3.5-flash-lite', requestId: 'req-nofr',
+    inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false
+  });
+});
