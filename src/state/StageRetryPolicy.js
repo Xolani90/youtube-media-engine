@@ -56,6 +56,33 @@ export const subjectTypeForStage = (stage) => SUBJECT_TYPE[stage] ?? 'content_ve
 // supplied as their identity.
 const NOT_CONTENT_VERSION_STAGES = new Set(Object.keys(SUBJECT_TYPE));
 
+// Provider-scoped retry identity (0026_provider_scoped_publication_retry.sql):
+// ONLY PUBLICATION carries real provider identity, matching the
+// (content_version_id, provider) identity `publications` itself already uses
+// (0010_publication.sql). Every other stage is not provider-scoped at all;
+// their rows always store the sentinel '' (never NULL -- see the migration's
+// header for why -- and never a fabricated provider name). A caller MUST
+// supply a provider for PUBLICATION and MUST NOT supply one for any other
+// stage -- passing one where it does not apply is refused rather than
+// silently ignored, so provider scoping can never be accidentally dropped
+// or accidentally applied to the wrong stage.
+const PROVIDER_SCOPED_STAGES = new Set([RETRY_STAGE.PUBLICATION]);
+const NO_PROVIDER = '';
+
+function resolveProvider({ provider, stage }, ErrorClass = Error) {
+  const isScoped = PROVIDER_SCOPED_STAGES.has(stage);
+  if (isScoped) {
+    if (typeof provider !== 'string' || !provider.trim()) {
+      throw new ErrorClass(`stage ${stage} is provider-scoped; a non-empty provider is required`);
+    }
+    return provider;
+  }
+  if (provider !== undefined) {
+    throw new ErrorClass(`stage ${stage} is not provider-scoped; do not pass a provider`);
+  }
+  return NO_PROVIDER;
+}
+
 function assertKnownStage(stage, ErrorClass = Error) {
   if (!Object.values(RETRY_STAGE).includes(stage)) throw new ErrorClass(`unknown stage: ${stage}`);
 }
@@ -142,11 +169,18 @@ function logDecision(storage, { runId = null, subjectId, decision, reason, stage
   );
 }
 
-/** True iff this (stage, subject) is currently quarantined. subjectId is the stage's own identity (see header). */
-export function isQuarantined(storage, subjectId, stage) {
+/**
+ * True iff this (stage, subject[, provider]) is currently quarantined.
+ * subjectId is the stage's own identity (see header). For PUBLICATION,
+ * `provider` is REQUIRED (the identity is (stage, subject_id, provider));
+ * for every other stage it must be omitted. A YouTube quarantine therefore
+ * never quarantines Facebook (or vice versa) for the same content version.
+ */
+export function isQuarantined(storage, subjectId, stage, provider) {
+  const resolvedProvider = resolveProvider({ provider, stage });
   const row = storage.get(
-    'SELECT quarantined_at FROM stage_retry_state WHERE subject_id = ? AND stage = ?',
-    [subjectId, stage]
+    'SELECT quarantined_at FROM stage_retry_state WHERE subject_id = ? AND stage = ? AND provider = ?',
+    [subjectId, stage, resolvedProvider]
   );
   return Boolean(row && row.quarantined_at);
 }
@@ -157,13 +191,14 @@ export function isQuarantined(storage, subjectId, stage) {
  * already opened one). Any persistence error propagates; nothing is swallowed,
  * so a failure can never silently become unbounded retry.
  */
-export function recordFailedAttempt(storage, { subjectId: givenSubjectId, contentVersionId: legacyContentVersionId, stage, reason, runId = null, nowISO = () => new Date().toISOString() }) {
+export function recordFailedAttempt(storage, { subjectId: givenSubjectId, contentVersionId: legacyContentVersionId, stage, provider, reason, runId = null, nowISO = () => new Date().toISOString() }) {
   const subjectId = resolveSubjectId({ subjectId: givenSubjectId, contentVersionId: legacyContentVersionId, stage });
+  const resolvedProvider = resolveProvider({ provider, stage });
   return storage.transaction(() => {
     const now = nowISO();
     const existing = storage.get(
-      'SELECT * FROM stage_retry_state WHERE subject_id = ? AND stage = ?',
-      [subjectId, stage]
+      'SELECT * FROM stage_retry_state WHERE subject_id = ? AND stage = ? AND provider = ?',
+      [subjectId, stage, resolvedProvider]
     );
     if (existing?.quarantined_at) {
       // Defensive: a quarantined item must never accrue further attempts.
@@ -175,9 +210,9 @@ export function recordFailedAttempt(storage, { subjectId: givenSubjectId, conten
       attempt = 1;
       cycle = 1;
       storage.run(
-        `INSERT INTO stage_retry_state (id, subject_id, stage, cycle_number, attempt_count, last_failure_reason, created_at, updated_at)
-         VALUES (?, ?, ?, 1, 1, ?, ?, ?)`,
-        [crypto.randomUUID(), subjectId, stage, reason, now, now]
+        `INSERT INTO stage_retry_state (id, subject_id, stage, provider, cycle_number, attempt_count, last_failure_reason, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, 1, ?, ?, ?)`,
+        [crypto.randomUUID(), subjectId, stage, resolvedProvider, reason, now, now]
       );
     } else {
       attempt = existing.attempt_count + 1;
@@ -190,13 +225,13 @@ export function recordFailedAttempt(storage, { subjectId: givenSubjectId, conten
     const quarantined = attempt >= STAGE_RETRY_CAP;
     if (quarantined) {
       storage.run(
-        'UPDATE stage_retry_state SET quarantined_at = ? WHERE subject_id = ? AND stage = ?',
-        [now, subjectId, stage]
+        'UPDATE stage_retry_state SET quarantined_at = ? WHERE subject_id = ? AND stage = ? AND provider = ?',
+        [now, subjectId, stage, resolvedProvider]
       );
       logDecision(storage, {
         runId, subjectId, stage, nowISO,
         decision: QUARANTINE_DECISION.QUARANTINED,
-        reason: `retry_cap_${STAGE_RETRY_CAP}_exhausted_cycle_${cycle}_attempts_${attempt}`
+        reason: `retry_cap_${STAGE_RETRY_CAP}_exhausted_cycle_${cycle}_attempts_${attempt}${resolvedProvider ? `_provider_${resolvedProvider}` : ''}`
       });
     }
     return { attempt, quarantined, cycle };
@@ -233,18 +268,19 @@ export function retryFields(r) {
  * one transaction. Does not change content_versions.state, publications rows,
  * or any authorization; the item re-enters normal stage gates (incl. D-C2).
  */
-export function reactivateQuarantined(storage, { subjectId: givenSubjectId, contentVersionId: legacyContentVersionId, stage, ownerAction, nowISO = () => new Date().toISOString() } = {}) {
+export function reactivateQuarantined(storage, { subjectId: givenSubjectId, contentVersionId: legacyContentVersionId, stage, provider, ownerAction, nowISO = () => new Date().toISOString() } = {}) {
   if (!ownerAction || ownerAction.actor !== OWNER_ACTOR) {
     throw new QuarantineReactivationError('reactivation requires an explicit Owner action context (actor: "OWNER")');
   }
   const reason = typeof ownerAction.reason === 'string' ? ownerAction.reason.trim() : '';
   if (!reason) throw new QuarantineReactivationError('reactivation requires a non-empty Owner reason');
   const subjectId = resolveSubjectId({ subjectId: givenSubjectId, contentVersionId: legacyContentVersionId, stage }, QuarantineReactivationError);
+  const resolvedProvider = resolveProvider({ provider, stage }, QuarantineReactivationError);
 
   return storage.transaction(() => {
     const row = storage.get(
-      'SELECT * FROM stage_retry_state WHERE subject_id = ? AND stage = ?',
-      [subjectId, stage]
+      'SELECT * FROM stage_retry_state WHERE subject_id = ? AND stage = ? AND provider = ?',
+      [subjectId, stage, resolvedProvider]
     );
     if (!row || !row.quarantined_at) {
       throw new QuarantineReactivationError('item is not currently quarantined');
@@ -252,9 +288,9 @@ export function reactivateQuarantined(storage, { subjectId: givenSubjectId, cont
     const now = nowISO();
     storage.run(
       `INSERT INTO stage_retry_cycle_history
-        (id, subject_id, stage, cycle_number, attempts_in_cycle, quarantined_at, reactivated_at, owner_reason)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [crypto.randomUUID(), subjectId, stage, row.cycle_number, row.attempt_count, row.quarantined_at, now, reason]
+        (id, subject_id, stage, provider, cycle_number, attempts_in_cycle, quarantined_at, reactivated_at, owner_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [crypto.randomUUID(), subjectId, stage, resolvedProvider, row.cycle_number, row.attempt_count, row.quarantined_at, now, reason]
     );
     storage.run(
       `UPDATE stage_retry_state
@@ -265,7 +301,7 @@ export function reactivateQuarantined(storage, { subjectId: givenSubjectId, cont
     logDecision(storage, {
       subjectId, stage, nowISO,
       decision: QUARANTINE_DECISION.QUARANTINE_REACTIVATED,
-      reason: `owner_reactivated_stage_${stage}_cycle_${row.cycle_number}_attempts_${row.attempt_count}_quarantined_at_${row.quarantined_at}_reason_${reason}`
+      reason: `owner_reactivated_stage_${stage}_cycle_${row.cycle_number}_attempts_${row.attempt_count}_quarantined_at_${row.quarantined_at}_reason_${reason}${resolvedProvider ? `_provider_${resolvedProvider}` : ''}`
     });
     return { cycle: row.cycle_number + 1, previousAttempts: row.attempt_count, previousQuarantinedAt: row.quarantined_at, reactivatedAt: now };
   });

@@ -311,7 +311,7 @@ test('migration 0017: preserves 0016 data 1:1, renames to subject_id, drops the 
   // LATEST_MIGRATION is a deliberate, named expectation: a new migration must be
   // acknowledged here on purpose, not merely tolerated.
   const MIGRATION_0017 = '0017_generalize_stage_retry_identity.sql';
-  const LATEST_MIGRATION = '0022_system_runs_ceiling_summary.sql';
+  const LATEST_MIGRATION = '0026_provider_scoped_publication_retry.sql';
   assert.ok(files.includes(MIGRATION_0017), 'migration 0017 is present');
   assert.equal(files.at(-1), LATEST_MIGRATION, 'current latest migration (update LATEST_MIGRATION deliberately when one is added)');
   db.pragma('foreign_keys = OFF');
@@ -378,7 +378,8 @@ test('policy: stage isolation - the same subject id has independent budgets per 
     for (let i = 0; i < 3; i += 1) recordFailedAttempt(storage, { subjectId: 'S', stage: RETRY_STAGE.FACT_CHECK, reason: 'x' });
     assert.ok(isQuarantined(storage, 'S', RETRY_STAGE.FACT_CHECK));
     for (const other of Object.values(RETRY_STAGE).filter((s) => s !== RETRY_STAGE.FACT_CHECK)) {
-      assert.equal(isQuarantined(storage, 'S', other), false, `${other} unaffected`);
+      const provider = other === RETRY_STAGE.PUBLICATION ? 'youtube' : undefined;
+      assert.equal(isQuarantined(storage, 'S', other, provider), false, `${other} unaffected`);
       assert.equal(retryRow(storage, other, 'S'), undefined);
     }
     assert.equal(recordFailedAttempt(storage, { subjectId: 'S', stage: RETRY_STAGE.ORIGINALITY, reason: 'x' }).attempt, 1, 'fresh budget in another stage');

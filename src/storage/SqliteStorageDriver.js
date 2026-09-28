@@ -58,6 +58,10 @@ export class SqliteStorageDriver extends StorageDriver {
       // CHECK with FINAL_COMPLIANCE -- the identical rebuild/FK-toggle
       // convention as 0013. (0019 only creates a new table and needs no toggle.)
       '0018_content_versions_final_compliance_state.sql',
+      // Provider-scoped PUBLICATION retry/quarantine fix: rebuilds both
+      // stage_retry_state and stage_retry_cycle_history (drops+recreates,
+      // adds `provider`), the same rebuild/FK-toggle convention as 0017.
+      '0026_provider_scoped_publication_retry.sql',
     ]);
 
     for (const file of files) {

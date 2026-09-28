@@ -246,11 +246,11 @@ test('Publication: FAILED attempts 1-3 recorded, 3rd quarantines (status stays F
     assert.equal(r3.quarantined, true);
     // FAILED itself is not reinterpreted; quarantine is the separate record.
     assert.equal(storage.get('SELECT status FROM publications WHERE content_version_id = ?', [contentVersionId]).status, 'FAILED');
-    assert.ok(isQuarantined(storage, contentVersionId, 'PUBLICATION'));
+    assert.ok(isQuarantined(storage, contentVersionId, 'PUBLICATION', 'mock'));
     assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [contentVersionId]).state, 'FINAL_COMPLIANCE');
 
     const callsBefore = adapter.calls;
-    assert.equal(selectEligiblePublications(storage).length, 0);
+    assert.equal(selectEligiblePublications(storage, 'mock').length, 0);
     const r4 = await run();
     assert.equal(r4.outcome, 'QUARANTINED');
     assert.equal(adapter.calls, callsBefore, 'provider never called after quarantine');
@@ -289,7 +289,7 @@ test('Publication: success before exhaustion does not quarantine; idempotency in
     const okAdapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'V1', providerUrl: 'u' });
     const ok = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: okAdapter });
     assert.equal(ok.outcome, 'PUBLISHED');
-    assert.equal(isQuarantined(storage, contentVersionId, 'PUBLICATION'), false);
+    assert.equal(isQuarantined(storage, contentVersionId, 'PUBLICATION', 'mock'), false);
     const again = await runPublication({ storage, contentBriefId, provider: 'mock', adapter: okAdapter });
     assert.equal(again.outcome, 'ALREADY_PUBLISHED');
     assert.equal(okAdapter.calls, 1);
@@ -306,10 +306,10 @@ test('Publication: reactivation is audited, does not publish or bypass D-C2, beg
   const adapter = new MockAdapter(FAIL);
   await withLive(contentVersionId, async () => {
     for (let i = 0; i < 3; i++) await runPublication({ storage, contentBriefId, provider: 'mock', adapter });
-    assert.ok(isQuarantined(storage, contentVersionId, 'PUBLICATION'));
+    assert.ok(isQuarantined(storage, contentVersionId, 'PUBLICATION', 'mock'));
     const callsBefore = adapter.calls;
 
-    reactivateQuarantined(storage, { contentVersionId, stage: RETRY_STAGE.PUBLICATION, ownerAction: OWNER });
+    reactivateQuarantined(storage, { contentVersionId, stage: RETRY_STAGE.PUBLICATION, provider: 'mock', ownerAction: OWNER });
     assert.equal(adapter.calls, callsBefore, 'reactivation itself publishes nothing');
     assert.equal(decisions(storage, contentVersionId, 'QUARANTINE_REACTIVATED').length, 1);
     assert.equal(storage.all('SELECT * FROM stage_retry_cycle_history').length, 1);

@@ -222,6 +222,11 @@ export function selectEligiblePublications(storage, provider = 'youtube') {
   // AMBIGUOUS row for THIS provider on an otherwise-PUBLISHED item is
   // still selected for reconciliation/retry, exactly as the pre-existing
   // FAILED/AMBIGUOUS handling above already does for PRODUCED items.
+  // Quarantine exclusion is scoped to THIS run's own provider (0026:
+  // provider-scoped PUBLICATION retry identity is (stage, subject_id,
+  // provider)) -- a YouTube quarantine must never exclude Facebook
+  // selection, and vice versa; each provider retries/quarantines
+  // independently.
   return storage
     .all(
       `SELECT content_brief_id FROM content_versions
@@ -231,9 +236,12 @@ export function selectEligiblePublications(storage, provider = 'youtube') {
                   ))
               OR (state = 'PRODUCED' AND id IN (SELECT content_version_id FROM publications)))
        AND id IN (SELECT content_version_id FROM media_artifacts)
-       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'PUBLICATION' AND quarantined_at IS NOT NULL)
+       AND id NOT IN (
+             SELECT subject_id FROM stage_retry_state
+             WHERE stage = 'PUBLICATION' AND provider = ? AND quarantined_at IS NOT NULL
+           )
        AND id NOT IN (SELECT content_version_id FROM publications WHERE status = 'FAILED' AND failure_reason = 'VISIBILITY_MISMATCH')`,
-      [provider]
+      [provider, provider]
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }

@@ -335,10 +335,10 @@ test('selectEligiblePublications: a PUBLICATION-stage quarantine still excludes 
   const videoFile = path.join(os.tmpdir(), `autonomous-pub-q-${crypto.randomUUID()}.mp4`);
   fs.writeFileSync(videoFile, 'fake mp4 bytes');
 
-  const quarantine = (contentVersionId, stage) => storage.run(
-    `INSERT INTO stage_retry_state (id, subject_id, stage, cycle_number, attempt_count, quarantined_at, created_at, updated_at)
-     VALUES (?, ?, ?, 1, 3, ?, ?, ?)`,
-    [crypto.randomUUID(), contentVersionId, stage, nowISO(), nowISO(), nowISO()]
+  const quarantine = (contentVersionId, stage, provider = '') => storage.run(
+    `INSERT INTO stage_retry_state (id, subject_id, stage, provider, cycle_number, attempt_count, quarantined_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 1, 3, ?, ?, ?)`,
+    [crypto.randomUUID(), contentVersionId, stage, provider, nowISO(), nowISO(), nowISO()]
   );
 
   const eligible = seedChainAtState(storage, 'FINAL_COMPLIANCE');
@@ -346,7 +346,12 @@ test('selectEligiblePublications: a PUBLICATION-stage quarantine still excludes 
 
   const quarantined = seedChainAtState(storage, 'FINAL_COMPLIANCE');
   insertMediaArtifact(storage, quarantined.contentVersionId, videoFile);
-  quarantine(quarantined.contentVersionId, 'PUBLICATION');
+  // Provider-scoped (0026): the quarantine must carry the SAME provider
+  // selectEligiblePublications is being asked about ('youtube', its
+  // default) to exclude the item -- an unscoped/other-provider quarantine
+  // row must NOT exclude it (see publication-provider-scoped-retry.test.js
+  // for the cross-provider isolation coverage itself).
+  quarantine(quarantined.contentVersionId, 'PUBLICATION', 'youtube');
 
   // Stage isolation: a quarantine under a DIFFERENT stage must not hide the item.
   const otherStageQuarantine = seedChainAtState(storage, 'FINAL_COMPLIANCE');

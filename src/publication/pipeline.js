@@ -340,7 +340,7 @@ export async function runPublication({
   // --- 3.5. Bounded-retry governance: a quarantined (FAILED-cap-exhausted)
   // publication is refused on direct invocation as well as by selection.
   // publications.status stays FAILED; quarantine is a separate record. ---
-  if (isQuarantined(storage, contentVersion.id, RETRY_STAGE.PUBLICATION)) {
+  if (isQuarantined(storage, contentVersion.id, RETRY_STAGE.PUBLICATION, provider)) {
     logDecision(storage, {
       runId, subjectType: 'content_version', subjectId: contentVersion.id,
       decision: 'QUARANTINE_REFUSED', reason: 'publication_quarantined_owner_reactivation_required'
@@ -653,7 +653,7 @@ export async function runPublication({
         [JSON.stringify(result), result.errorClass ?? 'PROVIDER_FAILURE', nowISO(), claim.publicationId]
       );
       const retryResult = recordFailedAttempt(storage, {
-        contentVersionId: contentVersion.id, stage: RETRY_STAGE.PUBLICATION,
+        contentVersionId: contentVersion.id, stage: RETRY_STAGE.PUBLICATION, provider,
         reason: `publication_failed_${result.errorClass ?? 'PROVIDER_FAILURE'}`, runId, nowISO
       });
       return { row: storage.get('SELECT * FROM publications WHERE id = ?', [claim.publicationId]), retry: retryResult };
