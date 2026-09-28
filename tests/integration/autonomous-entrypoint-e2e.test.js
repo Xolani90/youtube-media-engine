@@ -284,18 +284,24 @@ test('autonomous entrypoint propagates an explicit failure when production featu
   });
 
   try {
-    await assert.rejects(
-      () =>
-        runAutonomousEntrypoint({
-          storage,
-          llmRouter,
-          discovery: {
-            opportunitySource: new SingleCandidateSource(),
-            topK: 1
-          }
-        }),
-      /missing or invalid numeric value/
+    // Feature computation still rejects explicitly rather than fabricating a
+    // score, but since fbed497 that is a handled per-candidate rejection: the
+    // entrypoint completes, the error is preserved in the audit trail, and
+    // no opportunity is selected from the malformed candidate.
+    await runAutonomousEntrypoint({
+      storage,
+      llmRouter,
+      discovery: {
+        opportunitySource: new SingleCandidateSource(),
+        topK: 1
+      }
+    });
+    const rejected = storage.all(
+      "SELECT config_snapshot FROM decision_log WHERE stage = 'FEATURE_COMPUTATION' AND decision = 'REJECTED'"
     );
+    assert.equal(rejected.length, 1, 'the malformed-feature candidate is rejected and logged');
+    assert.match(rejected[0].config_snapshot, /missing or invalid numeric value/);
+    assert.equal(storage.all('SELECT id FROM opportunities').length, 0, 'no opportunity fabricated from a rejected candidate');
   } finally {
     storage.close();
     fs.rmSync(dir, { recursive: true, force: true });

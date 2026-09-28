@@ -288,13 +288,17 @@ test('B/G: normal completion releases the guard; the next invocation acquires an
 test('C: a failure inside Discovery releases the guard as FAILED; the next invocation acquires', async () => {
   const e = env();
   try {
+    // A per-candidate feature-computation throw is now a handled rejection
+    // (fbed497), so it no longer fails the run. A failure that DOES still
+    // abort Discovery -- the opportunity source itself throwing -- is what
+    // this test needs to prove the guard is released as FAILED.
     await assert.rejects(
-      e.invoke(e.storage, { source: new Feed(STORIES), rawFeatures: () => { throw new Error('features exploded'); } }),
-      /features exploded/
+      e.invoke(e.storage, { source: new Feed(STORIES, { onEnter: () => { throw new Error('discovery source exploded'); } }) }),
+      /discovery source exploded/
     );
     const [row] = runs(e.storage);
     assert.equal(row.status, 'FAILED');
-    assert.match(row.stop_reason, /features exploded/);
+    assert.match(row.stop_reason, /discovery source exploded/);
 
     const next = await e.invoke(e.storage, { source: new Feed(STORIES) });
     assert.equal(next.refused, undefined);

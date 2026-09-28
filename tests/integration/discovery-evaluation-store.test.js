@@ -342,7 +342,11 @@ test('no store: behavior is unchanged (no durable records, GENERATED audit rows)
 test('G. failure before commit leaves no evaluation-complete record for that observation', async () => {
   await withEnv(async (env) => {
     const store = storeFor(env);
-    await assert.rejects(runPipeline(env, { store, observations: [OBS[0]], rawFeatures: env.rawFeaturesFor({ failOn: 'g1' }) }), /exploded on g1/);
+    // A feature-computation throw is now a handled per-candidate rejection
+    // (fbed497): the run completes, counts it, and commits nothing for it.
+    const failed = await runPipeline(env, { store, observations: [OBS[0]], rawFeatures: env.rawFeaturesFor({ failOn: 'g1' }) });
+    assert.equal(failed.stats.featureRejected, 1);
+    assert.equal(failed.stats.freshEvaluated, 0);
     assert.equal(evalRows(env).length, 0, 'proposition succeeded but features failed: nothing committed');
 
     const brokenRouter = new LLMRouter({ priority: ['down'], allowPaidProviders: false, registry: { down: () => ({ id: 'down', isPaid: false, async healthCheck() { return true; }, async complete() { throw new Error('HTTP 429'); } }) } });
@@ -371,8 +375,9 @@ test('an invalid proposition is not persisted (unchanged behavior: rejected this
 test('H. failure after prior commits: a later run reuses candidates 1..N-1 and resumes from the incomplete work', async () => {
   await withEnv(async (env) => {
     const store = storeFor(env);
-    await assert.rejects(runPipeline(env, { store, rawFeatures: env.rawFeaturesFor({ failOn: 'g3' }) }), /exploded on g3/);
-    assert.equal(evalRows(env).length, 2, 'g1 and g2 committed before g3 failed');
+    const first = await runPipeline(env, { store, rawFeatures: env.rawFeaturesFor({ failOn: 'g3' }) });
+    assert.equal(first.stats.featureRejected, 1, 'g3 is rejected, not fatal (fbed497)');
+    assert.equal(evalRows(env).length, 2, 'g1 and g2 committed; g3 failed and committed nothing');
     const before = { ...env.calls };
 
     const result = await runPipeline(env, { store });
