@@ -117,6 +117,23 @@ function setEvidenceStatus(storage, claimId, evidenceStatus) {
  * @param {function} [deps.detectContradiction] - async (claimA, claimB, llmRouter) => one of CONTRADICTION_RESULT ('CONTRADICTS'|'NO_CONTRADICTION'|'UNCERTAIN'); a thrown/rejected call is treated as ERROR by the caller. LLM-assisted semantic judgment, RG-02 contract (see ./contradictionDetector.js for the production implementation). Optional: no contradiction detection performed if omitted (logged as NOT_CHECKED).
  * @param {string} [deps.runId]
  */
+/**
+ * Discovery query = the proposition's `subject` (the disambiguating entity,
+ * e.g. "OpenAI's Dots proactive assistant") plus the core question. The core
+ * question alone may omit the entity that makes the topic unambiguous (live
+ * run 36628871372: "How does Dots help users..." retrieved a mobile game, an
+ * iPhone accessibility guide and an unrelated receivership notice). The
+ * subject is prepended only when the core question does not already contain it.
+ */
+export function buildResearchQuery(subject, coreQuestion) {
+  const question = typeof coreQuestion === 'string' ? coreQuestion.trim() : '';
+  const anchor = typeof subject === 'string' ? subject.trim() : '';
+  if (!anchor) return coreQuestion;
+  if (!question) return anchor;
+  if (question.toLowerCase().includes(anchor.toLowerCase())) return question;
+  return `${anchor} ${question}`;
+}
+
 function classificationReason(roleResult) {
   if (roleResult.role === 'primary_authoritative') {
     return 'authoritative_domain_match';
@@ -166,7 +183,7 @@ export async function runResearchProject({
 
   // --- Source discovery + bounded acquisition ---
   const acquisitionResult = await acquireSources({
-    provider: sourceProvider, query: coreQuestion, policy, retrieveImpl, fetchImpl
+    provider: sourceProvider, query: buildResearchQuery(proposition.subject, coreQuestion), policy, retrieveImpl, fetchImpl
   });
 
   if (acquisitionResult.discoveryFailed) {
