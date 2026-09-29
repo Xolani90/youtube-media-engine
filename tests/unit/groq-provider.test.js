@@ -443,3 +443,80 @@ test('complete(): a null finish_reason is treated as absent', async () => {
   const result = await provider.complete({ prompt: 'hi' });
   assert.equal('finishReason' in result, false);
 });
+
+
+// Controlled experiment: `reasoningEffort` on a complete() request is
+// forwarded to Groq as `reasoning_effort`, and ONLY when supplied.
+
+function captureBodies() {
+  const bodies = [];
+  const fetchImpl = async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return jsonResponse(200, {
+      id: 'req-re',
+      model: 'openai/gpt-oss-20b',
+      choices: [{ message: { content: '[]' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 }
+    });
+  };
+  return { bodies, fetchImpl };
+}
+
+test('complete(): reasoningEffort is sent as reasoning_effort, and nothing else in the body changes', async () => {
+  const { bodies, fetchImpl } = captureBodies();
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  await provider.complete({ prompt: 'hi', system: 'be terse', maxTokens: 50, reasoningEffort: 'low' });
+
+  assert.deepEqual(bodies[0], {
+    model: 'openai/gpt-oss-20b',
+    messages: [
+      { role: 'system', content: 'be terse' },
+      { role: 'user', content: 'hi' }
+    ],
+    max_tokens: 50,
+    reasoning_effort: 'low'
+  });
+});
+
+test('complete(): without reasoningEffort the request body has no reasoning_effort key at all (unchanged shape)', async () => {
+  const { bodies, fetchImpl } = captureBodies();
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+
+  await provider.complete({ prompt: 'hi' });
+  await provider.complete({ prompt: 'hi', system: 'be terse', maxTokens: 50 });
+
+  assert.deepEqual(bodies[0], { model: 'openai/gpt-oss-20b', messages: [{ role: 'user', content: 'hi' }] });
+  assert.deepEqual(bodies[1], {
+    model: 'openai/gpt-oss-20b',
+    messages: [{ role: 'system', content: 'be terse' }, { role: 'user', content: 'hi' }],
+    max_tokens: 50
+  });
+  for (const body of bodies) {
+    assert.equal(Object.hasOwn(body, 'reasoning_effort'), false);
+  }
+});
+
+test('complete(): the 429 retry resends the identical body, reasoning_effort included (retry logic untouched)', async () => {
+  const bodies = [];
+  const fetchImpl = async (_url, init) => {
+    bodies.push(init.body);
+    if (bodies.length === 1) {
+      return jsonResponse(429, { error: { message: 'rate limited' } }, { 'retry-after': '1' });
+    }
+    return jsonResponse(200, {
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 }
+    });
+  };
+  const sleepCalls = [];
+  const provider = new GroqProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl: async (ms) => { sleepCalls.push(ms); } });
+
+  const result = await provider.complete({ prompt: 'hi', reasoningEffort: 'low' });
+
+  assert.equal(result.text, 'ok');
+  assert.equal(bodies.length, 2, 'exactly one retry, as before');
+  assert.equal(bodies[0], bodies[1], 'both attempts send the byte-identical body');
+  assert.equal(JSON.parse(bodies[0]).reasoning_effort, 'low');
+  assert.deepEqual(sleepCalls, [1000]);
+});

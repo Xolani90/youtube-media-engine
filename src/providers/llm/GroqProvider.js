@@ -194,7 +194,7 @@ export class GroqProvider extends LLMProvider {
     return Boolean(this._apiKeyProvider());
   }
 
-  async complete({ prompt, system, maxTokens } = {}) {
+  async complete({ prompt, system, maxTokens, reasoningEffort } = {}) {
     const apiKey = this._apiKeyProvider();
     if (!apiKey) {
       throw new Error('GroqProvider.complete() called with no GROQ_FREE_API_KEY configured.');
@@ -207,7 +207,11 @@ export class GroqProvider extends LLMProvider {
     const body = {
       model: this._model,
       messages,
-      ...(maxTokens ? { max_tokens: maxTokens } : {})
+      ...(maxTokens ? { max_tokens: maxTokens } : {}),
+      // Forwarded only when the caller asks for it (currently: claim
+      // extraction). Omitted entirely otherwise, so every other request
+      // body is byte-for-byte what it was before this field existed.
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
     };
 
     let res;

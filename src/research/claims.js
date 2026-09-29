@@ -4,6 +4,14 @@ import { traceEvent } from '../diagnostics/trace.js';
 
 const CLAIM_TYPES = Object.values(CLAIM_TYPE);
 
+// Controlled experiment: claim extraction asks the provider for low reasoning
+// effort. Hypothesis under test (NOT established): on reasoning models, hidden
+// reasoning tokens count against the completion budget, so a Groq extraction
+// can end finishReason=length with contentLength=0. Providers that do not
+// support the field ignore it. Only extractClaims sets this; no other LLM
+// caller does.
+export const EXTRACTION_REASONING_EFFORT = 'low';
+
 // Observability only (no behavior depends on these). Distinguishes the ways
 // an extraction completion can end up as a given number of claims, because
 // a parse failure and a genuine "[]" are both turned into zero claims below
@@ -70,7 +78,7 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
     untrustedSourceBlock('SOURCE TEXT', sourceText || '', { sourceRole, sourceUrl })
   ].join('\n');
 
-  const { result, providerUsed } = await llmRouter.complete({ prompt });
+  const { result, providerUsed } = await llmRouter.complete({ prompt, reasoningEffort: EXTRACTION_REASONING_EFFORT });
 
   // Observability: `parseOutcome` is recorded alongside the existing parse,
   // never instead of it. The try/catch and the non-array fallback below are
