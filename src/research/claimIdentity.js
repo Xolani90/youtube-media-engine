@@ -311,6 +311,19 @@ const SCALE_SUFFIX = new Map([
 const NUMBER_WITH_SCALE = /(\d[\d,]*(?:\.\d+)?)(?:\s*(hundred|thousand|million|billion|trillion|mm|bn|k|m|b|t)(?![a-z]))?/gi;
 const nearlyEqual = (a, b) => Math.abs(a - b) <= Math.abs(b) * 1e-9;
 
+// A negation inside a temporal/conditional subordinate clause ("...when you
+// aren't actively working with it") qualifies WHEN the proposition holds; it
+// does not negate the proposition. Without this, a correctly AFFIRMED claim
+// could only pass the polarity veto if the model mislabelled it NEGATED.
+// Only clauses introduced by when/whenever/while/if are removed, and only up
+// to the next comma/semicolon/period (a leading clause needs its comma), so
+// negation in the main clause is still detected and the veto stays two-way.
+const TRAILING_CONDITION_CLAUSE = /(?<=\S)\s+(?:even\s+)?(?:when(?:ever)?|while|if)\b[^,;.]*/gi;
+const LEADING_CONDITION_CLAUSE = /^\s*(?:even\s+)?(?:when(?:ever)?|while|if)\b[^,;]*,/i;
+function stripConditionClauses(text) {
+  return text.replace(LEADING_CONDITION_CLAUSE, ' ').replace(TRAILING_CONDITION_CLAUSE, ' ');
+}
+
 function identityHaystack(identity) {
   return [identity.subject, identity.object, ...identity.qualifiers].filter(Boolean).join(' ');
 }
@@ -324,7 +337,7 @@ export function identityTextConflict(claimText, identity, timeParts) {
   const hay = identityHaystack(identity);
 
   // Negation: text with a negation cue must be NEGATED; NEGATED must have a cue.
-  const hasNegation = NEGATION_CUE.test(text);
+  const hasNegation = NEGATION_CUE.test(stripConditionClauses(text));
   if (hasNegation !== (identity.polarity === IDENTITY_POLARITY.NEGATED)) return 'polarity_text_mismatch';
 
   // Causation / association cues in the text pin the relation.
