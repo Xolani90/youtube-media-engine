@@ -5,10 +5,40 @@ import { validateScriptClaimReferences, buildClaimLinks } from '../../src/script
 test('validateScriptClaimReferences accepts sections referencing only eligible ids', () => {
   const sections = [
     { heading: 'A', content: 'x', claim_ids: ['c1'] },
-    { heading: 'B', content: 'y', claim_ids: ['c2', 'c1'] }
+    { heading: 'B', content: 'y', claim_ids: ['c2'] }
   ];
   const result = validateScriptClaimReferences(sections, ['c1', 'c2']);
   assert.equal(result.valid, true);
+});
+
+// Regression (live run 36642307938): a one-key-claim Brief produced a Script
+// that linked the same claim id in two sections. Script accepted it, then
+// Fact-Check failed it with CLAIM_LINKS_DUPLICATE_CLAIM_REFERENCE on every
+// sweep (deterministic, never retried), stalling the item.
+test('validateScriptClaimReferences rejects a claim id repeated across sections', () => {
+  const sections = [
+    { heading: 'A', content: 'x', claim_ids: ['c1'] },
+    { heading: 'B', content: 'y', claim_ids: ['c1'] }
+  ];
+  const result = validateScriptClaimReferences(sections, ['c1']);
+  assert.equal(result.valid, false);
+  assert.equal(result.reason, 'DUPLICATE_CLAIM_REFERENCE_c1');
+});
+
+test('validateScriptClaimReferences rejects a claim id repeated within one section', () => {
+  const sections = [{ heading: 'A', content: 'x', claim_ids: ['c1', 'c1'] }];
+  const result = validateScriptClaimReferences(sections, ['c1']);
+  assert.equal(result.valid, false);
+  assert.equal(result.reason, 'DUPLICATE_CLAIM_REFERENCE_c1');
+});
+
+test('a Script accepted by validateScriptClaimReferences always passes Fact-Check claim-link uniqueness', () => {
+  const sections = [
+    { heading: 'A', content: 'x', claim_ids: ['c1'] },
+    { heading: 'B', content: 'y', claim_ids: [] },
+    { heading: 'C', content: 'z', claim_ids: ['c2'] }
+  ];
+  assert.equal(validateScriptClaimReferences(sections, ['c1', 'c2']).valid, true);
 });
 
 test('validateScriptClaimReferences accepts sections with no claim references', () => {

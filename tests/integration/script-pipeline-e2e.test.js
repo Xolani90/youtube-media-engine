@@ -173,6 +173,66 @@ test('AC5: an LLM-proposed invalid/unknown claim id is never persisted -> bounde
   cleanup(storage, dbPath);
 });
 
+// Regression (live run 36642307938): a one-key-claim Brief made the model link
+// the same claim id in two sections. Script persisted it and Fact-Check then
+// failed it with CLAIM_LINKS_DUPLICATE_CLAIM_REFERENCE on every sweep. The
+// Script stage must reject it inside its retry loop, and a later valid draft
+// must be accepted and pass Fact-Check's structural claim-link check.
+test('duplicate claim id across sections is rejected in the retry loop, never persisted; a valid retry passes Fact-Check', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { contentBriefId, claimId } = await seedEligibleBrief(storage);
+  const dup = wellFormedScriptFields([claimId], {
+    sections: [
+      { heading: 'A', content: 'x', claim_ids: [claimId] },
+      { heading: 'B', content: 'y', claim_ids: [claimId] }
+    ]
+  });
+  const ok = wellFormedScriptFields([claimId], {
+    sections: [
+      { heading: 'A', content: 'x', claim_ids: [claimId] },
+      { heading: 'B', content: 'y', claim_ids: [] }
+    ]
+  });
+  let calls = 0;
+  const router = routerReturning(() => JSON.stringify(calls++ === 0 ? dup : ok));
+
+  const result = await createScript({ storage, contentBriefId, llmRouter: router, policy: scriptPolicy });
+
+  assert.equal(result.rejected, false);
+  assert.equal(result.attemptsUsed, 2);
+  const rejected = storage.all("SELECT reason FROM decision_log WHERE decision = 'REJECTED' AND subject_id = ?", [contentBriefId]);
+  assert.deepEqual(rejected.map((r) => r.reason), [`DUPLICATE_CLAIM_REFERENCE_${claimId}`]);
+  assert.equal(storage.all('SELECT * FROM scripts WHERE content_brief_id = ?', [contentBriefId]).length, 1);
+
+  const { runFactCheck } = await import('../../src/fact-check/pipeline.js');
+  const fc = runFactCheck({ storage, contentBriefId });
+  assert.notEqual(fc.outcome, 'STRUCTURAL_FAILURE');
+
+  cleanup(storage, dbPath);
+});
+
+test('a Script that only ever repeats a claim id exhausts retries and is never persisted', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const { contentBriefId, claimId } = await seedEligibleBrief(storage);
+  const dup = wellFormedScriptFields([claimId], {
+    sections: [
+      { heading: 'A', content: 'x', claim_ids: [claimId] },
+      { heading: 'B', content: 'y', claim_ids: [claimId] }
+    ]
+  });
+  const router = routerReturning(() => JSON.stringify(dup));
+
+  const result = await createScript({ storage, contentBriefId, llmRouter: router, policy: scriptPolicy });
+
+  assert.equal(result.rejected, true);
+  assert.match(result.reason, /GENERATION_RETRY_EXHAUSTED_DUPLICATE_CLAIM_REFERENCE/);
+  assert.equal(storage.all('SELECT * FROM scripts WHERE content_brief_id = ?', [contentBriefId]).length, 0);
+
+  cleanup(storage, dbPath);
+});
+
 test('AC6/AC7: retry exhaustion on malformed output leaves no partial Script and no lifecycle transition', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();

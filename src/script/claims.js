@@ -12,6 +12,12 @@
  */
 export function validateScriptClaimReferences(sections, allowedClaimIds) {
   const allowed = new Set(allowedClaimIds);
+  // Fact-Check (spec §11) treats a claim id repeated anywhere across the
+  // claim_links payload as a STRUCTURAL_FAILURE, which is deterministic and
+  // never retried. A Script that repeats an id can therefore never pass, so
+  // it must be rejected here, inside the bounded generation retry loop,
+  // rather than persisted and left to fail Fact-Check on every sweep.
+  const seen = new Set();
 
   for (const section of sections) {
     if (!Array.isArray(section.claim_ids)) {
@@ -24,6 +30,10 @@ export function validateScriptClaimReferences(sections, allowedClaimIds) {
       if (!allowed.has(id)) {
         return { valid: false, reason: `INVALID_CLAIM_REFERENCE_${id}` };
       }
+      if (seen.has(id)) {
+        return { valid: false, reason: `DUPLICATE_CLAIM_REFERENCE_${id}` };
+      }
+      seen.add(id);
     }
   }
 
