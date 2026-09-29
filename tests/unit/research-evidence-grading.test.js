@@ -35,8 +35,9 @@ test('fewer independent_reporting sources than the configured minimum -> PARTIAL
 });
 
 test('meeting the configured independent_reporting minimum -> VERIFIED', () => {
-  const s1 = source({ id: 's1' });
-  const s2 = source({ id: 's2' });
+  // Distinct registrable domains: independence is keyed on publisher, not on source row.
+  const s1 = source({ id: 's1', url: 'https://publisher-one.com/story' });
+  const s2 = source({ id: 's2', url: 'https://publisher-two.org/story' });
   const sourcesById = new Map([[s1.id, s1], [s2.id, s2]]);
   const status = computeEvidenceStatus({
     claimSourceLinks: [{ source_id: 's1' }, { source_id: 's2' }], sourcesById, policy: researchPolicy, nowMs: NOW

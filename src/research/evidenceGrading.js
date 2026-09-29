@@ -1,9 +1,40 @@
+import { getDomain } from 'tldts';
 import { EVIDENCE_STATUS, SOURCE_ROLE, RETRIEVAL_STATUS } from './constants.js';
 
 const QUALITY_ORDER = ['UNUSABLE', 'LOW', 'MEDIUM', 'HIGH'];
 
 function meetsMinimumQuality(tier, minimumTier) {
   return QUALITY_ORDER.indexOf(tier) >= QUALITY_ORDER.indexOf(minimumTier);
+}
+
+/**
+ * Deterministic publisher-independence key for corroboration counting.
+ *
+ * Returns the registrable domain (public-suffix aware, via the Public
+ * Suffix List: news.example.com, www.example.com and example.com all map to
+ * example.com; www.bbc.co.uk -> bbc.co.uk). Two URLs sharing a key are ONE
+ * publisher for corroboration purposes.
+ *
+ * Fails closed: a missing/unparseable URL, an IP address, or a host with no
+ * registrable domain (e.g. localhost) returns null, and a source with a null
+ * key can never count as independent corroboration.
+ *
+ * Only ICANN-section suffixes are used (tldts default), so hosts under
+ * shared private suffixes (e.g. *.blogspot.com) are conservatively treated
+ * as one publisher rather than many.
+ *
+ * @param {string} url
+ * @returns {string|null}
+ */
+export function independenceKey(url) {
+  if (typeof url !== 'string' || url.trim() === '') return null;
+  let hostname;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return null;
+  }
+  return getDomain(hostname) || null;
 }
 
 /**
@@ -36,6 +67,13 @@ function isSourceEligible(source, policy, nowMs) {
  * distinct domains they span (v0.4 source-independence clarification).
  * A `primary_authoritative` source is sufficient alone when policy says so.
  *
+ * Integrity rules for the independent_reporting count:
+ *  - Each distinct `source_id` counts at most once, no matter how many
+ *    claim_sources rows (e.g. `primary` + `corroborating`) reference it.
+ *  - Sources are counted by distinct independenceKey (registrable domain),
+ *    not by URL: two pages from the same publisher are one source of
+ *    corroboration. Sources with no derivable key never count.
+ *
  * @param {object} params
  * @param {Array<{claim_id, source_id}>} params.claimSourceLinks - claim_sources rows for this claim
  * @param {Map<string, object>} params.sourcesById
@@ -52,8 +90,11 @@ export function computeEvidenceStatus({ claimSourceLinks, sourcesById, policy, h
     return EVIDENCE_STATUS.CONTESTED;
   }
 
-  const eligibleSources = (claimSourceLinks || [])
-    .map((link) => sourcesById.get(link.source_id))
+  // A source is one piece of evidence regardless of how many claim_sources
+  // rows (roles) link it to this claim.
+  const uniqueSourceIds = [...new Set((claimSourceLinks || []).map((link) => link.source_id))];
+  const eligibleSources = uniqueSourceIds
+    .map((sourceId) => sourcesById.get(sourceId))
     .filter(Boolean)
     .filter((s) => isSourceEligible(s, policy, nowMs));
 
@@ -62,9 +103,13 @@ export function computeEvidenceStatus({ claimSourceLinks, sourcesById, policy, h
   );
   if (hasSufficientPrimary) return EVIDENCE_STATUS.VERIFIED;
 
-  const independentCount = eligibleSources.filter(
-    (s) => s.role === SOURCE_ROLE.INDEPENDENT_REPORTING && policy.evidence.source_roles.independent_reporting.counts_toward_corroboration
-  ).length;
+  const independentKeys = new Set(
+    eligibleSources
+      .filter((s) => s.role === SOURCE_ROLE.INDEPENDENT_REPORTING && policy.evidence.source_roles.independent_reporting.counts_toward_corroboration)
+      .map((s) => independenceKey(s.url))
+      .filter((key) => key !== null)
+  );
+  const independentCount = independentKeys.size;
 
   if (independentCount >= policy.evidence.independent_reporting_minimum) {
     return EVIDENCE_STATUS.VERIFIED;
