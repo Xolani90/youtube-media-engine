@@ -22,7 +22,7 @@ import { CLAIM_TYPE } from './constants.js';
  * The human-readable claim text is never altered or replaced.
  */
 
-export const IDENTITY_VERSION = 'v1';
+export const IDENTITY_VERSION = 'v2';
 
 export const IDENTITY_POLARITY = Object.freeze({ AFFIRMED: 'AFFIRMED', NEGATED: 'NEGATED' });
 // OCCURRED = stated as having actually happened / being the case.
@@ -42,47 +42,175 @@ const RELATIONS = Object.values(IDENTITY_RELATION);
 // (announce != release: that distinction is materially different, so
 // ANNOUNCE is intentionally NOT mapped to RELEASE.)
 const PREDICATE_SYNONYMS = new Map([['launch', 'release']]);
-const UNIT_SYNONYMS = new Map([
-  ['$', 'usd'], ['us dollar', 'usd'], ['us dollars', 'usd'], ['dollar', 'usd'], ['dollars', 'usd'],
-  ['%', 'percent'], ['pct', 'percent'], ['per cent', 'percent']
+
+// Inflection table: ONLY regular/irregular inflected forms of a listed base
+// verb map to that base (tense/number/aspect carry no propositional content
+// here: polarity, modality and time are separate structured fields). This is
+// an explicit whitelist, not a stemmer: an unlisted verb form must match
+// exactly, so no two different verbs can ever be conflated by it.
+const VERB_FORMS = [
+  ['release', 'releases', 'released', 'releasing'],
+  ['launch', 'launches', 'launched', 'launching'],
+  ['acquire', 'acquires', 'acquired', 'acquiring'],
+  ['announce', 'announces', 'announced', 'announcing'],
+  ['report', 'reports', 'reported', 'reporting'],
+  ['publish', 'publishes', 'published', 'publishing'],
+  ['appoint', 'appoints', 'appointed', 'appointing'],
+  ['hire', 'hires', 'hired', 'hiring'],
+  ['raise', 'raises', 'raised', 'raising'],
+  ['increase', 'increases', 'increased', 'increasing'],
+  ['decrease', 'decreases', 'decreased', 'decreasing'],
+  ['reduce', 'reduces', 'reduced', 'reducing'],
+  ['open', 'opens', 'opened', 'opening'],
+  ['close', 'closes', 'closed', 'closing'],
+  ['approve', 'approves', 'approved', 'approving'],
+  ['ban', 'bans', 'banned', 'banning'],
+  ['sue', 'sues', 'sued', 'suing'],
+  ['merge', 'merges', 'merged', 'merging'],
+  ['invest', 'invests', 'invested', 'investing'],
+  ['fund', 'funds', 'funded', 'funding'],
+  ['ship', 'ships', 'shipped', 'shipping'],
+  ['buy', 'buys', 'bought', 'buying'],
+  ['sell', 'sells', 'sold', 'selling'],
+  ['win', 'wins', 'won', 'winning'],
+  ['lose', 'loses', 'lost', 'losing'],
+  ['cut', 'cuts', 'cutting'],
+  ['sign', 'signs', 'signed', 'signing'],
+  ['employ', 'employs', 'employed', 'employing']
+];
+const VERB_BASE = new Map();
+for (const [base, ...forms] of VERB_FORMS) {
+  VERB_BASE.set(base, base);
+  for (const f of forms) VERB_BASE.set(f, base);
+}
+
+// Scale words that may be written into the unit ("million USD", "USD billions").
+const UNIT_SCALE = new Map([
+  ['thousand', 1e3], ['thousands', 1e3], ['million', 1e6], ['millions', 1e6],
+  ['billion', 1e9], ['billions', 1e9], ['trillion', 1e12], ['trillions', 1e12]
 ]);
-const CORPORATE_SUFFIXES = new Set(['inc', 'incorporated', 'corp', 'corporation', 'ltd', 'limited', 'llc', 'plc']);
+const UNIT_SYNONYMS = new Map([
+  ['$', 'usd'], ['us$', 'usd'], ['usd', 'usd'], ['us dollar', 'usd'], ['us dollars', 'usd'],
+  ['u s dollar', 'usd'], ['u s dollars', 'usd'], ['united states dollar', 'usd'],
+  ['united states dollars', 'usd'], ['dollar', 'usd'], ['dollars', 'usd'],
+  ['%', 'percent'], ['pct', 'percent'], ['per cent', 'percent'], ['percent', 'percent']
+]);
+// Plural -> singular for unit nouns ("employees" -> "employee"). Words that
+// merely end in s are left alone.
+const NO_SINGULARIZE = /(?:ss|us|is|ics)$|^(?:news|series|species)$/;
+const CORPORATE_SUFFIXES = new Set(['inc', 'incorporated', 'corp', 'corporation', 'ltd', 'limited', 'llc', 'llp', 'plc', 'co', 'gmbh']);
+const LEADING_ARTICLES = new Set(['the', 'a', 'an']);
 
 function normText(value) {
   if (typeof value !== 'string') return '';
   return value
     .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
+    .replace(/&/g, ' and ')
     .replace(/[^\p{L}\p{N}%$\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 function normEntity(value) {
-  const tokens = normText(value).split(' ').filter(Boolean);
-  if (tokens[0] === 'the') tokens.shift();
+  // Possessive marker is presentation, not identity ("Acme's" == "Acme").
+  const stripped = typeof value === 'string' ? value.replace(/['\u2019]s\b/gi, '') : value;
+  const tokens = normText(stripped).split(' ').filter(Boolean);
+  if (tokens.length > 1 && LEADING_ARTICLES.has(tokens[0])) tokens.shift();
   while (tokens.length > 1 && CORPORATE_SUFFIXES.has(tokens[tokens.length - 1])) tokens.pop();
+  return tokens.join(' ');
+}
+
+// Qualifiers: same surface normalization, plus a leading article/"in" is
+// presentation ("in Europe" == "Europe").
+function normQualifier(value) {
+  const tokens = normText(value).split(' ').filter(Boolean);
+  while (tokens.length > 1 && (LEADING_ARTICLES.has(tokens[0]) || tokens[0] === 'in')) tokens.shift();
   return tokens.join(' ');
 }
 
 function normPredicate(value) {
   const text = normText(value);
-  return PREDICATE_SYNONYMS.get(text) ?? text;
+  const base = VERB_BASE.get(text) ?? text;
+  return PREDICATE_SYNONYMS.get(base) ?? base;
 }
 
+// Returns { unit, multiplier } where a scale word inside the unit is folded
+// into a multiplier for the quantity ("million USD" -> usd, x1e6).
 function normUnit(value) {
-  const text = normText(value);
-  return UNIT_SYNONYMS.get(text) ?? text;
+  let tokens = normText(value).split(' ').filter(Boolean);
+  let multiplier = 1;
+  if (tokens.length > 1 && UNIT_SCALE.has(tokens[0])) multiplier = UNIT_SCALE.get(tokens.shift());
+  else if (tokens.length > 1 && UNIT_SCALE.has(tokens[tokens.length - 1])) multiplier = UNIT_SCALE.get(tokens.pop());
+  let text = tokens.join(' ');
+  if (UNIT_SYNONYMS.has(text)) return { unit: UNIT_SYNONYMS.get(text), multiplier };
+  if (tokens.length > 0) {
+    const last = tokens[tokens.length - 1];
+    if (last.length > 3 && last.endsWith('ies')) tokens[tokens.length - 1] = `${last.slice(0, -3)}y`;
+    else if (last.length > 3 && last.endsWith('s') && !NO_SINGULARIZE.test(last)) tokens[tokens.length - 1] = last.slice(0, -1);
+    text = tokens.join(' ');
+  }
+  return { unit: text, multiplier };
+}
+
+const MONTHS_ALL = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+const MONTH_LOOKUP = new Map();
+MONTHS_ALL.forEach((m, i) => {
+  MONTH_LOOKUP.set(m, i + 1);
+  MONTH_LOOKUP.set(m.slice(0, 3), i + 1);
+});
+MONTH_LOOKUP.set('sept', 9);
+const ORDINAL_WORD = new Map([['first', 1], ['second', 2], ['third', 3], ['fourth', 4]]);
+const MONTH_NAMES = '(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)';
+
+function daysInMonth(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+// Canonical ISO string for one supported spelling, or null. Every accepted
+// form has a single unambiguous reading; day/month-numeric forms such as
+// "03/04/2026" (ambiguous between D/M and M/D) are deliberately NOT accepted.
+function canonicalTime(raw) {
+  const t = raw.trim().replace(/\s+/g, ' ').replace(/\.$/, '');
+  const lower = t.toLowerCase();
+  let m;
+  const ymd = (y, mo, d) => {
+    const year = Number(y); const month = Number(mo); const day = Number(d);
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return null;
+    return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  };
+  const ym = (y, mo) => {
+    const month = Number(mo);
+    if (month < 1 || month > 12) return null;
+    return `${y}-${String(month).padStart(2, '0')}`;
+  };
+
+  if ((m = t.match(/^(\d{4})$/))) return m[1];
+  if ((m = t.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/))) return ymd(m[1], m[2], m[3]);
+  if ((m = t.match(/^(\d{4})[-/](\d{1,2})$/))) return ym(m[1], m[2]);
+  if ((m = lower.match(/^(\d{4})[- ]?q([1-4])$/))) return `${m[1]}-Q${m[2]}`;
+  if ((m = lower.match(/^q([1-4])[ ,]*(\d{4})$/))) return `${m[2]}-Q${m[1]}`;
+  if ((m = lower.match(/^([1-4])q ?(\d{4})$/))) return `${m[2]}-Q${m[1]}`;
+  if ((m = lower.match(/^(first|second|third|fourth) quarter(?: of)?,? (\d{4})$/))) return `${m[2]}-Q${ORDINAL_WORD.get(m[1])}`;
+  if ((m = lower.match(/^(\d{4})[- ]?h([12])$/))) return `${m[1]}-H${m[2]}`;
+  if ((m = lower.match(/^h([12])[ ,]*(\d{4})$/))) return `${m[2]}-H${m[1]}`;
+  if ((m = lower.match(/^(first|second) half(?: of)?,? (\d{4})$/))) return `${m[2]}-H${ORDINAL_WORD.get(m[1])}`;
+  if ((m = lower.match(new RegExp(`^${MONTH_NAMES},? (\\d{4})$`)))) return ym(m[2], MONTH_LOOKUP.get(m[1]));
+  if ((m = lower.match(new RegExp(`^${MONTH_NAMES} (\\d{1,2})(?:st|nd|rd|th)?,? (\\d{4})$`)))) return ymd(m[3], MONTH_LOOKUP.get(m[1]), m[2]);
+  if ((m = lower.match(new RegExp(`^(\\d{1,2})(?:st|nd|rd|th)?(?: of)? ${MONTH_NAMES},? (\\d{4})$`)))) return ymd(m[3], MONTH_LOOKUP.get(m[2]), m[1]);
+  return null;
 }
 
 const TIME_RE = /^(\d{4})(?:-(0[1-9]|1[0-2])(?:-(0[1-9]|[12]\d|3[01]))?|-Q([1-4])|-H([12]))?$/;
 
 function parseTime(value) {
   if (typeof value !== 'string') return null;
-  const m = value.trim().match(TIME_RE);
+  const canonical = canonicalTime(value);
+  if (!canonical) return null;
+  const m = canonical.match(TIME_RE);
   if (!m) return null;
   return {
-    normalized: value.trim(),
+    normalized: canonical,
     year: Number(m[1]),
     month: m[2] ? Number(m[2]) : null,
     day: m[3] ? Number(m[3]) : null,
@@ -123,7 +251,7 @@ export function normalizeClaimIdentity(raw) {
     if (!Array.isArray(raw.qualifiers) || raw.qualifiers.some((q) => typeof q !== 'string')) {
       return { ok: false, reason: 'identity_qualifiers_invalid' };
     }
-    qualifiers = [...new Set(raw.qualifiers.map(normText).filter(Boolean))].sort();
+    qualifiers = [...new Set(raw.qualifiers.map(normQualifier).filter(Boolean))].sort();
   }
 
   let time = null;
@@ -138,10 +266,13 @@ export function normalizeClaimIdentity(raw) {
   let unit = null;
   if (raw.quantity !== null && raw.quantity !== undefined) {
     if (typeof raw.quantity !== 'number' || !Number.isFinite(raw.quantity)) return { ok: false, reason: 'identity_quantity_invalid' };
-    quantity = raw.quantity;
-    unit = normUnit(raw.unit);
-    if (!unit) return { ok: false, reason: 'identity_unit_missing' };
-  } else if (raw.unit !== null && raw.unit !== undefined && normUnit(raw.unit)) {
+    const u = normUnit(raw.unit);
+    if (!u.unit) return { ok: false, reason: 'identity_unit_missing' };
+    unit = u.unit;
+    // Fold a scale word written into the unit into the number; round away
+    // binary floating-point noise (1.1 * 1e9) so equal amounts compare equal.
+    quantity = u.multiplier === 1 ? raw.quantity : Number((raw.quantity * u.multiplier).toPrecision(12));
+  } else if (raw.unit !== null && raw.unit !== undefined && normUnit(raw.unit).unit) {
     return { ok: false, reason: 'identity_unit_without_quantity' };
   }
 

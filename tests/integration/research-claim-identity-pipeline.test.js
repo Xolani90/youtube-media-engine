@@ -283,3 +283,85 @@ test('is_load_bearing mismatch between paraphrases keeps them separate (conserva
     assert.equal(result.claims.length, 2);
   } finally { cleanup(storage, dbPath); }
 });
+
+// ---- Canonicalization (v2) through the real pipeline ----
+const revId = (over = {}) => ({ subject: 'Acme', predicate: 'report', object: 'revenue', qualifiers: [], time: '2025', quantity: 1e9, unit: 'USD', polarity: 'AFFIRMED', modality: 'OCCURRED', relation: 'DESCRIPTIVE', ...over });
+
+test('C-int-1. lexically different but equivalent identities (inflection, article, date form, unit form) merge and VERIFY across two domains', async () => {
+  const { storage, dbPath, result } = await run({
+    [A]: [fact('Acme reported $1 billion revenue in 2025.', revId())],
+    [B]: [fact("Acme's revenue for 2025 was reported as 1,000 million US dollars.", revId({ predicate: 'Reported', object: 'the Revenue', quantity: 1000, unit: 'million US dollars', time: '2025' }))]
+  });
+  try {
+    assert.equal(result.claims.length, 1);
+    assert.equal(sourceIdsOf(storage, result.claims[0].id).length, 2);
+    assert.equal(result.claims[0].evidence_status, 'VERIFIED');
+    assert.equal(storage.all("SELECT 1 FROM decision_log WHERE decision = 'MERGED_BY_IDENTITY'").length, 1);
+  } finally { cleanup(storage, dbPath); }
+});
+
+test('C-int-2. equivalent date forms merge through the pipeline; a different date does not', async () => {
+  const { storage, dbPath, result } = await run({
+    [A]: [fact('Acme released Widget in March 2026.', launch({ predicate: 'release', time: '2026-03' }))],
+    [B]: [fact('Widget was launched by Acme in March 2026.', launch({ time: 'March 2026' }))],
+    'https://publisher-three.net/story': [fact('Acme released Widget in April 2026.', launch({ predicate: 'release', time: 'April 2026' }))]
+  });
+  try {
+    assert.equal(result.claims.length, 2);
+    const march = result.claims.find((c) => c.claim.includes('March'));
+    const april = result.claims.find((c) => c.claim.includes('April'));
+    assert.equal(sourceIdsOf(storage, march.id).length, 2);
+    assert.equal(march.evidence_status, 'VERIFIED');
+    assert.equal(sourceIdsOf(storage, april.id).length, 1);
+    assert.equal(april.evidence_status, 'PARTIALLY_SUPPORTED');
+  } finally { cleanup(storage, dbPath); }
+});
+
+test('C-int-3. same-domain and same-source lexical variants merge but never count as independent corroboration', async () => {
+  const sameDomain = await run({
+    'https://news.example.com/a': [fact('Acme reported $1 billion revenue in 2025.', revId())],
+    'https://www.example.com/b': [fact('Acme reported one billion dollars.', revId({ predicate: 'reports', unit: '$' }))]
+  });
+  try {
+    // Second wording has a spelled number the structure cannot verify -> untrusted, stays separate.
+    assert.equal(sameDomain.result.claims.length, 2);
+    assert.ok(sameDomain.result.claims.every((c) => c.evidence_status === 'PARTIALLY_SUPPORTED'));
+  } finally { cleanup(sameDomain.storage, sameDomain.dbPath); }
+
+  const sameDomain2 = await run({
+    'https://news.example.com/a': [fact('Acme reported $1 billion revenue in 2025.', revId())],
+    'https://www.example.com/b': [fact('Acme reported revenue of $1 billion for 2025.', revId({ predicate: 'reports', unit: '$' }))]
+  });
+  try {
+    assert.equal(sameDomain2.result.claims.length, 1);
+    assert.equal(sourceIdsOf(sameDomain2.storage, sameDomain2.result.claims[0].id).length, 2);
+    assert.equal(sameDomain2.result.claims[0].evidence_status, 'PARTIALLY_SUPPORTED');
+  } finally { cleanup(sameDomain2.storage, sameDomain2.dbPath); }
+
+  const sameSource = await run({
+    [A]: [
+      fact('Acme reported $1 billion revenue in 2025.', revId()),
+      fact('Revenue of $1 billion was reported by Acme for 2025.', revId({ predicate: 'reported', unit: 'US dollars' }))
+    ]
+  });
+  try {
+    assert.equal(sameSource.result.claims.length, 1);
+    assert.equal(sourceIdsOf(sameSource.storage, sameSource.result.claims[0].id).length, 1);
+    assert.equal(sameSource.result.claims[0].evidence_status, 'PARTIALLY_SUPPORTED');
+  } finally { cleanup(sameSource.storage, sameSource.dbPath); }
+});
+
+test('C-int-4. contradictory propositions with lexical variance stay separate and reach contradiction handling', async () => {
+  const seen = [];
+  const detectContradiction = async (a, b) => { seen.push(1); return 'CONTRADICTS'; };
+  const { storage, dbPath, result } = await run({
+    [A]: [fact('Acme released Widget in March 2026.', launch({ predicate: 'released', time: 'March 2026' }))],
+    [B]: [fact('Acme did not launch Widget in March 2026.', launch({ predicate: 'launched', polarity: 'NEGATED', time: '2026/03' }))]
+  }, { detectContradiction });
+  try {
+    assert.equal(result.claims.length, 2);
+    assert.equal(seen.length, 1);
+    assert.ok(result.claims.every((c) => c.evidence_status === 'CONTESTED'));
+    assert.equal(storage.all("SELECT 1 FROM decision_log WHERE decision = 'MERGED_BY_IDENTITY'").length, 0);
+  } finally { cleanup(storage, dbPath); }
+});
