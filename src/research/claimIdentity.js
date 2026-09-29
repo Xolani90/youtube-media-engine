@@ -451,14 +451,17 @@ export function identityTextConflict(claimText, identity, timeParts) {
  * the claim is not a FACT; there is no identity; the identity is
  * structurally invalid; or it conflicts with the claim's own text.
  *
- * @returns {{ fingerprint: string|null, reason: string|null }}
+ * @returns {{ fingerprint: string|null, reason: string|null, identity?: object }}
  */
 export function deriveClaimIdentity(proposed) {
   if (!proposed || proposed.claim_type !== CLAIM_TYPE.FACT) return { fingerprint: null, reason: 'not_a_fact_claim' };
   const normalized = normalizeClaimIdentity(proposed.identity);
   if (!normalized.ok) return { fingerprint: null, reason: normalized.reason };
   const conflict = identityTextConflict(proposed.claim, normalized.identity, normalized.timeParts);
-  if (conflict) return { fingerprint: null, reason: conflict };
+  // `identity` (the normalized structure) is returned for observability only,
+  // including when the identity is untrusted, so a run can show WHY two claims
+  // did or did not share a fingerprint. It never influences merging.
+  if (conflict) return { fingerprint: null, reason: conflict, identity: normalized.identity };
 
   const i = normalized.identity;
   // Fixed key order => byte-stable canonical form.
@@ -466,7 +469,7 @@ export function deriveClaimIdentity(proposed) {
     IDENTITY_VERSION, i.subject, i.predicate, i.object, i.qualifiers, i.time,
     i.quantity, i.unit, i.polarity, i.modality, i.relation
   ]);
-  return { fingerprint: crypto.createHash('sha256').update(canonical).digest('hex'), reason: null };
+  return { fingerprint: crypto.createHash('sha256').update(canonical).digest('hex'), reason: null, identity: i };
 }
 
 /**

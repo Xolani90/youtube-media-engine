@@ -264,7 +264,7 @@ export async function runResearchProject({
       }
 
       const normalized = proposed.claim.trim().toLowerCase();
-      const { fingerprint } = deriveClaimIdentity(proposed);
+      const { fingerprint, reason: identityReason, identity: normalizedIdentity } = deriveClaimIdentity(proposed);
       let claimId = claimTextIndex.get(normalized);
       let isNewClaim = false;
       let mergedByIdentity = false;
@@ -299,6 +299,22 @@ export async function runResearchProject({
         logDecision(storage, {
           runId, stage: RESEARCH_STAGE.LOAD_BEARING_CLASSIFICATION, subjectType: 'claim', subjectId: claimId,
           decision: proposed.is_load_bearing ? 'LOAD_BEARING' : 'NOT_LOAD_BEARING', reason: 'llm_proposed_deterministically_validated'
+        });
+      }
+
+      // Observability only (changes no behavior): one row per FACT claim recording
+      // exactly what identity the claim got, so a run shows why near-duplicate
+      // claims from different sources did or did not share a fingerprint. Holds
+      // the normalized structure and hash, never claim text or source text.
+      if (proposed.claim_type === CLAIM_TYPE.FACT) {
+        logDecision(storage, {
+          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+          decision: fingerprint ? 'IDENTITY_FINGERPRINTED' : 'IDENTITY_UNTRUSTED',
+          reason: fingerprint ? (mergedByIdentity ? 'merged_by_identity' : 'fingerprint_derived') : identityReason,
+          configSnapshot: {
+            sourceId: source.id, fingerprint: fingerprint ?? null, isLoadBearing: proposed.is_load_bearing,
+            merged: mergedByIdentity, newClaim: isNewClaim, identity: normalizedIdentity ?? null
+          }
         });
       }
 
