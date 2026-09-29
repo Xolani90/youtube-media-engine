@@ -3,7 +3,7 @@ import { RESEARCH_STAGE, RESEARCH_PROJECT_STATUS, RETRIEVAL_STATUS, EVIDENCE_STA
 import { acquireSources } from './acquisition.js';
 import { classifySourceRole, classifySourceQuality } from './sourceClassification.js';
 import { extractClaims, validateExtractedClaim } from './claims.js';
-import { deriveClaimIdentity } from './claimIdentity.js';
+import { deriveClaimIdentity, summarizeIdentityCoverage } from './claimIdentity.js';
 import { computeEvidenceStatus } from './evidenceGrading.js';
 import { canonicalizePair, recordContradiction, hasUnresolvedContradiction } from './contradictions.js';
 import { evaluateCompleteness } from './completeness.js';
@@ -229,7 +229,11 @@ export async function runResearchProject({
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
       decision: 'EXTRACTED', reason: `${extraction.claims.length}_claims_proposed`, provider: extraction.providerUsed,
-      configSnapshot: { model: extraction.model, estimatedCost: extraction.estimatedCost, isPaid: extraction.isPaid }
+      configSnapshot: {
+        model: extraction.model, estimatedCost: extraction.estimatedCost, isPaid: extraction.isPaid,
+        // Metadata-only identity coverage (why FACT claims did/didn't get a fingerprint).
+        identity: summarizeIdentityCoverage(extraction.claims)
+      }
     });
 
     for (const proposed of extraction.claims) {

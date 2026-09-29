@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { SqliteStorageDriver } from '../../src/storage/SqliteStorageDriver.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
+import { GeminiProvider } from '../../src/providers/llm/GeminiProvider.js';
 import { ResearchSourceProvider } from '../../src/research/ResearchSourceProvider.js';
 import { runResearchProject } from '../../src/research/pipeline.js';
 import { independenceKey } from '../../src/research/evidenceGrading.js';
@@ -363,5 +364,70 @@ test('C-int-4. contradictory propositions with lexical variance stay separate an
     assert.equal(seen.length, 1);
     assert.ok(result.claims.every((c) => c.evidence_status === 'CONTESTED'));
     assert.equal(storage.all("SELECT 1 FROM decision_log WHERE decision = 'MERGED_BY_IDENTITY'").length, 0);
+  } finally { cleanup(storage, dbPath); }
+});
+
+// ---- Real extraction path: GeminiProvider response parsing -> extractClaims -> pipeline ----
+// Real GeminiProvider + real LLMRouter with only the HTTP fetch injected: the
+// response is Gemini-shaped (candidates/parts, text split over several parts,
+// one answer wrapped in a JSON code fence).
+function geminiRouterFor(textByUrl) {
+  const fetchImpl = async (_url, opts) => {
+    const prompt = JSON.parse(opts.body).contents[0].parts[0].text;
+    const url = Object.keys(textByUrl).find((u) => prompt.includes(marker(u)));
+    const text = url ? textByUrl[url] : '[]';
+    const half = Math.floor(text.length / 2);
+    return {
+      ok: true, status: 200, headers: { get: () => null },
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: text.slice(0, half) }, { text: text.slice(half) }] }, finishReason: 'STOP' }],
+        modelVersion: 'gemini-test', usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 }
+      })
+    };
+  };
+  const registry = { 'gemini-free': () => new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'k', sleepImpl: async () => {}, nowImpl: () => 0 }) };
+  return new LLMRouter({ priority: ['gemini-free'], allowPaidProviders: false, registry });
+}
+
+test('E1. real Gemini response path preserves structured identity, merges cross-source paraphrases, and reports identity coverage', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  try {
+    const opportunityId = seedOpportunity(storage);
+    const textByUrl = {
+      [A]: '```json\n' + JSON.stringify([
+        fact('Acme reported $1 billion revenue in 2025.', revId()),
+        fact('Acme released Gadget in March 2026.', null),                                        // missing
+        fact('Acme released Widget in 2026.', { ...launch({ time: '2026' }), polarity: 'MAYBE' }), // malformed
+        fact('Acme did not release Widget in 2027.', launch({ time: '2027' })),                   // inconsistent (negation, AFFIRMED)
+        { claim: 'Analysts liked it.', claim_type: 'OPINION', is_load_bearing: false, identity: revId() } // non-FACT: ignored
+      ], null, 2) + '\n```',
+      [B]: JSON.stringify([fact('Revenue of $1 billion for 2025 was reported by Acme.', revId({ predicate: 'reported', unit: 'US dollars' }))])
+    };
+    const result = await runResearchProject({
+      storage, opportunityId, sourceProvider: new UrlListProvider([A, B]),
+      llmRouter: geminiRouterFor(textByUrl), policy: researchPolicy, classification: {},
+      fetchImpl: fakeFetch(), detectContradiction: null
+    });
+
+    // Identity survived Gemini parsing + extraction: paraphrase merged, two domains, VERIFIED.
+    const revenue = result.claims.find((c) => c.claim === 'Acme reported $1 billion revenue in 2025.');
+    assert.equal(sourceIdsOf(storage, revenue.id).length, 2);
+    assert.equal(revenue.evidence_status, 'VERIFIED');
+    assert.equal(storage.all("SELECT 1 FROM decision_log WHERE decision = 'MERGED_BY_IDENTITY'").length, 1);
+    // Fail-closed cases stayed separate single-source claims; non-FACT identity is inert.
+    for (const text of ['Acme released Gadget in March 2026.', 'Acme released Widget in 2026.', 'Acme did not release Widget in 2027.', 'Analysts liked it.']) {
+      const c = result.claims.find((x) => x.claim === text);
+      assert.equal(sourceIdsOf(storage, c.id).length, 1, text);
+    }
+
+    // Coverage is diagnosable from the existing EXTRACTED decision rows.
+    const snaps = storage.all("SELECT config_snapshot FROM decision_log WHERE decision = 'EXTRACTED'").map((r) => JSON.parse(r.config_snapshot).identity);
+    const withMissing = snaps.find((s) => s.factClaims === 4);
+    assert.deepEqual(withMissing, {
+      factClaims: 4, fingerprinted: 1, missing: 1, malformed: 1, inconsistent: 1,
+      reasons: { identity_missing: 1, identity_polarity_invalid: 1, polarity_text_mismatch: 1 }
+    });
+    assert.deepEqual(snaps.find((s) => s.factClaims === 1), { factClaims: 1, fingerprinted: 1, missing: 0, malformed: 0, inconsistent: 0, reasons: {} });
   } finally { cleanup(storage, dbPath); }
 });

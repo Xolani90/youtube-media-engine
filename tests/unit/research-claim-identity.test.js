@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveClaimIdentity, normalizeClaimIdentity } from '../../src/research/claimIdentity.js';
+import { deriveClaimIdentity, normalizeClaimIdentity, summarizeIdentityCoverage } from '../../src/research/claimIdentity.js';
 import { extractClaims } from '../../src/research/claims.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
 
@@ -215,4 +215,23 @@ test('C10. different entity / object / materially different predicate => differe
   // Only whitelisted verbs are lemmatized; unlisted forms must match exactly.
   assert.notEqual(fp(TEXT, ident({ predicate: 'acquisition' })), fp(TEXT, ident({ predicate: 'acquire' })));
   assert.notEqual(fp(TEXT, ident({ predicate: 'unveiled' })), base);
+});
+
+test('D1. summarizeIdentityCoverage classifies every FACT claim exactly once; non-FACT is ignored; unchanged fail-closed behavior', () => {
+  const claims = [
+    { claim: TEXT, claim_type: 'FACT', identity: ident() },                                   // fingerprinted
+    { claim: 'Acme released Gadget in March 2026.', claim_type: 'FACT', identity: null },     // missing
+    { claim: 'Acme released Widget in 2026.', claim_type: 'FACT', identity: ident({ polarity: 'MAYBE' }) }, // malformed
+    { claim: 'Acme did not release Widget in March 2026.', claim_type: 'FACT', identity: ident() },          // inconsistent (negation)
+    { claim: 'Analysts liked it.', claim_type: 'OPINION', identity: ident() },                // ignored
+    { claim: 'It may follow.', claim_type: 'INFERENCE', identity: null }                      // ignored
+  ];
+  assert.deepEqual(summarizeIdentityCoverage(claims), {
+    factClaims: 4, fingerprinted: 1, missing: 1, malformed: 1, inconsistent: 1,
+    reasons: { identity_missing: 1, identity_polarity_invalid: 1, polarity_text_mismatch: 1 }
+  });
+  assert.deepEqual(summarizeIdentityCoverage(null), { factClaims: 0, fingerprinted: 0, missing: 0, malformed: 0, inconsistent: 0, reasons: {} });
+  // The summary reports; it never changes derivation.
+  assert.equal(deriveClaimIdentity(claims[1]).fingerprint, null);
+  assert.equal(deriveClaimIdentity(claims[4]).fingerprint, null);
 });

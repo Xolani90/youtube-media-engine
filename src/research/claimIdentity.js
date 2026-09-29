@@ -410,3 +410,33 @@ export function deriveClaimIdentity(proposed) {
   ]);
   return { fingerprint: crypto.createHash('sha256').update(canonical).digest('hex'), reason: null };
 }
+
+/**
+ * Deterministic, metadata-only summary of structured-identity coverage for
+ * one extraction result (used for the existing CLAIM_EXTRACTION/EXTRACTED
+ * decision row; no claim text or model output is included). It only reports
+ * what deriveClaimIdentity already decided -- it changes no behavior.
+ *
+ * Buckets for FACT claims without a fingerprint:
+ *   missing      -- no identity object at all
+ *   malformed    -- identity present but structurally invalid (identity_* reasons)
+ *   inconsistent -- structurally valid but disagrees with its own claim text
+ * `reasons` carries the exact machine reason counts.
+ *
+ * @param {Array<{claim, claim_type, identity}>} claims
+ * @returns {{ factClaims:number, fingerprinted:number, missing:number, malformed:number, inconsistent:number, reasons:Object<string,number> }}
+ */
+export function summarizeIdentityCoverage(claims) {
+  const summary = { factClaims: 0, fingerprinted: 0, missing: 0, malformed: 0, inconsistent: 0, reasons: {} };
+  for (const c of Array.isArray(claims) ? claims : []) {
+    if (!c || c.claim_type !== CLAIM_TYPE.FACT || typeof c.claim !== 'string' || c.claim.trim() === '') continue;
+    summary.factClaims += 1;
+    const { fingerprint, reason } = deriveClaimIdentity(c);
+    if (fingerprint) { summary.fingerprinted += 1; continue; }
+    summary.reasons[reason] = (summary.reasons[reason] ?? 0) + 1;
+    if (reason === 'identity_missing') summary.missing += 1;
+    else if (reason.startsWith('identity_')) summary.malformed += 1;
+    else summary.inconsistent += 1;
+  }
+  return summary;
+}
