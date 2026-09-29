@@ -294,7 +294,8 @@ export async function runAutonomousEntrypoint(deps = {}) {
       research: {
         ...deps.research,
         detectContradiction: deps.research?.detectContradiction ?? detectContradictionProd,
-        sourceProvider: deps.research?.sourceProvider ?? selectDefaultResearchSourceProvider()
+        sourceProvider: deps.research?.sourceProvider ?? selectDefaultResearchSourceProvider(),
+        classification: deps.research?.classification ?? config.researchClassification,
       },
       briefPolicy: deps.briefPolicy ?? config.briefPolicy,
       scriptPolicy: deps.scriptPolicy ?? config.scriptPolicy,

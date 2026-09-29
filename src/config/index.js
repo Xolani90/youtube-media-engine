@@ -243,6 +243,10 @@ export const config = {
 
   scoringWeights: loadScoringWeights(),
   discoveryPolicy: loadDiscoveryPolicy(),
+  researchClassification: Object.freeze({
+    authoritativeDomains: Object.freeze([]),
+    syndicatedDomains: Object.freeze([]),
+  }),
   researchPolicy: loadResearchPolicy(),
   briefPolicy: loadBriefPolicy(),
   scriptPolicy: loadScriptPolicy(),

@@ -34,3 +34,79 @@ test('classifySourceQuality: any non-SUCCESS retrieval is always UNUSABLE regard
   assert.equal(classifySourceQuality('FAILED', 'primary_authoritative'), 'UNUSABLE');
   assert.equal(classifySourceQuality('CONTENT_UNPARSEABLE', 'independent_reporting'), 'UNUSABLE');
 });
+
+test('classifySourceRole: empty production-style config keeps TechCrunch as independent_reporting', () => {
+  const result = classifySourceRole('https://techcrunch.com/2026/09/29/example-story', {
+    authoritativeDomains: [],
+    syndicatedDomains: []
+  });
+  assert.equal(result.role, 'independent_reporting');
+  assert.equal(result.ambiguous, false);
+});
+
+test('classifySourceRole: empty production-style config keeps arbitrary sources independent_reporting', () => {
+  const result = classifySourceRole('https://example.org/story', {
+    authoritativeDomains: [],
+    syndicatedDomains: []
+  });
+  assert.equal(result.role, 'independent_reporting');
+  assert.equal(result.ambiguous, false);
+});
+
+test('classifySourceRole: configured synthetic authority domain is primary_authoritative', () => {
+  const result = classifySourceRole('https://example-authority.test/article', {
+    authoritativeDomains: ['example-authority.test']
+  });
+  assert.equal(result.role, 'primary_authoritative');
+  assert.equal(result.ambiguous, false);
+});
+
+test('classifySourceRole: configured synthetic syndicated domain is syndicated', () => {
+  const result = classifySourceRole('https://example-syndicated.test/article', {
+    syndicatedDomains: ['example-syndicated.test']
+  });
+  assert.equal(result.role, 'syndicated');
+  assert.equal(result.ambiguous, false);
+});
+
+test('classifySourceRole: www prefix is normalized for configured domains', () => {
+  const result = classifySourceRole('https://www.example-authority.test/article', {
+    authoritativeDomains: ['example-authority.test']
+  });
+  assert.equal(result.role, 'primary_authoritative');
+  assert.equal(result.ambiguous, false);
+});
+
+test('classifySourceRole: parent domain does not match an unrelated subdomain configuration', () => {
+  const result = classifySourceRole('https://sub.example-authority.test/article', {
+    authoritativeDomains: ['example-authority.test']
+  });
+  assert.equal(result.role, 'independent_reporting');
+  assert.equal(result.ambiguous, false);
+});
+
+test('classifySourceRole: lookalike domain does not match configured authority', () => {
+  const result = classifySourceRole('https://example-authority.test.evil.test/article', {
+    authoritativeDomains: ['example-authority.test']
+  });
+  assert.equal(result.role, 'independent_reporting');
+  assert.equal(result.ambiguous, false);
+});
+
+test('classifySourceRole: wildcard-like configuration is not treated as a wildcard', () => {
+  const result = classifySourceRole('https://news.example-authority.test/article', {
+    authoritativeDomains: ['*.example-authority.test']
+  });
+  assert.equal(result.role, 'independent_reporting');
+  assert.equal(result.ambiguous, false);
+});
+
+test('production config exposes empty frozen classification lists', async () => {
+  const { config } = await import('../../src/config/index.js');
+
+  assert.deepEqual(config.researchClassification.authoritativeDomains, []);
+  assert.deepEqual(config.researchClassification.syndicatedDomains, []);
+  assert.equal(Object.isFrozen(config.researchClassification), true);
+  assert.equal(Object.isFrozen(config.researchClassification.authoritativeDomains), true);
+  assert.equal(Object.isFrozen(config.researchClassification.syndicatedDomains), true);
+});

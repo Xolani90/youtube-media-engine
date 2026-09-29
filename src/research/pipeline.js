@@ -116,6 +116,19 @@ function setEvidenceStatus(storage, claimId, evidenceStatus) {
  * @param {function} [deps.detectContradiction] - async (claimA, claimB, llmRouter) => one of CONTRADICTION_RESULT ('CONTRADICTS'|'NO_CONTRADICTION'|'UNCERTAIN'); a thrown/rejected call is treated as ERROR by the caller. LLM-assisted semantic judgment, RG-02 contract (see ./contradictionDetector.js for the production implementation). Optional: no contradiction detection performed if omitted (logged as NOT_CHECKED).
  * @param {string} [deps.runId]
  */
+function classificationReason(roleResult) {
+  if (roleResult.role === 'primary_authoritative') {
+    return 'authoritative_domain_match';
+  }
+  if (roleResult.role === 'syndicated') {
+    return 'syndicated_domain_match';
+  }
+  if (roleResult.ambiguous) {
+    return 'ambiguous_deterministic_classification';
+  }
+  return 'default_independent';
+}
+
 export async function runResearchProject({
   storage, opportunityId, sourceProvider, llmRouter, policy, classification = {},
   retrieveImpl, fetchImpl, detectContradiction = null, runId = null
@@ -180,7 +193,7 @@ export async function runResearchProject({
     });
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.SOURCE_CLASSIFICATION, subjectType: 'source', subjectId: sourceId,
-      decision: roleResult.role, reason: roleResult.ambiguous ? 'ambiguous_deterministic_classification' : 'deterministic_domain_match',
+      decision: roleResult.role, reason: classificationReason(roleResult),
       resultingState: qualityTier
     });
     persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString() });
