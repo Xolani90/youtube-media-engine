@@ -1,3 +1,6 @@
+import { BRIEF_STAGE } from '../brief/constants.js';
+import { selectEligibleKeyClaims } from '../brief/claims.js';
+
 /**
  * Work-selection queries for Autonomous Operation (checkpoint §14, Gap 1
  * in §8). Each function is a single, plain SQL SELECT against an
@@ -38,6 +41,25 @@ export function selectEligibleResearch(storage) {
 // pure efficiency pre-filters; every stage also refuses a quarantined subject
 // on direct invocation.
 
+// Deterministic-exclusion (ADR-0026 A6 / rule 4), Brief edition. Brief's
+// KEY_CLAIMS gate (createBrief: selectEligibleKeyClaims -> zero -> rejected
+// NO_ELIGIBLE_KEY_CLAIMS) is a pure function of the project's persisted
+// claims (VERIFIED FACT/INFERENCE, no unresolved contradiction). The
+// rejection consumes no A4 attempt, writes no stage_retry_state and does not
+// quarantine (it is not a generation failure), and the project stays
+// RESEARCH_COMPLETE with no content_briefs row -- so nothing ever removed it
+// from this selector and the runner re-selected it on every sweep/run
+// (legacy projects completed before Research's NO_BRIEF_ELIGIBLE_CLAIMS
+// completeness guard existed).
+//
+// A project is skipped only while BOTH hold: (1) the gate already logged
+// decision_log stage='BRIEF_KEY_CLAIM_ELIGIBILITY' decision='REJECTED'
+// reason='NO_ELIGIBLE_KEY_CLAIMS' for it (so it is evaluated once, and the
+// gate still runs and logs first), and (2) it STILL has zero eligible key
+// claims per the very same predicate the gate uses. If its claims later
+// change so one becomes eligible, (2) fails and it is selected normally
+// again. Selection-only: the gate, eligibility rules, Research state and
+// retry state are unchanged and a direct createBrief still re-validates.
 export function selectEligibleBriefs(storage) {
   return storage
     .all(
@@ -49,7 +71,20 @@ export function selectEligibleBriefs(storage) {
        )
        AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'BRIEF' AND quarantined_at IS NOT NULL)`
     )
+    .filter((row) => !isDeterministicallyKeyClaimless(storage, row.id))
     .map((row) => ({ researchProjectId: row.id }));
+}
+
+function isDeterministicallyKeyClaimless(storage, researchProjectId) {
+  const logged = storage.get(
+    `SELECT 1 FROM decision_log
+     WHERE stage = ? AND decision = 'REJECTED' AND reason = 'NO_ELIGIBLE_KEY_CLAIMS'
+       AND subject_type = 'research_project' AND subject_id = ?
+     LIMIT 1`,
+    [BRIEF_STAGE.KEY_CLAIM_ELIGIBILITY, researchProjectId]
+  );
+  if (!logged) return false;
+  return selectEligibleKeyClaims(storage, researchProjectId).length === 0;
 }
 
 export function selectEligibleScripts(storage) {
