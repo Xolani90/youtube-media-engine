@@ -3,6 +3,7 @@ import { RESEARCH_STAGE, RESEARCH_PROJECT_STATUS, RETRIEVAL_STATUS, EVIDENCE_STA
 import { acquireSources } from './acquisition.js';
 import { classifySourceRole, classifySourceQuality } from './sourceClassification.js';
 import { extractClaims, validateExtractedClaim } from './claims.js';
+import { deriveClaimIdentity, summarizeIdentityCoverage } from './claimIdentity.js';
 import { computeEvidenceStatus } from './evidenceGrading.js';
 import { canonicalizePair, recordContradiction, hasUnresolvedContradiction } from './contradictions.js';
 import { evaluateCompleteness } from './completeness.js';
@@ -195,9 +196,14 @@ export async function runResearchProject({
   // key: normalized claim text -> claim id, used only to link additional
   // (corroborating) sources to an already-extracted equivalent claim.
   // This is a simple exact-normalized-text match, not NLP-based semantic
-  // clustering — documented simplification given no such component exists
-  // yet elsewhere in this codebase.
+  // clustering.
   const claimTextIndex = new Map();
+  // key: deterministic claim-identity fingerprint (see claimIdentity.js) ->
+  // { id, claimType, isLoadBearing }. Populated only for FACT claims whose
+  // LLM-proposed structured identity passed validation AND agrees with the
+  // claim's own text. Exact fingerprint equality is the only way two
+  // differently-worded claims can share a claim row; no similarity scoring.
+  const claimIdentityIndex = new Map();
 
   for (const source of successfulSources) {
     const full = persistedSources.find((s) => s.id === source.id);
@@ -210,7 +216,7 @@ export async function runResearchProject({
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
       decision: 'EXTRACTED', reason: `${extraction.claims.length}_claims_proposed`, provider: extraction.providerUsed,
-      configSnapshot: { model: extraction.model, estimatedCost: extraction.estimatedCost, isPaid: extraction.isPaid }
+      configSnapshot: { model: extraction.model, estimatedCost: extraction.estimatedCost, isPaid: extraction.isPaid, identity: summarizeIdentityCoverage(extraction.claims) }
     });
 
     for (const proposed of extraction.claims) {
@@ -224,14 +230,35 @@ export async function runResearchProject({
       }
 
       const normalized = proposed.claim.trim().toLowerCase();
+      const { fingerprint } = deriveClaimIdentity(proposed);
       let claimId = claimTextIndex.get(normalized);
       let isNewClaim = false;
+      let mergedByIdentity = false;
+      if (!claimId && fingerprint) {
+        // Conservative: same fingerprint AND same claim_type AND same
+        // is_load_bearing, otherwise the claims stay separate.
+        const existing = claimIdentityIndex.get(fingerprint);
+        if (existing && existing.claimType === proposed.claim_type && existing.isLoadBearing === proposed.is_load_bearing) {
+          claimId = existing.id;
+          mergedByIdentity = true;
+        }
+      }
+      if (mergedByIdentity) {
+        logDecision(storage, {
+          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+          decision: 'MERGED_BY_IDENTITY', reason: 'identity_fingerprint_match',
+          configSnapshot: { fingerprint, sourceId: source.id }
+        });
+      }
       if (!claimId) {
         claimId = insertClaim(storage, {
           researchProjectId: project.id, claim: proposed.claim,
           claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing
         });
         claimTextIndex.set(normalized, claimId);
+        if (fingerprint) {
+          claimIdentityIndex.set(fingerprint, { id: claimId, claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing });
+        }
         persistedClaims.push({ id: claimId, claim: proposed.claim, claim_type: proposed.claim_type, is_load_bearing: proposed.is_load_bearing });
         isNewClaim = true;
 
