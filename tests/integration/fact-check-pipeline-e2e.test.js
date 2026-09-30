@@ -6,6 +6,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { SqliteStorageDriver } from '../../src/storage/SqliteStorageDriver.js';
 import { runFactCheck } from '../../src/fact-check/pipeline.js';
+import { runAutonomousOperation } from '../../src/autonomous/runner.js';
+import { selectEligibleFactChecks } from '../../src/autonomous/workSelection.js';
 
 function freshStorage() {
   const dbPath = path.join(os.tmpdir(), `fact-check-e2e-${Date.now()}-${Math.random()}.db`);
@@ -666,3 +668,112 @@ test('P3-B: NO_CURRENT_SCRIPT eligibility failure persists a decision_log row ag
 
   cleanup(storage, dbPath);
 });
+
+// ---------------------------------------------------------------------------
+// Autonomous lifecycle: a Script that Fact-Check deterministically proves is
+// structurally invalid (live run 36654050130: claim id 78d24e6a... linked in
+// two sections of a Script persisted before the Script-stage duplicate guard).
+// Fact-Check stays strict (spec s11/s12: STRUCTURAL_FAILURE, no fact_checks
+// row, state stays SCRIPT_DRAFT); ADR-0026 A6 additionally requires a
+// deterministic content failure to end in terminal/exclusion rather than be
+// re-selected on every sweep forever.
+// ---------------------------------------------------------------------------
+
+/** One Research project + one VERIFIED claim + Brief + a Script linking that claim in TWO sections. */
+function seedDuplicateClaimScript(storage) {
+  const { opportunityId, researchProjectId } = seedResearchProject(storage);
+  const claimId = insertClaim(storage, researchProjectId, { evidenceStatus: 'VERIFIED' });
+  const contentBriefId = seedBrief(storage, researchProjectId, opportunityId, [claimId]);
+  const claimLinks = [
+    { heading: 'The Efficiency Challenge', claim_ids: [claimId] },
+    { heading: 'Introducing the Solution', claim_ids: [claimId] }
+  ];
+  const { scriptId, contentVersionId } = seedScript(storage, contentBriefId, { claimLinks });
+  return { researchProjectId, opportunityId, claimId, contentBriefId, scriptId, contentVersionId };
+}
+
+test('run 36654050130: a persisted Script repeating a claim id across sections can never pass Fact-Check (default or forced) and stays SCRIPT_DRAFT', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const x = seedDuplicateClaimScript(storage);
+
+  for (const force of [false, true, false]) {
+    const result = runFactCheck({ storage, contentBriefId: x.contentBriefId, force });
+    assert.equal(result.outcome, 'STRUCTURAL_FAILURE');
+    assert.equal(result.reason, `CLAIM_LINKS_DUPLICATE_CLAIM_REFERENCE_${x.claimId}`);
+    assert.deepEqual(result.retryDisposition, { eligible: false, nature: 'DETERMINISTIC', basis: 'deterministic_by_default' });
+  }
+  assert.equal(storage.all('SELECT * FROM fact_checks').length, 0, 'no fact_checks row is ever persisted');
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [x.contentVersionId]).state, 'SCRIPT_DRAFT');
+  assert.equal(storage.all('SELECT * FROM stage_retry_state').length, 0, 'no retry state / quarantine is created');
+
+  cleanup(storage, dbPath);
+});
+
+test('run 36654050130: after the deterministic STRUCTURAL_FAILURE is logged, autonomous selection excludes exactly that Script; before it, the item is selected', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const x = seedDuplicateClaimScript(storage);
+  assert.deepEqual(selectEligibleFactChecks(storage), [{ contentBriefId: x.contentBriefId }], 'not yet evaluated: eligible');
+
+  runFactCheck({ storage, contentBriefId: x.contentBriefId });
+  assert.deepEqual(selectEligibleFactChecks(storage), [], 'deterministically invalid Script is excluded');
+
+  // Exclusion is keyed to scripts.id: a different Script pointed at by the
+  // same content version is evaluated normally, and can pass.
+  const claim2 = insertClaim(storage, x.researchProjectId, { evidenceStatus: 'VERIFIED' });
+  const v2 = crypto.randomUUID();
+  storage.run(
+    `INSERT INTO scripts (id, content_brief_id, version, body, claim_links, created_at) VALUES (?, ?, 2, '{}', ?, ?)`,
+    [v2, x.contentBriefId, JSON.stringify([{ heading: 'A', claim_ids: [x.claimId] }, { heading: 'B', claim_ids: [claim2] }]), nowISO()]
+  );
+  storage.run('UPDATE content_versions SET script_id = ? WHERE id = ?', [v2, x.contentVersionId]);
+  assert.deepEqual(selectEligibleFactChecks(storage), [{ contentBriefId: x.contentBriefId }], 'a new Script id is not excluded');
+  const passed = runFactCheck({ storage, contentBriefId: x.contentBriefId });
+  assert.equal(passed.outcome, 'PASS');
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [x.contentVersionId]).state, 'FACT_CHECK');
+
+  cleanup(storage, dbPath);
+});
+
+test('run 36654050130: the autonomous runner evaluates the invalid Script once, then never re-selects it; a later invocation attempts nothing and completes', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const x = seedDuplicateClaimScript(storage);
+  const calls = [];
+  const stageFns = { 'fact-check': (a) => { calls.push(a.contentBriefId); return runFactCheck(a); } };
+
+  const first = await runAutonomousOperation({ storage, mode: 'SIMULATION', stageFns });
+  assert.deepEqual(calls, [x.contentBriefId], 'evaluated exactly once');
+  assert.equal(first.sweeps, 2);
+  assert.equal(first.stopReason, 'no_work', 'terminates on no work, not by repeatedly re-selecting the item');
+
+  const second = await runAutonomousOperation({ storage, mode: 'SIMULATION', stageFns });
+  assert.equal(calls.length, 1, 'never re-selected by a later invocation');
+  assert.equal(second.sweeps, 1);
+  assert.equal(second.stopReason, 'no_work');
+  assert.equal(storage.get('SELECT status FROM system_runs WHERE id = ?', [second.runId]).status, 'COMPLETED', 'no attempted-and-failed work remains');
+
+  assert.equal(storage.all(`SELECT * FROM decision_log WHERE stage = 'FACT_CHECK' AND decision = 'STRUCTURAL_FAILURE' AND subject_id = ?`, [x.scriptId]).length, 1);
+  assert.equal(storage.all('SELECT * FROM fact_checks').length, 0);
+  assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [x.contentVersionId]).state, 'SCRIPT_DRAFT');
+
+  cleanup(storage, dbPath);
+});
+
+test('run 36654050130: a legacy Script whose STRUCTURAL_FAILURE was logged by an earlier invocation is not re-selected by the runner at all', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  const x = seedDuplicateClaimScript(storage);
+  runFactCheck({ storage, contentBriefId: x.contentBriefId }); // the earlier invocation's logged failure
+  const calls = [];
+
+  const r = await runAutonomousOperation({ storage, mode: 'SIMULATION', stageFns: { 'fact-check': (a) => { calls.push(a); return runFactCheck(a); } } });
+
+  assert.equal(calls.length, 0);
+  assert.equal(r.sweeps, 1);
+  assert.equal(r.stopReason, 'no_work');
+
+  cleanup(storage, dbPath);
+});
+

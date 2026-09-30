@@ -603,7 +603,8 @@ test('Fact-check: STRUCTURAL_FAILURE is deterministic by default - no budget con
     assert.equal(decisions(storage, x.scriptId, 'STRUCTURAL_FAILURE').length, 4, 'each invocation still logged its STRUCTURAL_FAILURE exactly as before (spec §11)');
     assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [x.contentVersionId]).state, 'SCRIPT_DRAFT');
     assert.equal(storage.all('SELECT * FROM fact_checks').length, 0);
-    assert.deepEqual(selectEligibleFactChecks(storage), [{ contentBriefId: x.contentBriefId }], 'not quarantined, so still selected exactly as before A4');
+    assert.equal(isQuarantined(storage, x.contentVersionId, RETRY_STAGE.FACT_CHECK), false, 'excluded from selection, but never quarantined (ADR-0025 s3)');
+    assert.deepEqual(selectEligibleFactChecks(storage), [], 'ADR-0026 A6: a Script with a logged deterministic STRUCTURAL_FAILURE is excluded from autonomous selection');
   });
 });
 
@@ -950,7 +951,7 @@ function backgroundResearch(storage, count) {
   return { research };
 }
 
-test('runner: a deterministic Fact-check failure records no attempt, so it never consumes the pacing slot or the budget - behaviour is exactly as before A4', async () => {
+test('runner: a deterministic Fact-check failure records no attempt and no retry state, and the Script is evaluated once then excluded across invocations (ADR-0026 A6)', async () => {
   await withStorage(async (storage) => {
     const x = seedContent(storage, { state: 'SCRIPT_DRAFT', claimLinks: 'not-json' });
     const calls = [];
@@ -963,18 +964,20 @@ test('runner: a deterministic Fact-check failure records no attempt, so it never
         }
       });
     }
-    assert.ok(calls.length > STAGE_RETRY_CAP, `re-evaluated every sweep as before A4 (called ${calls.length}x)`);
+    assert.deepEqual(calls, [x.contentBriefId], `evaluated exactly once, never re-selected afterwards (called ${calls.length}x)`);
+    assert.equal(decisions(storage, x.scriptId, 'STRUCTURAL_FAILURE').length, 1, 'the deterministic failure is still logged (spec s11)');
     assert.equal(retryRows(storage).length, 0);
-    assert.equal(isQuarantined(storage, x.contentVersionId, RETRY_STAGE.FACT_CHECK), false, 'never quarantined by a deterministic failure');
+    assert.equal(isQuarantined(storage, x.contentVersionId, RETRY_STAGE.FACT_CHECK), false, 'excluded by selection, never quarantined by a deterministic failure');
+    assert.equal(storage.get('SELECT state FROM content_versions WHERE id = ?', [x.contentVersionId]).state, 'SCRIPT_DRAFT', 'spec s12: no lifecycle transition');
   });
 });
 
-test('runner: an isolated failing Fact-check item stops via the existing no_progress guard - 2 sweeps, no retry state', async () => {
+test('runner: an isolated failing Fact-check item is evaluated once, then the next sweep finds no work - 2 sweeps, no retry state', async () => {
   await withStorage(async (storage) => {
     const x = seedContent(storage, { state: 'SCRIPT_DRAFT', claimLinks: 'not-json' });
     const r = await runAutonomousOperation({ storage, mode: 'SIMULATION' });
     assert.equal(r.sweeps, 2);
-    assert.equal(r.stopReason, 'no_progress');
+    assert.equal(r.stopReason, 'no_work');
     assert.equal(retryRow(storage, RETRY_STAGE.FACT_CHECK, x.contentVersionId), undefined);
   });
 });

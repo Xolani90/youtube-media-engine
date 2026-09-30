@@ -62,12 +62,34 @@ export function selectEligibleScripts(storage) {
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
+// Deterministic-exclusion (ADR-0026 A6 / rule 4: a deterministic content
+// failure ends in terminal/exclusion, never in re-evaluation forever). A
+// Fact-check STRUCTURAL_FAILURE recorded against a specific Script (spec §11:
+// decision_log stage='FACT_CHECK', decision='STRUCTURAL_FAILURE',
+// subject_type='script', subject_id=scripts.id) is a pure function of that
+// Script's immutable persisted claim_links and the Research claims it names,
+// so re-running it can never produce a different answer. The exact Script the
+// content version currently points at is therefore excluded from autonomous
+// selection. This is selection-only: no lifecycle transition (spec §12: state
+// stays SCRIPT_DRAFT), no fact_checks row, no stage_retry_state row and no
+// quarantine (ADR-0025 §3), and runFactCheck itself is unchanged, so a direct
+// invocation still re-validates and still returns STRUCTURAL_FAILURE. Keyed on
+// scripts.id, so a new Script version for the same content item (a different
+// id) is evaluated normally. Eligibility-level failures logged against a
+// content_brief (no Script exists) are deliberately NOT excluded here.
 export function selectEligibleFactChecks(storage) {
   return storage
     .all(
       `SELECT content_brief_id FROM content_versions
        WHERE state = 'SCRIPT_DRAFT'
-       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'FACT_CHECK' AND quarantined_at IS NOT NULL)`
+       AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'FACT_CHECK' AND quarantined_at IS NOT NULL)
+       AND NOT EXISTS (
+         SELECT 1 FROM decision_log d
+         WHERE d.stage = 'FACT_CHECK'
+           AND d.decision = 'STRUCTURAL_FAILURE'
+           AND d.subject_type = 'script'
+           AND d.subject_id = content_versions.script_id
+       )`
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
