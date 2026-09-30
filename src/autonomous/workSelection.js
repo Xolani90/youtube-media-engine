@@ -1,5 +1,8 @@
 import { BRIEF_STAGE } from '../brief/constants.js';
 import { selectEligibleKeyClaims } from '../brief/claims.js';
+import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
+import { VISUAL_ASSET_TYPES, MEDIA_STAGE, DECISION_LOG_DECISION as MEDIA_DECISION } from '../media/constants.js';
+import { RIGHTS_VERIFICATION_STAGE, DECISION_LOG_DECISION as RIGHTS_DECISION } from '../rights-verification/constants.js';
 
 /**
  * Work-selection queries for Autonomous Operation (checkpoint §14, Gap 1
@@ -162,11 +165,50 @@ export function selectEligibleProductions(storage) {
 export function selectEligibleMediaProductions(storage) {
   return storage
     .all(
-      `SELECT content_brief_id FROM content_versions
+      `SELECT id, content_brief_id FROM content_versions
        WHERE state = 'PRODUCED'
        AND id NOT IN (SELECT subject_id FROM stage_retry_state WHERE stage = 'MEDIA_PRODUCTION' AND quarantined_at IS NOT NULL)`
     )
+    .filter((row) => !isDeterministicallyAssetless(storage, row.id, { stage: MEDIA_STAGE, decision: MEDIA_DECISION.NO_VISUAL_ASSETS, visualOnly: true }))
     .map((row) => ({ contentBriefId: row.content_brief_id }));
+}
+
+// Deterministic-exclusion (ADR-0026 A6 / rule 4), assetless-PRODUCED edition
+// (autonomous run 36682410614). Rights Verification and Media Production both
+// select every PRODUCED content_version. For a version with no attached
+// asset (Asset Provisioning found none), they can only return
+// NO_ASSETS_ATTACHED / NO_VISUAL_ASSETS -- a pure function of the persisted
+// attached assets -- on every sweep and every run: no A4 attempt, no state
+// change, no progress (no_progress stop). The version stays PRODUCED, so
+// nothing ever removed it from their selectors.
+//
+// A version is skipped by a stage's selector only while BOTH hold: (1) that
+// stage already logged its own NO_ASSETS_ATTACHED / NO_VISUAL_ASSETS decision
+// for it (so it is evaluated once, and the stage still runs and logs first),
+// and (2) it STILL has no attached asset (Rights) / no attached visual asset
+// and no media artifact (Media), evaluated with the same repository and
+// VISUAL_ASSET_TYPES the stages use. Once any asset appears (for example a
+// later Asset Provisioning attempt or an Owner reactivation succeeds) (2)
+// fails and the stage is selected normally again. This deliberately does NOT
+// consult Asset Provisioning's quarantine: per-stage isolation is preserved
+// (a quarantine in one stage never hides an item from another). The stages'
+// own checks, outcomes and logging are unchanged and remain the sole
+// authority on a direct invocation.
+function isDeterministicallyAssetless(storage, contentVersionId, { stage, decision, visualOnly }) {
+  const logged = storage.get(
+    `SELECT 1 FROM decision_log
+     WHERE stage = ? AND decision = ? AND subject_type = 'content_version' AND subject_id = ?
+     LIMIT 1`,
+    [stage, decision, contentVersionId]
+  );
+  if (!logged) return false;
+  if (visualOnly) {
+    const rendered = storage.get('SELECT 1 FROM media_artifacts WHERE content_version_id = ? LIMIT 1', [contentVersionId]);
+    if (rendered) return false;
+  }
+  const assets = new AssetProvenanceRepository(storage).getAssetsForContent(contentVersionId);
+  const relevant = visualOnly ? assets.filter((a) => VISUAL_ASSET_TYPES.includes(a.asset_type)) : assets;
+  return relevant.length === 0;
 }
 
 // Same structural precondition as selectEligibleMediaProductions
@@ -202,7 +244,8 @@ export function selectEligibleAssetProvisioning(storage) {
 // efficiency pre-filter, matching every other selector in this file.
 export function selectEligibleRightsVerification(storage) {
   return storage
-    .all(`SELECT content_brief_id FROM content_versions WHERE state = 'PRODUCED'`)
+    .all(`SELECT id, content_brief_id FROM content_versions WHERE state = 'PRODUCED'`)
+    .filter((row) => !isDeterministicallyAssetless(storage, row.id, { stage: RIGHTS_VERIFICATION_STAGE, decision: RIGHTS_DECISION.NO_ASSETS_ATTACHED, visualOnly: false }))
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
