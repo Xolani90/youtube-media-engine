@@ -41,7 +41,9 @@ const RELATIONS = Object.values(IDENTITY_RELATION);
 // proposition itself. Anything not listed must match exactly.
 // (announce != release: that distinction is materially different, so
 // ANNOUNCE is intentionally NOT mapped to RELEASE.)
-const PREDICATE_SYNONYMS = new Map([['launch', 'release']]);
+// (generate == produce: for a countable output such as "50 custom effects"
+// the two assert the same proposition; both are inflection-normalized below.)
+const PREDICATE_SYNONYMS = new Map([['launch', 'release'], ['generate', 'produce']]);
 
 // Inflection table: ONLY regular/irregular inflected forms of a listed base
 // verb map to that base (tense/number/aspect carry no propositional content
@@ -76,7 +78,9 @@ const VERB_FORMS = [
   ['lose', 'loses', 'lost', 'losing'],
   ['cut', 'cuts', 'cutting'],
   ['sign', 'signs', 'signed', 'signing'],
-  ['employ', 'employs', 'employed', 'employing']
+  ['employ', 'employs', 'employed', 'employing'],
+  ['produce', 'produces', 'produced', 'producing'],
+  ['generate', 'generates', 'generated', 'generating']
 ];
 const VERB_BASE = new Map();
 for (const [base, ...forms] of VERB_FORMS) {
@@ -123,8 +127,16 @@ function normEntity(value) {
 
 // Qualifiers: same surface normalization, plus a leading article/"in" is
 // presentation ("in Europe" == "Europe").
+// A per-day frequency written as "daily", "per/each/every/a day" or
+// "in/within a/one (single) day" is one qualifier. Whole-qualifier match only:
+// a bare "one day" (which can mean "someday") and anything with extra words
+// ("in one day of testing") are left exactly as written.
+const DAY_FREQUENCY = /^(?:daily|(?:per|each|every|a) day|(?:in|within) (?:a|one)(?: single)? day)$/;
+
 function normQualifier(value) {
-  const tokens = normText(value).split(' ').filter(Boolean);
+  const text = normText(value);
+  if (DAY_FREQUENCY.test(text)) return 'per day';
+  const tokens = text.split(' ').filter(Boolean);
   while (tokens.length > 1 && (LEADING_ARTICLES.has(tokens[0]) || tokens[0] === 'in')) tokens.shift();
   return tokens.join(' ');
 }
@@ -295,7 +307,7 @@ export function normalizeClaimIdentity(raw) {
 const NEGATION_CUE = /\b(?:not|no|never|none|neither|nor|cannot|without|unable|fail(?:s|ed|ing)?\s+to|den(?:y|ies|ied|ying)|refus(?:e|es|ed|ing))\b|n['\u2019]t\b/i;
 const CAUSAL_CUE = /\b(?:caus(?:e|es|ed|ing)|because|led\s+to|leads?\s+to|leading\s+to|resulted?\s+in|result\s+of|due\s+to|driven\s+by|drove|drives?|driving|boost(?:ed|s)?|triggered?|thanks\s+to|owing\s+to|attributable\s+to|contribut(?:e|es|ed|ing)\s+to)\b/i;
 const ASSOCIATIVE_CUE = /\b(?:associated\s+with|correlat(?:ed|es|ion)|linked\s+to|tied\s+to|related\s+to|coincid(?:ed|es|ing)\s+with)\b/i;
-const MODALITY_CUE = /\b(?:plan(?:s|ned|ning)?|will|would|expect(?:s|ed|ing)?|could|might|possibly|potentially|likely|unlikely|estimat(?:e|es|ed|ing)|approximately|roughly|nearly|almost|forecast(?:s|ed)?|project(?:s|ed|ion)?|announc(?:e|es|ed|ing)|propos(?:e|es|ed)|intend(?:s|ed)?|aims?|reportedly|allegedly|rumou?red|up\s+to|more\s+than|less\s+than|at\s+least|at\s+most)\b/i;
+const MODALITY_CUE = /\b(?:plan(?:s|ned|ning)?|will|would|expect(?:s|ed|ing)?|could|might|possibly|potentially|likely|unlikely|estimat(?:e|es|ed|ing)|approximately|roughly|nearly|almost|forecast(?:s|ed)?|project(?:s|ed|ion)?|announc(?:e|es|ed|ing)|propos(?:e|es|ed)|intend(?:s|ed)?|aims?|reportedly|allegedly|rumou?red|up\s+to|as\s+(?:many|much)\s+as|more\s+than|less\s+than|at\s+least|at\s+most)\b/i;
 // Lowercase "may" is the modal verb; capitalised "May" is handled as a month below.
 const MODAL_MAY = /\bmay\b/;
 const SPELLED_NUMBER = /\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion|dozen)\b/i;
@@ -324,6 +336,39 @@ function stripConditionClauses(text) {
   return text.replace(LEADING_CONDITION_CLAUSE, ' ').replace(TRAILING_CONDITION_CLAUSE, ' ');
 }
 
+// A negation that is the first word of a SUBJECT relative clause
+// ("tools that can't send messages") restricts which tools are meant; it does
+// not negate the main proposition. This is distinguishable from a
+// complementizer ("announced that it can't ship"), because a relative pronoun
+// acting as the clause subject is followed DIRECTLY by the negated auxiliary,
+// whereas a complementizer "that" is always followed by its own subject first.
+// The negation is only set aside when the identity itself carries the negated
+// restriction (its words are in subject/object/qualifiers, together with a
+// negation marker), so the fingerprint still distinguishes "tools that can't
+// send" from plain "tools". Otherwise it stays a negation and the two-way
+// polarity veto applies exactly as before. Only the negated auxiliary is
+// removed; the rest of the text is still scanned for other negations.
+const AUX_NEG = "(?:can['\\u2019]t|couldn['\\u2019]t|won['\\u2019]t|wouldn['\\u2019]t|shouldn['\\u2019]t|don['\\u2019]t|doesn['\\u2019]t|didn['\\u2019]t|isn['\\u2019]t|aren['\\u2019]t|wasn['\\u2019]t|weren['\\u2019]t|hasn['\\u2019]t|haven['\\u2019]t|hadn['\\u2019]t|mustn['\\u2019]t|cannot|(?:can|could|do|does|did|is|are|was|were|will|would|should|has|have|had|must|may|might)\\s+not)";
+const RELATIVE_NEGATION = new RegExp(`\\b(?:that|which|who)\\s+${AUX_NEG}(?![\\p{L}\\p{N}])`, 'giu');
+const NEGATION_IN_HAY = /\b(?:not|no|never|none|cannot|without|unable|non|t)\b/;
+
+function stripAccountedRelativeNegation(text, hay) {
+  if (!NEGATION_IN_HAY.test(hay)) return text;
+  const hayTokens = new Set(hay.split(' ').filter(Boolean));
+  let out = text;
+  for (const m of [...text.matchAll(RELATIVE_NEGATION)].reverse()) {
+    const start = m.index;
+    const end = start + m[0].length;
+    let tail = text.slice(end).split(/[,;.]/)[0];
+    const next = tail.search(NEGATION_CUE);
+    if (next >= 0) tail = tail.slice(0, next);
+    const tokens = normText(tail).split(' ').filter(Boolean);
+    if (tokens.length === 0 || !tokens.every((t) => hayTokens.has(t))) continue;
+    out = `${out.slice(0, start)} ${out.slice(end)}`;
+  }
+  return out;
+}
+
 function identityHaystack(identity) {
   return [identity.subject, identity.object, ...identity.qualifiers].filter(Boolean).join(' ');
 }
@@ -337,7 +382,7 @@ export function identityTextConflict(claimText, identity, timeParts) {
   const hay = identityHaystack(identity);
 
   // Negation: text with a negation cue must be NEGATED; NEGATED must have a cue.
-  const hasNegation = NEGATION_CUE.test(stripConditionClauses(text));
+  const hasNegation = NEGATION_CUE.test(stripAccountedRelativeNegation(stripConditionClauses(text), normText(hay)));
   if (hasNegation !== (identity.polarity === IDENTITY_POLARITY.NEGATED)) return 'polarity_text_mismatch';
 
   // Causation / association cues in the text pin the relation.
