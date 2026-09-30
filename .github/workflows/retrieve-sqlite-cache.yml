@@ -19,7 +19,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/data/media-engine.db
-          key: media-engine-sqlite-36642307938-1
+          key: media-engine-sqlite-36638966984-1
           fail-on-cache-miss: true
 
       - name: Verify retrieved file
@@ -32,7 +32,7 @@ jobs:
       - name: Upload SQLite database
         uses: actions/upload-artifact@v4
         with:
-          name: media-engine-db-36642307938-1
+          name: media-engine-db-36638966984-1
           path: ${{ github.workspace }}/data/media-engine.db
           if-no-files-found: error
           retention-days: 3
