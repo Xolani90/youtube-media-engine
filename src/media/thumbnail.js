@@ -139,7 +139,9 @@ function escapeDrawtext(text) {
     .replace(/\\/g, '\\\\\\\\')
     .replace(/:/g, '\\:')
     .replace(/'/g, '\u2019')
-    .replace(/%/g, '\\%');
+    // The filtergraph parser consumes one backslash before drawtext sees the
+    // value, so percent needs two here to reach drawtext as an escaped `%`.
+    .replace(/%/g, '\\\\%');
 }
 
 /**

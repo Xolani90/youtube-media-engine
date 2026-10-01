@@ -182,7 +182,7 @@ class MockAdapter extends PublicationProvider {
  * working_title/viewer_promise parameterized so Phase 2A's title
  * behavior can be exercised end to end.
  */
-function seedEligibleContent(storage, { mediaFilePath, workingTitle = 'My Video', viewerPromise = 'Promise' }) {
+function seedEligibleContent(storage, { mediaFilePath, workingTitle = 'My Video', viewerPromise = 'Promise', gate2 = true }) {
   const opportunityId = crypto.randomUUID();
   storage.run(`INSERT INTO opportunities (id, title, source, discovered_at, status) VALUES (?, 'T', 'rss', ?, 'DISCOVERED')`, [opportunityId, nowISO()]);
   const contentBriefId = crypto.randomUUID();
@@ -213,7 +213,7 @@ function seedEligibleContent(storage, { mediaFilePath, workingTitle = 'My Video'
      VALUES (?, ?, ?, '{}', 'chk', '/tmp/n.wav', 5.0, ?, 'chk2', 5.0, 1280, 720, 'h264', 'aac', ?)`,
     [mediaArtifactId, productionId, contentVersionId, mediaFilePath, nowISO()]
   );
-  if (fs.existsSync(mediaFilePath)) passGate2(storage, contentVersionId);
+  if (gate2 && fs.existsSync(mediaFilePath)) passGate2(storage, contentVersionId);
   return { contentBriefId, contentVersionId };
 }
 
@@ -261,12 +261,12 @@ test('integration: a normalizable title (contains < / >, and is over 100 chars) 
   cleanup(storage, dbPath, videoFile);
 });
 
-test('integration: a fundamentally invalid (empty) title never reaches the adapter, and the pipeline reports STRUCTURAL_FAILURE', async () => {
+test('integration: a fundamentally invalid (empty) title is blocked by Gate 2 before the adapter', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
   const videoFile = path.join(os.tmpdir(), `pub-metadata-video-${crypto.randomUUID()}.mp4`);
   fs.writeFileSync(videoFile, 'fake mp4 bytes');
-  const { contentBriefId, contentVersionId } = seedEligibleContent(storage, { mediaFilePath: videoFile, workingTitle: '' });
+  const { contentBriefId, contentVersionId } = seedEligibleContent(storage, { mediaFilePath: videoFile, workingTitle: '', gate2: false });
 
   const result = await withLiveAuthorized([`publish:mock:${contentVersionId}`], async () => {
     const adapter = new MockAdapter({ status: PUBLICATION_RESULT_STATUS.SUCCESS, provider: 'mock', providerItemId: 'SHOULD_NOT_HAPPEN', providerUrl: 'x' });
@@ -274,7 +274,7 @@ test('integration: a fundamentally invalid (empty) title never reaches the adapt
     return { r, adapter };
   });
 
-  assert.equal(result.r.outcome, 'STRUCTURAL_FAILURE');
+  assert.equal(result.r.outcome, 'GATE2_NOT_AUTHORIZING');
   assert.equal(result.r.publication, null);
   assert.equal(result.adapter.calls.length, 0, 'the adapter must never be invoked for fundamentally invalid metadata');
   const row = storage.get('SELECT * FROM publications WHERE content_version_id = ?', [contentVersionId]);
