@@ -1,6 +1,7 @@
 import { CLAIM_TYPE } from './constants.js';
 import { untrustedSourceBlock } from '../providers/llm/promptTrust.js';
 import { traceEvent } from '../diagnostics/trace.js';
+import { applySafeNormalization } from './claimNormalization.js';
 
 const CLAIM_TYPES = Object.values(CLAIM_TYPE);
 
@@ -114,6 +115,15 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
     'of the statement itself, independent of how well-supported it is), and',
     '"is_load_bearing" (boolean — true only if this claim is necessary to answer the',
     `core question: "${coreQuestion || ''}").`,
+    'Prefer quoting the claim exactly as the source states it. Only if a claim',
+    'begins with the ambiguous pronoun \"They\" may you replace that one word with',
+    'the single entity named by the immediately preceding sentence, using the',
+    'source\'s own words. Never add a fact or change any number, date, negation,',
+    'hedge or qualifier. When you rewrite a claim this way, also include',
+    '\"original_claim\": the sentence exactly as it appears in the source before',
+    'your rewrite. If you are not certain of the referent, leave the claim as',
+    'written and omit original_claim. Your rewrite is verified deterministically',
+    'and discarded if it cannot be proven.',
     'Do not include an evidence/confidence field — evidence strength is assessed',
     'separately and deterministically, not by you.',
     'For FACT claims ONLY, also include "identity": an object describing the',
@@ -169,14 +179,29 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
   }
 
   const { result, providerUsed, parsed } = last;
-  const claims = parsed.map((c) => ({
-    claim: typeof c?.claim === 'string' ? c.claim : null,
-    claim_type: typeof c?.claim_type === 'string' ? c.claim_type : null,
-    is_load_bearing: typeof c?.is_load_bearing === 'boolean' ? c.is_load_bearing : null,
-    // Raw, UNTRUSTED structured identity (optional). Validated and turned
-    // into a fingerprint deterministically in claimIdentity.js.
-    identity: c?.identity && typeof c.identity === 'object' && !Array.isArray(c.identity) ? c.identity : null
-  }));
+  const claims = parsed.map((c) => {
+    // Deterministic verification of any decontextualizing rewrite (see
+    // claimNormalization.js). The model is untrusted: on any doubt the original
+    // claim is kept, and an identity derived from a REJECTED rewrite is void.
+    const norm = applySafeNormalization({ claim: c?.claim, originalClaim: c?.original_claim, sourceText });
+    const rawIdentity = c?.identity && typeof c.identity === 'object' && !Array.isArray(c.identity) ? c.identity : null;
+    return {
+      claim: typeof norm.claim === 'string' ? norm.claim : null,
+      // Persisted into decision_log by the pipeline (provenance): what the
+      // source said, what the model proposed, and what normalization decided.
+      normalization: {
+        status: norm.status, reason: norm.reason, proposedClaim: norm.proposedClaim,
+        convergenceTrusted: norm.convergenceTrusted === true, identityDiscarded: norm.discardIdentity === true
+      },
+      original_claim: norm.originalClaim,
+      claim_type: typeof c?.claim_type === 'string' ? c.claim_type : null,
+      is_load_bearing: typeof c?.is_load_bearing === 'boolean' ? c.is_load_bearing : null,
+      // Raw, UNTRUSTED structured identity (optional). Validated and turned
+      // into a fingerprint deterministically in claimIdentity.js. Never kept
+      // when it was derived from a rewrite that normalization rejected.
+      identity: norm.discardIdentity ? null : rawIdentity
+    };
+  });
 
   const parseOutcome = claims.length === 0
     ? EXTRACTION_PARSE_OUTCOME.PARSED_ZERO_CLAIMS

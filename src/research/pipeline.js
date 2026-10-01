@@ -4,6 +4,7 @@ import { acquireSources } from './acquisition.js';
 import { classifySourceRole, classifySourceQuality } from './sourceClassification.js';
 import { extractClaims, validateExtractedClaim, ExtractionFailureError } from './claims.js';
 import { deriveClaimIdentity, summarizeIdentityCoverage } from './claimIdentity.js';
+import { ConvergenceIndex, evaluateConvergence, isConvergenceEligible } from './claimConvergence.js';
 import { computeEvidenceStatus } from './evidenceGrading.js';
 import { canonicalizePair, recordContradiction, hasUnresolvedContradiction } from './contradictions.js';
 import { evaluateCompleteness } from './completeness.js';
@@ -221,6 +222,13 @@ export async function runResearchProject({
   // claim's own text. Exact fingerprint equality is the only way two
   // differently-worded claims can share a claim row; no similarity scoring.
   const claimIdentityIndex = new Map();
+  // Candidate-convergence layer (see claimConvergence.js). Runs ONLY after the
+  // exact text / exact fingerprint paths found nothing. A promotion merely lets
+  // two representations share one claim row; evidence is still earned through
+  // computeEvidenceStatus below, and contradictions are still detected by the
+  // existing detector. Candidate similarity != same fact != VERIFIED.
+  const convergenceIndex = new ConvergenceIndex();
+  const convergence = { eligible: 0, skipped: 0, candidates: 0, promoted: 0, ambiguous: 0 };
 
   for (const source of successfulSources) {
     const full = persistedSources.find((s) => s.id === source.id);
@@ -271,11 +279,19 @@ export async function runResearchProject({
       }
 
       const normalized = proposed.claim.trim().toLowerCase();
-      const { fingerprint } = deriveClaimIdentity(proposed);
+      const { fingerprint, identity: derivedIdentity } = deriveClaimIdentity(proposed);
+      // The identity is only trusted (usable for convergence) when a fingerprint exists.
+      const trustedIdentity = fingerprint ? derivedIdentity : null;
+      // Identity-index trust boundary: a claim may query or populate
+      // claimIdentityIndex only when its normalization exists and is
+      // convergence-trusted (UNCHANGED / NORMALIZED). RETAINED_ORIGINAL,
+      // UNVERIFIED_ORIGIN and missing normalization fail closed, in both
+      // arrival orders.
+      const identityIndexEligible = proposed.normalization?.convergenceTrusted === true;
       let claimId = claimTextIndex.get(normalized);
       let isNewClaim = false;
       let mergedByIdentity = false;
-      if (!claimId && fingerprint) {
+      if (!claimId && fingerprint && identityIndexEligible) {
         // Conservative: same fingerprint AND same claim_type AND same
         // is_load_bearing, otherwise the claims stay separate.
         const existing = claimIdentityIndex.get(fingerprint);
@@ -291,17 +307,64 @@ export async function runResearchProject({
           configSnapshot: { fingerprint, sourceId: source.id }
         });
       }
+      let convergenceEligibility = null;
+      if (!claimId && trustedIdentity) {
+        convergenceEligibility = isConvergenceEligible(proposed, coreQuestion);
+        if (!convergenceEligibility.eligible) {
+          convergence.skipped += 1;
+        } else {
+          convergence.eligible += 1;
+          const evaluation = evaluateConvergence(convergenceIndex, {
+            identity: trustedIdentity, claimType: proposed.claim_type,
+            isLoadBearing: proposed.is_load_bearing, sourceId: source.id
+          });
+          convergence.candidates += evaluation.candidates.length;
+          if (evaluation.ambiguous) convergence.ambiguous += 1;
+          for (const cand of evaluation.candidates) {
+            const promotedHere = evaluation.promoted?.entry.claimId === cand.entry.claimId;
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: cand.entry.claimId,
+              decision: 'CANDIDATE_SAME_FACT',
+              reason: promotedHere ? 'promoted_deterministic_rule'
+                : (cand.comparison.promotion.eligible ? 'not_promoted_ambiguous_targets' : 'not_promoted_fields_not_deterministic'),
+              configSnapshot: {
+                incomingSourceId: source.id, incomingClaimText: proposed.claim,
+                fields: cand.comparison.fields, promotionEligible: cand.comparison.promotion.eligible,
+                rule: cand.comparison.promotion.rule
+              }
+            });
+          }
+          if (evaluation.promoted) {
+            claimId = evaluation.promoted.entry.claimId;
+            convergence.promoted += 1;
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+              decision: 'MERGED_BY_CONVERGENCE', reason: evaluation.promoted.comparison.promotion.rule,
+              configSnapshot: {
+                sourceId: source.id, incomingClaimText: proposed.claim,
+                fields: evaluation.promoted.comparison.fields
+              }
+            });
+          }
+        }
+      }
       if (!claimId) {
         claimId = insertClaim(storage, {
           researchProjectId: project.id, claim: proposed.claim,
           claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing
         });
         claimTextIndex.set(normalized, claimId);
-        if (fingerprint) {
+        if (fingerprint && identityIndexEligible) {
           claimIdentityIndex.set(fingerprint, { id: claimId, claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing });
         }
         persistedClaims.push({ id: claimId, claim: proposed.claim, claim_type: proposed.claim_type, is_load_bearing: proposed.is_load_bearing });
         isNewClaim = true;
+        if (trustedIdentity && convergenceEligibility?.eligible) {
+          convergenceIndex.add({
+            claimId, identity: trustedIdentity, claimType: proposed.claim_type,
+            isLoadBearing: proposed.is_load_bearing, sourceIds: [source.id]
+          });
+        }
 
         logDecision(storage, {
           runId, stage: RESEARCH_STAGE.LOAD_BEARING_CLASSIFICATION, subjectType: 'claim', subjectId: claimId,
@@ -310,6 +373,34 @@ export async function runResearchProject({
       }
 
       linkClaimSource(storage, { claimId, sourceId: source.id, role: isNewClaim ? 'primary' : 'corroborating' });
+      convergenceIndex.noteSource(claimId, source.id);
+
+      // Provenance: a reviewer must be able to recover what the source said,
+      // what the model proposed, and what normalization decided. The persisted
+      // claim row holds the final wording; the original and proposed wordings
+      // live here (one row per source representation, even when merged).
+      const norm = proposed.normalization;
+      if (norm && (proposed.original_claim || norm.status === 'RETAINED_ORIGINAL' || norm.status === 'NORMALIZED' || norm.status === 'UNVERIFIED_ORIGIN')) {
+        logDecision(storage, {
+          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+          decision: norm.status === 'NORMALIZED' ? 'NORMALIZATION_ACCEPTED'
+            : (norm.status === 'RETAINED_ORIGINAL' ? 'NORMALIZATION_REJECTED' : (norm.status === 'UNVERIFIED_ORIGIN' ? 'NORMALIZATION_UNVERIFIED' : 'NORMALIZATION_UNCHANGED')),
+          reason: norm.reason,
+          configSnapshot: {
+            sourceId: source.id, sourceUrl: sourceRow.url, status: norm.status,
+            originalClaim: proposed.original_claim ?? null, proposedClaim: norm.proposedClaim ?? null,
+            finalClaim: proposed.claim, convergenceTrusted: norm.convergenceTrusted === true,
+            identityDiscarded: norm.identityDiscarded === true
+          }
+        });
+      }
+      if (convergenceEligibility && !convergenceEligibility.eligible) {
+        logDecision(storage, {
+          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+          decision: 'CONVERGENCE_SKIPPED', reason: convergenceEligibility.reason,
+          configSnapshot: { sourceId: source.id, claimText: proposed.claim }
+        });
+      }
     }
   }
 
@@ -479,6 +570,7 @@ export async function runResearchProject({
     stopReason: completenessResult.stopReason,
     claims: persistedClaims,
     sources: persistedSources,
-    acquisitionResult
+    acquisitionResult,
+    convergence
   };
 }

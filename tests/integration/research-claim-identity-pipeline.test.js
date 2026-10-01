@@ -45,10 +45,13 @@ class UrlListProvider extends ResearchSourceProvider {
   async discoverCandidates() { return { candidates: this.urls.map((url, i) => ({ url, title: `t${i}`, snippet: 's' })) }; }
 }
 const marker = (url) => `MARK_${new URL(url).hostname.replace(/\W/g, '_')}`;
-function fakeFetch() {
+// claimsByUrl (optional): embed that URL's claim texts in the fetched page so each claim is
+// verbatim in its source and therefore normalization-trusted (UNCHANGED). Without it the page
+// never contains the claim, so the claim is UNVERIFIED_ORIGIN and cannot use the identity index.
+function fakeFetch(claimsByUrl = null) {
   return async (url) => ({
     ok: true, status: 200, headers: { get: () => 'text/html' },
-    text: async () => `<html><body>${marker(url)} independent report covering the product topic in some detail.</body></html>`
+    text: async () => `<html><body>${marker(url)} independent report covering the product topic in some detail. ${(claimsByUrl?.[url] ?? []).map((c) => c.claim).join(' ')}</body></html>`
   });
 }
 // claimsByUrl: { [url]: claims[] } — the stub answers according to the source in the prompt.
@@ -67,14 +70,14 @@ function routerFor(claimsByUrl) {
   return new LLMRouter({ priority: ['identity-stub'], allowPaidProviders: false, registry });
 }
 
-async function run(claimsByUrl, { classification = {}, detectContradiction = null } = {}) {
+async function run(claimsByUrl, { classification = {}, detectContradiction = null, sourceContainsClaims = false } = {}) {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
   const opportunityId = seedOpportunity(storage);
   const result = await runResearchProject({
     storage, opportunityId, sourceProvider: new UrlListProvider(Object.keys(claimsByUrl)),
     llmRouter: routerFor(claimsByUrl), policy: researchPolicy, classification,
-    fetchImpl: fakeFetch(), detectContradiction
+    fetchImpl: fakeFetch(sourceContainsClaims ? claimsByUrl : null), detectContradiction
   });
   return { storage, dbPath, result };
 }
@@ -93,7 +96,7 @@ test('1. paraphrase across two registrable domains: ONE claim, two source ids, t
   const { storage, dbPath, result } = await run({
     [A]: [fact('Acme released Widget in March 2026.', launch({ predicate: 'release' }))],
     [B]: [fact('Widget was launched by Acme during March 2026.', launch({ predicate: 'launch' }))]
-  });
+  }, { sourceContainsClaims: true });
   try {
     assert.equal(result.claims.length, 1);
     // Original human-readable text is preserved verbatim (first-seen wording).
@@ -218,7 +221,7 @@ test('7. one source cannot self-corroborate, even via paraphrase', async () => {
       fact('Acme released Widget in March 2026.', launch({ predicate: 'release' })),
       fact('Widget was launched by Acme during March 2026.', launch({ predicate: 'launch' }))
     ]
-  });
+  }, { sourceContainsClaims: true });
   try {
     assert.equal(result.claims.length, 1);
     assert.equal(sourceIdsOf(storage, result.claims[0].id).length, 1);
@@ -230,7 +233,7 @@ test('8. one registrable domain cannot corroborate itself via paraphrase', async
   const { storage, dbPath, result } = await run({
     'https://news.example.com/a': [fact('Acme released Widget in March 2026.', launch({ predicate: 'release' }))],
     'https://www.example.com/b': [fact('Widget was launched by Acme during March 2026.', launch({ predicate: 'launch' }))]
-  });
+  }, { sourceContainsClaims: true });
   try {
     assert.equal(result.claims.length, 1);
     assert.equal(sourceIdsOf(storage, result.claims[0].id).length, 2);
@@ -292,7 +295,7 @@ test('C-int-1. lexically different but equivalent identities (inflection, articl
   const { storage, dbPath, result } = await run({
     [A]: [fact('Acme reported $1 billion revenue in 2025.', revId())],
     [B]: [fact("Acme's revenue for 2025 was reported as 1,000 million US dollars.", revId({ predicate: 'Reported', object: 'the Revenue', quantity: 1000, unit: 'million US dollars', time: '2025' }))]
-  });
+  }, { sourceContainsClaims: true });
   try {
     assert.equal(result.claims.length, 1);
     assert.equal(sourceIdsOf(storage, result.claims[0].id).length, 2);
@@ -306,7 +309,7 @@ test('C-int-2. equivalent date forms merge through the pipeline; a different dat
     [A]: [fact('Acme released Widget in March 2026.', launch({ predicate: 'release', time: '2026-03' }))],
     [B]: [fact('Widget was launched by Acme in March 2026.', launch({ time: 'March 2026' }))],
     'https://publisher-three.net/story': [fact('Acme released Widget in April 2026.', launch({ predicate: 'release', time: 'April 2026' }))]
-  });
+  }, { sourceContainsClaims: true });
   try {
     assert.equal(result.claims.length, 2);
     const march = result.claims.find((c) => c.claim.includes('March'));
@@ -322,7 +325,7 @@ test('C-int-3. same-domain and same-source lexical variants merge but never coun
   const sameDomain = await run({
     'https://news.example.com/a': [fact('Acme reported $1 billion revenue in 2025.', revId())],
     'https://www.example.com/b': [fact('Acme reported one billion dollars.', revId({ predicate: 'reports', unit: '$' }))]
-  });
+  }, { sourceContainsClaims: true });
   try {
     // Second wording has a spelled number the structure cannot verify -> untrusted, stays separate.
     assert.equal(sameDomain.result.claims.length, 2);
@@ -332,7 +335,7 @@ test('C-int-3. same-domain and same-source lexical variants merge but never coun
   const sameDomain2 = await run({
     'https://news.example.com/a': [fact('Acme reported $1 billion revenue in 2025.', revId())],
     'https://www.example.com/b': [fact('Acme reported revenue of $1 billion for 2025.', revId({ predicate: 'reports', unit: '$' }))]
-  });
+  }, { sourceContainsClaims: true });
   try {
     assert.equal(sameDomain2.result.claims.length, 1);
     assert.equal(sourceIdsOf(sameDomain2.storage, sameDomain2.result.claims[0].id).length, 2);
@@ -344,7 +347,7 @@ test('C-int-3. same-domain and same-source lexical variants merge but never coun
       fact('Acme reported $1 billion revenue in 2025.', revId()),
       fact('Revenue of $1 billion was reported by Acme for 2025.', revId({ predicate: 'reported', unit: 'US dollars' }))
     ]
-  });
+  }, { sourceContainsClaims: true });
   try {
     assert.equal(sameSource.result.claims.length, 1);
     assert.equal(sourceIdsOf(sameSource.storage, sameSource.result.claims[0].id).length, 1);
@@ -394,20 +397,24 @@ test('E1. real Gemini response path preserves structured identity, merges cross-
   await storage.migrate();
   try {
     const opportunityId = seedOpportunity(storage);
-    const textByUrl = {
-      [A]: '```json\n' + JSON.stringify([
+    const claimsByUrl = {
+      [A]: [
         fact('Acme reported $1 billion revenue in 2025.', revId()),
         fact('Acme released Gadget in March 2026.', null),                                        // missing
         fact('Acme released Widget in 2026.', { ...launch({ time: '2026' }), polarity: 'MAYBE' }), // malformed
         fact('Acme did not release Widget in 2027.', launch({ time: '2027' })),                   // inconsistent (negation, AFFIRMED)
         { claim: 'Analysts liked it.', claim_type: 'OPINION', is_load_bearing: false, identity: revId() } // non-FACT: ignored
-      ], null, 2) + '\n```',
-      [B]: JSON.stringify([fact('Revenue of $1 billion for 2025 was reported by Acme.', revId({ predicate: 'reported', unit: 'US dollars' }))])
+      ],
+      [B]: [fact('Revenue of $1 billion for 2025 was reported by Acme.', revId({ predicate: 'reported', unit: 'US dollars' }))]
+    };
+    const textByUrl = {
+      [A]: '```json\n' + JSON.stringify(claimsByUrl[A], null, 2) + '\n```',
+      [B]: JSON.stringify(claimsByUrl[B])
     };
     const result = await runResearchProject({
       storage, opportunityId, sourceProvider: new UrlListProvider([A, B]),
       llmRouter: geminiRouterFor(textByUrl), policy: researchPolicy, classification: {},
-      fetchImpl: fakeFetch(), detectContradiction: null
+      fetchImpl: fakeFetch(claimsByUrl), detectContradiction: null
     });
 
     // Identity survived Gemini parsing + extraction: paraphrase merged, two domains, VERIFIED.
