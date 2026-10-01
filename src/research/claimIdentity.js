@@ -413,8 +413,16 @@ export function identityTextConflict(claimText, identity, timeParts) {
     if (!Number.isFinite(n)) continue;
     if (m[2]) {
       if (!hasQuantity || !nearlyEqual(n * SCALE_SUFFIX.get(m[2].toLowerCase()), identity.quantity)) return 'number_not_accounted';
-    } else if (!accounted.has(n) && !(hasQuantity && nearlyEqual(n, identity.quantity))) {
+    } else {
+      // normText deliberately separates punctuation in entity/version fields
+      // (e.g. "Gemini 3.5" becomes "gemini 3 5").  For a bare decimal only,
+      // recognise that exact adjacent integer/fractional token pair without
+      // changing quantity or scale accounting.
+      const decimalParts = m[1].match(/^(\d+)\.(\d+)$/);
+      const decimalEntityAccounted = decimalParts && new RegExp(`(?<!\\d)${decimalParts[1]}\\s+${decimalParts[2]}(?!\\d)`).test(hay);
+      if (!accounted.has(n) && !(hasQuantity && nearlyEqual(n, identity.quantity)) && !decimalEntityAccounted) {
       return 'number_not_accounted';
+      }
     }
   }
 

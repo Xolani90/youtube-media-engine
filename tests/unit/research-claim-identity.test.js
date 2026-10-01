@@ -106,6 +106,18 @@ test('scale words are bound to the exact scale in the text (billion != million)'
   assert.equal(fp('Acme reported $2 revenue in 2025.', rev(2e9)), null, 'bare number scaled up');
 });
 
+test('decimal entity and version tokens are accounted separately from quantities', () => {
+  const model = (subject, quantity = null, object = 'model') => ident({ subject, predicate: 'release', object, time: null, quantity, unit: quantity === null ? null : 'percent' });
+  assert.ok(fp('Gemini 3.5 Pro released the model.', model('Gemini 3.5 Pro')));
+  assert.ok(fp('Gemini 3.8 Flash released the model.', model('Gemini 3.8 Flash')));
+  assert.ok(fp('v1.1 released the model.', model('v1.1')));
+  assert.ok(fp('DeepSWE v1.1 improved by 77.9%.', model('DeepSWE v1.1', 77.9, null)));
+  assert.equal(fp('Gemini 3.5 Pro released the model.', model('Gemini 3.8 Pro')), null, 'missing decimal entity');
+  assert.equal(fp('Gemini 3.5 Pro released the model.', model('Gemini 3.50 Pro')), null, 'wrong decimal reconstruction');
+  assert.equal(fp('DeepSWE v1.1 improved by 77.9%.', model('DeepSWE v1.1', 77.8, null)), null, 'wrong percentage quantity');
+  assert.equal(fp('DeepSWE v1.1 improved by 77.9%.', model('DeepSWE v1.1', null, null)), null, 'missing percentage quantity');
+});
+
 // ---- Deterministic canonicalization (v2): same proposition, different surface form ----
 const REV_TEXT = 'Acme reported $1 billion revenue in 2025.';
 const rev = (over = {}) => ident({ predicate: 'report', object: 'revenue', time: '2025', quantity: 1e9, unit: 'USD', ...over });
