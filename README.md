@@ -56,10 +56,9 @@ For other platforms, install `espeak-ng` via your OS's package manager
   `src/rights-verification`, `src/media`, `src/publication` — implementations for each
   pipeline stage.
 - `src/providers/llm` — `LLMProvider` interface and `LLMRouter`, which enforces R0-first
-  provider selection with **no silent fallback to paid providers**. Groq is wired to real
-  network calls (`https://api.groq.com/...`); Gemini, OpenRouter, and DeepSeek remain
-  unconfigured stub providers (no keys configured, contract-only). `LocalStubProvider`
-  supports zero-cost testing.
+  provider selection with **no silent fallback to paid providers**. Gemini is the sole
+  production LLM provider (wired to real network calls); OpenRouter and DeepSeek remain
+  unconfigured stub providers (contract-only). `LocalStubProvider` supports zero-cost testing.
 - `src/providers/opportunity` — `OpportunitySource` interface and discovery-source
   implementations.
 - `src/scheduler` — `SchedulerDriver` interface; `github-actions` and `local-cron` drivers
@@ -78,7 +77,7 @@ For other platforms, install `espeak-ng` via your OS's package manager
 - Implemented functionality does not mean live/production operation. `RUN_MODE=SIMULATION`
   and `AUTONOMOUS_ENABLED=false` by default, and credentials are not configured merely
   because a provider adapter exists.
-- There is no confirmed live discovery execution, live LLM execution beyond Groq's wired
+- There is no confirmed live discovery execution, live LLM execution beyond the Gemini wired
   adapter, live YouTube publishing, or deployed production service established by this
   repository.
 

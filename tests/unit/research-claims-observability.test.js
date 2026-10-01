@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractClaims, EXTRACTION_PARSE_OUTCOME } from '../../src/research/claims.js';
+import { extractClaims, EXTRACTION_PARSE_OUTCOME, ExtractionFailureError } from '../../src/research/claims.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
 import { setTraceSink } from '../../src/diagnostics/trace.js';
 
@@ -68,7 +68,8 @@ test('valid multi-claim response: parsed_claims, count, token counts, content le
     contentLength: TWO_CLAIMS.length,
     finishReason: 'stop',
     parseOutcome: EXTRACTION_PARSE_OUTCOME.PARSED_CLAIMS,
-    proposedClaimCount: 2
+    proposedClaimCount: 2,
+    attempts: 1
   });
 });
 
@@ -80,37 +81,142 @@ test('valid zero-claim response ("[]"): parsed_zero_claims, distinct from a pars
   assert.equal(diagnostics.contentLength, 2);
 });
 
-test('empty response: empty_content with contentLength 0, no throw, zero claims', async () => {
-  const { claims, diagnostics } = await run({ text: '', finishReason: 'length' });
-  assert.deepEqual(claims, []);
-  assert.equal(diagnostics.parseOutcome, EXTRACTION_PARSE_OUTCOME.EMPTY_CONTENT);
-  assert.equal(diagnostics.contentLength, 0);
-  assert.equal(diagnostics.proposedClaimCount, 0);
+// Run a completion expected to FAIL extraction; returns the thrown error and
+// how many times the provider was called (to prove the retry is bounded).
+async function runFailing(completion) {
+  let calls = 0;
+  const registry = {
+    'fail-stub': () => ({
+      id: 'fail-stub', isPaid: false,
+      async healthCheck() { return true; },
+      async complete() {
+        calls++;
+        return { model: 'obs-model', requestId: null, inputTokens: 111, outputTokens: 222, estimatedCost: 0, isPaid: false, ...completion };
+      }
+    })
+  };
+  const router = new LLMRouter({ priority: ['fail-stub'], allowPaidProviders: false, registry });
+  let error;
+  try { await extractClaims({ sourceText: SENTINEL_SOURCE, coreQuestion: 'q' }, router); } catch (e) { error = e; }
+  assert.ok(error instanceof ExtractionFailureError, 'must fail closed with ExtractionFailureError, not return zero claims');
+  return { error, calls };
+}
+
+test('empty response: fails closed as empty_content after exactly one retry (2 attempts), never zero claims', async () => {
+  const { error, calls } = await runFailing({ text: '' });
+  assert.equal(error.parseOutcome, EXTRACTION_PARSE_OUTCOME.EMPTY_CONTENT);
+  assert.equal(error.attempts, 2);
+  assert.equal(calls, 2);
 });
 
-test('whitespace-only response is also empty_content, but keeps its real content length', async () => {
-  const { claims, diagnostics } = await run({ text: '  \n\t ' });
-  assert.deepEqual(claims, []);
-  assert.equal(diagnostics.parseOutcome, EXTRACTION_PARSE_OUTCOME.EMPTY_CONTENT);
-  assert.equal(diagnostics.contentLength, 5);
+test('whitespace-only response is also empty_content failure, keeping its real content length', async () => {
+  const { error } = await runFailing({ text: '  \n\t ' });
+  assert.equal(error.parseOutcome, EXTRACTION_PARSE_OUTCOME.EMPTY_CONTENT);
+  assert.equal(error.contentLength, 5);
 });
 
-test('malformed/truncated JSON: parse_failed (not empty), zero claims, no throw, content length recorded', async () => {
+test('empty content with finishReason length/MAX_TOKENS is classified truncated', async () => {
+  for (const finishReason of ['length', 'MAX_TOKENS']) {
+    const { error } = await runFailing({ text: '', finishReason });
+    assert.equal(error.parseOutcome, EXTRACTION_PARSE_OUTCOME.TRUNCATED);
+    assert.equal(error.finishReason, finishReason);
+  }
+});
+
+test('malformed JSON (no truncation signal): parse_failed failure, no partial recovery, 2 attempts', async () => {
   const truncated = TWO_CLAIMS.slice(0, TWO_CLAIMS.length - 20);
-  const { claims, diagnostics, rawOutput } = await run({ text: truncated, finishReason: 'length', outputTokens: 2048 });
-  assert.deepEqual(claims, [], 'behavior unchanged: an unparseable response still yields zero claims');
-  assert.equal(diagnostics.parseOutcome, EXTRACTION_PARSE_OUTCOME.PARSE_FAILED);
-  assert.equal(diagnostics.contentLength, truncated.length);
-  assert.equal(diagnostics.outputTokens, 2048);
-  assert.equal(diagnostics.finishReason, 'length');
-  assert.equal(diagnostics.proposedClaimCount, 0);
-  assert.equal(rawOutput, truncated, 'rawOutput is still the exact, unmodified model output');
+  const { error, calls } = await runFailing({ text: truncated, finishReason: 'stop', outputTokens: 2048 });
+  assert.equal(error.parseOutcome, EXTRACTION_PARSE_OUTCOME.PARSE_FAILED);
+  assert.equal(error.contentLength, truncated.length);
+  assert.equal(error.outputTokens, 2048);
+  assert.equal(calls, 2);
+  assert.ok(!error.message.includes('Acme') && !error.message.includes(SENTINEL_SOURCE), 'metadata only');
 });
 
-test('valid JSON that is not an array: parsed_non_array (still zero claims, no throw)', async () => {
-  const { claims, diagnostics } = await run({ text: JSON.stringify({ claim: 'not an array' }) });
+test('truncated output (finishReason length / MAX_TOKENS) is a failure even when the text parses', async () => {
+  for (const finishReason of ['length', 'MAX_TOKENS', 'max_tokens']) {
+    const { error } = await runFailing({ text: TWO_CLAIMS, finishReason });
+    assert.equal(error.parseOutcome, EXTRACTION_PARSE_OUTCOME.TRUNCATED, finishReason);
+    assert.equal(error.finishReason, finishReason);
+  }
+});
+
+test('valid JSON that is not an array: parsed_non_array failure, not zero claims', async () => {
+  const { error } = await runFailing({ text: JSON.stringify({ claim: 'not an array' }) });
+  assert.equal(error.parseOutcome, EXTRACTION_PARSE_OUTCOME.PARSED_NON_ARRAY);
+});
+
+test('a bad first attempt followed by a good retry succeeds, with attempts=2 recorded', async () => {
+  let calls = 0;
+  const registry = {
+    'flaky-stub': () => ({
+      id: 'flaky-stub', isPaid: false,
+      async healthCheck() { return true; },
+      async complete() {
+        calls++;
+        const text = calls === 1 ? TWO_CLAIMS.slice(0, 30) : TWO_CLAIMS;
+        return { text, model: 'obs-model', requestId: null, inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false, finishReason: 'stop' };
+      }
+    })
+  };
+  const router = new LLMRouter({ priority: ['flaky-stub'], allowPaidProviders: false, registry });
+  const { claims, diagnostics } = await extractClaims({ sourceText: 'x', coreQuestion: 'q' }, router);
+  assert.equal(claims.length, 2);
+  assert.equal(diagnostics.attempts, 2);
+  assert.equal(calls, 2);
+});
+
+test('a legitimate zero-claim "[]" is NOT a failure and is not retried', async () => {
+  let calls = 0;
+  const registry = {
+    'zero-stub': () => ({
+      id: 'zero-stub', isPaid: false,
+      async healthCheck() { return true; },
+      async complete() { calls++; return { text: '[]', model: 'm', requestId: null, inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false, finishReason: 'stop' }; }
+    })
+  };
+  const router = new LLMRouter({ priority: ['zero-stub'], allowPaidProviders: false, registry });
+  const { claims, diagnostics } = await extractClaims({ sourceText: 'x', coreQuestion: 'q' }, router);
   assert.deepEqual(claims, []);
-  assert.equal(diagnostics.parseOutcome, EXTRACTION_PARSE_OUTCOME.PARSED_NON_ARRAY);
+  assert.equal(diagnostics.parseOutcome, EXTRACTION_PARSE_OUTCOME.PARSED_ZERO_CLAIMS);
+  assert.equal(calls, 1);
+});
+
+test('Gemini-style EMPTY_COMPLETION provider error is classified empty_content/truncated and retried once', async () => {
+  let calls = 0;
+  const registry = {
+    'gem-stub': () => ({
+      id: 'gem-stub', isPaid: false,
+      async healthCheck() { return true; },
+      async complete() {
+        calls++;
+        throw Object.assign(new Error('no usable completion text'), { code: 'EMPTY_COMPLETION', finishReason: 'MAX_TOKENS' });
+      }
+    })
+  };
+  const router = new LLMRouter({ priority: ['gem-stub'], allowPaidProviders: false, registry });
+  await assert.rejects(
+    () => extractClaims({ sourceText: 'x', coreQuestion: 'q' }, router),
+    (e) => e instanceof ExtractionFailureError && e.parseOutcome === EXTRACTION_PARSE_OUTCOME.TRUNCATED && e.finishReason === 'MAX_TOKENS' && e.attempts === 2
+  );
+  assert.equal(calls, 2);
+});
+
+test('transport/provider failure is provider_failed and NOT retried at the extraction level', async () => {
+  let calls = 0;
+  const registry = {
+    'down-stub': () => ({
+      id: 'down-stub', isPaid: false,
+      async healthCheck() { return true; },
+      async complete() { calls++; throw Object.assign(new Error('HTTP 503'), { status: 503 }); }
+    })
+  };
+  const router = new LLMRouter({ priority: ['down-stub'], allowPaidProviders: false, registry });
+  await assert.rejects(
+    () => extractClaims({ sourceText: 'x', coreQuestion: 'q' }, router),
+    (e) => e instanceof ExtractionFailureError && e.parseOutcome === EXTRACTION_PARSE_OUTCOME.PROVIDER_FAILED && /HTTP 503/.test(e.message)
+  );
+  assert.equal(calls, 1);
 });
 
 test('a single-fence-wrapped valid array is still parsed_claims', async () => {
@@ -120,8 +226,8 @@ test('a single-fence-wrapped valid array is still parsed_claims', async () => {
 });
 
 test('finish reason present: passed through verbatim from the completion result', async () => {
-  const { diagnostics } = await run({ text: TWO_CLAIMS, finishReason: 'length' });
-  assert.equal(diagnostics.finishReason, 'length');
+  const { diagnostics } = await run({ text: TWO_CLAIMS, finishReason: 'STOP' });
+  assert.equal(diagnostics.finishReason, 'STOP');
 });
 
 test('finish reason absent (valid provider shape): recorded as null, extraction unaffected', async () => {
@@ -144,25 +250,26 @@ test('diagnostics carry metadata only: neither model output nor source text appe
   assert.ok(!serialized.includes(SENTINEL_SOURCE), 'source text must not leak into diagnostics');
   assert.deepEqual(
     Object.keys(diagnostics).sort(),
-    ['contentLength', 'finishReason', 'inputTokens', 'model', 'outputTokens', 'parseOutcome', 'proposedClaimCount', 'provider']
+    ['attempts', 'contentLength', 'finishReason', 'inputTokens', 'model', 'outputTokens', 'parseOutcome', 'proposedClaimCount', 'provider']
   );
 });
 
 test('trace event (DIAGNOSTIC_TRACE=true) reports the classification and no content', async () => {
-  const truncated = '[{"claim":"' + SENTINEL_RESPONSE.slice(0, 10);
-  const { value, lines } = await withTraceOn(() => run({ text: truncated, finishReason: 'length', outputTokens: 2048 }));
-  assert.deepEqual(value.claims, []);
+  const text = JSON.stringify([{ claim: SENTINEL_RESPONSE, claim_type: 'FACT', is_load_bearing: true }]);
+  const { value, lines } = await withTraceOn(() => run({ text, finishReason: 'stop', outputTokens: 2048 }));
+  assert.equal(value.claims.length, 1);
   assert.equal(lines.length, 1, 'exactly one extraction-result event per completion');
   const line = lines[0];
   assert.match(line, /provider=obs-stub/);
   assert.match(line, /model=obs-model/);
   assert.match(line, /inputTokens=111/);
   assert.match(line, /outputTokens=2048/);
-  assert.match(line, new RegExp(`contentLength=${truncated.length}`));
-  assert.match(line, /finishReason=length/);
-  assert.match(line, /parseOutcome=parse_failed/);
-  assert.match(line, /proposedClaimCount=0/);
-  assert.ok(!line.includes(SENTINEL_RESPONSE.slice(0, 10)), 'trace line must not contain model output');
+  assert.match(line, new RegExp(`contentLength=${text.length}`));
+  assert.match(line, /finishReason=stop/);
+  assert.match(line, /parseOutcome=parsed_claims/);
+  assert.match(line, /proposedClaimCount=1/);
+  assert.match(line, /attempts=1/);
+  assert.ok(!line.includes(SENTINEL_RESPONSE), 'trace line must not contain model output');
   assert.ok(!line.includes(SENTINEL_SOURCE), 'trace line must not contain source text');
 });
 

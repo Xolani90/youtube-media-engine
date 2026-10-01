@@ -4,7 +4,7 @@ import {
   traceEnabled, traceAsync, traceSync, traceEvent, startTrace, setTraceSink, safeHost, safeUrl
 } from '../../src/diagnostics/trace.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
-import { GroqProvider } from '../../src/providers/llm/GroqProvider.js';
+import { GeminiProvider } from '../../src/providers/llm/GeminiProvider.js';
 
 const SECRET_PROMPT = 'SUPER-SECRET-PROMPT-TEXT with spaces';
 const SECRET_KEY = 'gsk_SECRET_API_KEY_123';
@@ -106,7 +106,7 @@ test('enabled: unsafe field values are omitted and URLs lose their query string'
     traceEvent('fields', {
       prompt: SECRET_PROMPT,
       long: 'a'.repeat(300),
-      ok: 'groq-free',
+      ok: 'gemini-free',
       n: 7,
       flag: true,
       missing: undefined
@@ -117,7 +117,7 @@ test('enabled: unsafe field values are omitted and URLs lose their query string'
     });
   });
   const text = lines.join('\n');
-  assert.match(text, /prompt=\[omitted\] long=\[omitted\] ok=groq-free n=7 flag=true(?!.*missing)/);
+  assert.match(text, /prompt=\[omitted\] long=\[omitted\] ok=gemini-free n=7 flag=true(?!.*missing)/);
   assert.ok(!text.includes('SUPER-SECRET'));
   assert.ok(!text.includes('SECRET_URL_KEY'));
   assert.ok(!text.includes('pw@'));
@@ -160,17 +160,17 @@ test('LLMRouter: identical result with tracing on/off; markers name provider/mod
   assert.ok(!text.includes('SUPER-SECRET'));
 });
 
-test('GroqProvider: 429 retry path marks request/status, sleep delay and body; never prints key or prompt; same result as untraced', async () => {
+test('GeminiProvider: 429 retry path marks request/status, sleep delay and body; never prints key or prompt; same result as untraced', async () => {
   const makeFetch = () => {
     const responses = [
       { ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '7' : null) }, text: async () => '{"error":{"message":"rate limited"}}' },
-      { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ id: 'req-1', model: 'm1', choices: [{ message: { content: 'hello' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } }) }
+      { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ responseId: 'req-1', modelVersion: 'm1', candidates: [{ content: { parts: [{ text: 'hello' }] } }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2 } }) }
     ];
     return async () => responses.shift();
   };
   const run = () => {
     const sleeps = [];
-    const provider = new GroqProvider({
+    const provider = new GeminiProvider({
       fetchImpl: makeFetch(),
       apiKeyProvider: () => SECRET_KEY,
       sleepImpl: async (ms) => { sleeps.push(ms); }
@@ -184,7 +184,7 @@ test('GroqProvider: 429 retry path marks request/status, sleep delay and body; n
   assert.deepEqual(on.value, off.value);
   assert.deepEqual(on.value.sleeps, [7000]);
   const text = on.lines.join('\n');
-  assert.match(text, /BEGIN llm\.http\.request .*provider=groq-free model=\S+ attempt=1/);
+  assert.match(text, /BEGIN llm\.http\.request .*provider=gemini-free model=\S+ attempt=1/);
   assert.match(text, /END llm\.http\.request elapsedMs=\d+ status=429/);
   assert.match(text, /BEGIN llm\.retry\.sleep .*delayMs=7000/);
   assert.match(text, /END llm\.retry\.sleep /);

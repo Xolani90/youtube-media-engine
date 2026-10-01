@@ -6,7 +6,6 @@ import {
 } from '../../src/diagnostics/runWorkloadDiagnostics.js';
 import { checkDuplicate, createDedupWorkloadBudget, DEDUP_RESULT } from '../../src/discovery/dedup.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
-import { GroqProvider } from '../../src/providers/llm/GroqProvider.js';
 import { GeminiProvider } from '../../src/providers/llm/GeminiProvider.js';
 
 const thresholds = { candidate_threshold: 0.3, confident_duplicate_threshold: 0.8 };
@@ -40,7 +39,6 @@ const jsonResponse = (status, body, headers = {}) => ({
   ok: status >= 200 && status < 300, status, headers: new Headers(headers),
   json: async () => body, text: async () => JSON.stringify(body)
 });
-const groqOk = () => jsonResponse(200, { id: 'r', model: 'm', choices: [{ message: { content: 'ok' } }], usage: {} });
 const geminiOk = () => jsonResponse(200, { candidates: [{ content: { parts: [{ text: 'ok' }] } }], usageMetadata: {} });
 
 beforeEach(() => resetRunDiagnostics());
@@ -129,35 +127,10 @@ test('dedup: diagnostics do not alter the returned result shape or budget accoun
   assert.deepEqual(budget, { l2Cap: 5, l3Cap: 5, l2Used: 1, l3Used: 1 });
 });
 
-test('Groq: 429 then success counts one 429 and the requested retry delay', async () => {
-  const responses = [jsonResponse(429, { error: {} }, { 'retry-after': '3' }), groqOk()];
-  const sleeps = [];
-  const provider = new GroqProvider({
-    fetchImpl: async () => responses.shift(), apiKeyProvider: () => 'k', sleepImpl: async (ms) => { sleeps.push(ms); }
-  });
-  await provider.complete({ prompt: 'p' });
-  const snap = snapshotRunDiagnostics();
-  assert.equal(snap.llm429Count, 1);
-  assert.equal(snap.retrySleepMs, 3000);
-  assert.deepEqual(sleeps, [3000], 'retry behavior itself is unchanged');
-});
-
-test('Groq: an exhausted 429 counts both 429s but only the one retry sleep (fallback delay)', async () => {
-  const sleeps = [];
-  const provider = new GroqProvider({
-    fetchImpl: async () => jsonResponse(429, { error: {} }), apiKeyProvider: () => 'k', sleepImpl: async (ms) => { sleeps.push(ms); }
-  });
-  await assert.rejects(() => provider.complete({ prompt: 'p' }), /429/);
-  const snap = snapshotRunDiagnostics();
-  assert.equal(snap.llm429Count, 2);
-  assert.equal(snap.retrySleepMs, sleeps[0]);
-  assert.equal(sleeps.length, 1);
-});
-
-test('Groq: a non-429 failure and a first-try success record nothing', async () => {
-  const bad = new GroqProvider({ fetchImpl: async () => jsonResponse(500, { error: {} }), apiKeyProvider: () => 'k' });
+test('Gemini: a non-429 client failure and a first-try success record nothing', async () => {
+  const bad = new GeminiProvider({ fetchImpl: async () => jsonResponse(401, { error: {} }), apiKeyProvider: () => 'k' });
   await assert.rejects(() => bad.complete({ prompt: 'p' }));
-  const good = new GroqProvider({ fetchImpl: async () => groqOk(), apiKeyProvider: () => 'k' });
+  const good = new GeminiProvider({ fetchImpl: async () => geminiOk(), apiKeyProvider: () => 'k' });
   await good.complete({ prompt: 'p' });
   const snap = snapshotRunDiagnostics();
   assert.equal(snap.llm429Count, 0);
@@ -214,7 +187,7 @@ test('timeDiscovery: records elapsed, returns the wrapped result, and still reco
 });
 
 test('formatRunDiagnostics emits one numeric-only line: no prompt text, no key material', async () => {
-  const provider = new GroqProvider({
+  const provider = new GeminiProvider({
     fetchImpl: async () => jsonResponse(429, { error: { message: 'SECRET-BODY' } }), apiKeyProvider: () => 'SECRET-KEY', sleepImpl: async () => {}
   });
   await assert.rejects(() => provider.complete({ prompt: 'SECRET-PROMPT' }));

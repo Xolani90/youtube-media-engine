@@ -1,6 +1,6 @@
 // In-process, per-provider rate-limit cooldown memory.
 //
-// WHY THIS EXISTS: GroqProvider/GeminiProvider already retry a 429 once,
+// WHY THIS EXISTS: GeminiProvider already retries a 429 once,
 // honoring Retry-After/retryDelay (see M3-B). That retry is per-call --
 // it has no memory of a provider having just been rate-limited a moment
 // ago on a *different*, independent complete() call. When both configured
@@ -22,7 +22,7 @@
 // decision (LLMRouter's eligibility check) -- that is its entire purpose.
 //
 // This module never parses a provider's HTTP response itself. A provider
-// (GroqProvider/GeminiProvider) computes its own effective retry delay
+// (GeminiProvider) computes its own effective retry delay
 // from its own Retry-After/retryDelay parsing and passes the resulting
 // duration in; this module only tracks the resulting cooldown window.
 

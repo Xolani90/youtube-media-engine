@@ -1,8 +1,8 @@
 // Manual, opt-in, one-shot script. NOT part of `npm test`, NOT run at
 // application startup, NOT part of the autonomous runner.
 //
-// Purpose: prove that a real 'groq-free' completion (via the existing
-// GroqProvider / LLMRouter / candidates.js registry) can be consumed by
+// Purpose: prove that a real 'gemini-free' completion (via the existing
+// GeminiProvider / LLMRouter / candidates.js registry) can be consumed by
 // the existing, unmodified createBrief() pipeline end to end -- real
 // generation, real structural + claim-id validation, real bounded retry,
 // real persistence, real lifecycle transition, real decision_log entries.
@@ -15,13 +15,13 @@
 // scheduler, or the autonomous runner is touched or exercised here.
 //
 // Usage:
-//   GROQ_FREE_API_KEY=... node scripts/generate-real-brief.js
+//   GEMINI_FREE_API_KEY=... node scripts/generate-real-brief.js
 //
 // Exit code is 0 only on a genuinely created (or regenerated) Brief.
 // Any failure -- missing key, rejected generation, thrown error -- exits
 // non-zero with the real error/reason printed. No fallback to any other
 // provider is attempted; the router is constructed with priority strictly
-// limited to ['groq-free'].
+// limited to ['gemini-free'].
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,7 +33,7 @@ import { createBrief } from '../src/brief/pipeline.js';
 import briefPolicy from '../config/brief_policy.json' with { type: 'json' };
 
 function freshStorage() {
-  const dbPath = path.join(os.tmpdir(), `brief-real-groq-${Date.now()}-${Math.random()}.db`);
+  const dbPath = path.join(os.tmpdir(), `brief-real-gemini-${Date.now()}-${Math.random()}.db`);
   return { storage: new SqliteStorageDriver({ dbPath }), dbPath };
 }
 
@@ -52,7 +52,7 @@ function seedResearchProject(storage, { coreQuestion = 'Did the launch cause a m
   const opportunityId = crypto.randomUUID();
   storage.run(
     `INSERT INTO opportunities (id, title, description, source, discovered_at, status, opportunity_proposition)
-     VALUES (?, 'Real Groq generation smoke opportunity', 'A description', 'rss', ?, 'HANDED_TO_RESEARCH', ?)`,
+     VALUES (?, 'Real Gemini generation smoke opportunity', 'A description', 'rss', ?, 'HANDED_TO_RESEARCH', ?)`,
     [opportunityId, new Date().toISOString(), JSON.stringify({ core_question: coreQuestion })]
   );
   const researchProjectId = crypto.randomUUID();
@@ -74,10 +74,10 @@ function insertClaim(storage, researchProjectId, claim) {
 }
 
 async function main() {
-  const apiKey = process.env.GROQ_FREE_API_KEY;
+  const apiKey = process.env.GEMINI_FREE_API_KEY;
   if (!apiKey) {
     console.error(
-      'FAILED: GROQ_FREE_API_KEY is not set in the process environment.\n' +
+      'FAILED: GEMINI_FREE_API_KEY is not set in the process environment.\n' +
       'This script requires a real key and will not fall back to any other provider.'
     );
     process.exitCode = 1;
@@ -92,12 +92,12 @@ async function main() {
     const { researchProjectId } = seedResearchProject(storage);
     const claimId = insertClaim(storage, researchProjectId, 'Acme reported $1B revenue.');
 
-    // Explicitly limited to groq-free only -- no reliance on the
+    // Explicitly limited to gemini-free only -- no reliance on the
     // unrelated default provider ordering in config.llmProviderPriority,
     // and no silent fallback to any other provider id.
-    const llmRouter = new LLMRouter({ priority: ['groq-free'] });
+    const llmRouter = new LLMRouter({ priority: ['gemini-free'] });
 
-    console.log('Requesting a real Brief generation via provider: groq-free ...');
+    console.log('Requesting a real Brief generation via provider: gemini-free ...');
     const result = await createBrief({ storage, researchProjectId, llmRouter, policy: briefPolicy });
 
     if (result.rejected) {
@@ -110,7 +110,7 @@ async function main() {
       return;
     }
 
-    // The model Groq actually returned is not part of createBrief()'s
+    // The model Gemini actually returned is not part of createBrief()'s
     // return shape -- the pipeline logs it into decision_log's
     // config_snapshot (see BRIEF_GENERATION/ACCEPTED, src/brief/pipeline.js),
     // the same place it already logs it for every other provider. Read it
@@ -123,17 +123,17 @@ async function main() {
        ORDER BY created_at DESC LIMIT 1`,
       [researchProjectId]
     );
-    const groqModel = acceptedGenerationLog
+    const geminiModel = acceptedGenerationLog
       ? JSON.parse(acceptedGenerationLog.config_snapshot).model
       : null;
 
     const { brief } = result;
     cleanup(storage, dbPath);
     cleanedUp = true;
-    console.log('SUCCESS: real Groq-generated Brief accepted and persisted.');
+    console.log('SUCCESS: real Gemini-generated Brief accepted and persisted.');
     console.log(JSON.stringify({
-      provider: 'groq-free',
-      model: groqModel,
+      provider: 'gemini-free',
+      model: geminiModel,
       created: result.created,
       regenerated: result.regenerated,
       rejected: result.rejected,
@@ -162,9 +162,9 @@ async function main() {
     // / BRIEF_PERSISTED decision_log stages are recorded synchronously
     // inside createBrief() before it returns -- the e2e test already
     // proves that behavior unconditionally. This script's job is only to
-    // prove a real groq-free response drove this same, unmodified path,
+    // prove a real gemini-free response drove this same, unmodified path,
     // which the 'created'/'brief' evidence above already establishes.
-    // (Note: the model name/requestId/token usage Groq actually returned
+    // (Note: the model name/requestId/token usage Gemini actually returned
     // are not part of createBrief()'s return shape -- they are logged to
     // decision_log's config_snapshot by the pipeline itself, consistent
     // with how it already treats every other provider.)
@@ -172,7 +172,7 @@ async function main() {
     if (!cleanedUp) {
       try { cleanup(storage, dbPath); } catch { /* best-effort cleanup */ }
     }
-    console.error('FAILED: unexpected error while running the real Groq generation.');
+    console.error('FAILED: unexpected error while running the real Gemini generation.');
     console.error(err.stack || err.message || err);
     process.exitCode = 1;
   }

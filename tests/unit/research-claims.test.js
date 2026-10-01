@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractClaims, validateExtractedClaim } from '../../src/research/claims.js';
+import { extractClaims, validateExtractedClaim, ExtractionFailureError } from '../../src/research/claims.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
 
 function stubRouter(responseText) {
@@ -67,16 +67,14 @@ test('extractClaims never asks the LLM for evidence_status (Generation must not 
   assert.match(capturedPrompt, /not.*evidence/i);
 });
 
-test('unparseable LLM output yields an empty claim array deterministically, no throw', async () => {
+test('unparseable LLM output is an extraction FAILURE, never a zero-claim result', async () => {
   const router = stubRouter('not json');
-  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
-  assert.deepEqual(claims, []);
+  await assert.rejects(() => extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router), ExtractionFailureError);
 });
 
-test('a non-array LLM output is treated as no claims, not an error', async () => {
+test('a non-array LLM output is an extraction FAILURE, never a zero-claim result', async () => {
   const router = stubRouter(JSON.stringify({ claim: 'not an array' }));
-  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
-  assert.deepEqual(claims, []);
+  await assert.rejects(() => extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router), ExtractionFailureError);
 });
 
 // --- Markdown-fenced JSON (real Groq/openai-gpt-oss-20b observed shape) ---
@@ -131,30 +129,25 @@ test('the exact live Groq shape (trailing blank line before the closing fence) p
 
 test('prose before a fenced JSON block is rejected (no substring extraction)', async () => {
   const router = stubRouter('Here is the JSON:\n```json\n' + SAMPLE_CLAIM_ARRAY + '\n```');
-  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
-  assert.deepEqual(claims, []);
+  await assert.rejects(() => extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router), ExtractionFailureError);
 });
 
 test('prose after a fenced JSON block is rejected (no substring extraction)', async () => {
   const router = stubRouter('```json\n' + SAMPLE_CLAIM_ARRAY + '\n```\nHope that helps!');
-  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
-  assert.deepEqual(claims, []);
+  await assert.rejects(() => extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router), ExtractionFailureError);
 });
 
 test('an unclosed fence is rejected', async () => {
   const router = stubRouter('```json\n' + SAMPLE_CLAIM_ARRAY);
-  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
-  assert.deepEqual(claims, []);
+  await assert.rejects(() => extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router), ExtractionFailureError);
 });
 
 test('fenced malformed JSON is rejected', async () => {
   const router = stubRouter('```json\n{not valid json at all\n```');
-  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
-  assert.deepEqual(claims, []);
+  await assert.rejects(() => extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router), ExtractionFailureError);
 });
 
 test('fenced JSON with a non-array root is rejected, same as the unfenced case', async () => {
   const router = stubRouter('```json\n' + JSON.stringify({ claim: 'not an array' }) + '\n```');
-  const { claims } = await extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router);
-  assert.deepEqual(claims, []);
+  await assert.rejects(() => extractClaims({ sourceText: 'text', coreQuestion: 'q' }, router), ExtractionFailureError);
 });

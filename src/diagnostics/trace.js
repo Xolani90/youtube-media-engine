@@ -48,7 +48,7 @@ export function setTraceSink(fn) {
   return previous;
 }
 
-/** Host only, e.g. "api.groq.com". Never includes path, query or credentials. */
+/** Host only, e.g. "generativelanguage.googleapis.com". Never includes path, query or credentials. */
 export function safeHost(url) {
   try {
     return new URL(String(url)).host;

@@ -3,7 +3,7 @@ import { recordLlm429, recordRetrySleep } from '../../diagnostics/runWorkloadDia
 import { traceAsync, traceEvent } from '../../diagnostics/trace.js';
 import { recordProviderRateLimit } from './providerHealth.js';
 
-// Mirrors GroqProvider's non-2xx diagnostics and bounded 429 retry, adapted
+// Non-2xx diagnostics and bounded 429 retry, adapted
 // to the Gemini API's error shape (`{ error: { code, message, status,
 // details } }`). Gemini does not send a standard Retry-After header; its
 // actual retry guidance instead arrives inside the JSON error body, either
@@ -17,10 +17,25 @@ import { recordProviderRateLimit } from './providerHealth.js';
 // so an unexpectedly huge provider response can't bloat the exception.
 const MAX_NON_JSON_ERROR_BODY_LENGTH = 2000;
 
-// Bounded 429 retry, matching GroqProvider: exactly one retry (two attempts
-// total) for a rate-limited request; every other non-2xx status remains
-// immediately non-retryable.
+// Bounded 429 retry: exactly one retry (two attempts total) for a
+// rate-limited request. Transient 5xx / timeout / network failures have their
+// own, separate bounded retry budget below; every other non-2xx status
+// (400/401/403/404, ...) remains immediately non-retryable.
 const MAX_ATTEMPTS_ON_429 = 2;
+
+// Bounded transient-failure retry (separate budget from the 429 one above).
+// Retried: HTTP 500/502/503/504, and request timeout / abort / network
+// interruption (fetch itself throwing). Not retried: every other status
+// (400/401/403/404/...), which are deterministic client/config errors.
+// Worst case waits: 5xx -> 1s + 2s (2 retries); timeout/abort/network -> 1s
+// (1 retry only, because each attempt may burn the full request timeout).
+const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
+const MAX_RETRIES_ON_TRANSIENT_STATUS = 2;
+const MAX_RETRIES_ON_NETWORK_FAILURE = 1;
+const TRANSIENT_BACKOFF_BASE_MS = 1000;
+// A Retry-After larger than this is not honored by waiting (it would make a
+// GitHub Actions step impractical); the request is failed instead.
+const MAX_TRANSIENT_RETRY_DELAY_MS = 30000;
 
 // Used only when a 429 response has no usable retry-delay value from any
 // source (header, RetryInfo detail, or message text).
@@ -31,15 +46,12 @@ const FALLBACK_RETRY_DELAY_MS = 2000;
 // (e.g. Research claim extraction) and LLMRouter's failover -- forever.
 // Applied per attempt (each 429 retry gets its own fresh timeout), same
 // AbortController pattern already used by retrieveSource()/RssSource.js
-// and by GroqProvider.js. Not a retry: a timeout still throws, exactly
+// and by other fetch callers. Not a retry on its own: a timeout still throws, exactly
 // like any other fetch failure.
 //
-// Provider-specific, not shared with GroqProvider.js's own identically-
-// named-in-spirit constant (each provider module defines its own copy).
-// Originally 30000ms, matching Groq's budget. GitHub Actions run
+// Provider-specific constant. Originally 30000ms. GitHub Actions run
 // 36219518358 showed a legitimate Gemini claim-extraction call
-// (promptChars=8888, during Research's Groq-cooldown -> Gemini-fallback
-// path) aborted at exactly that 30s mark with no non-2xx response ever
+// (promptChars=8888) aborted at exactly that 30s mark with no non-2xx response ever
 // received -- i.e. Gemini was still working, not hung, when the timeout
 // fired. Raised to 60000ms so a real, larger research prompt has room to
 // complete.
@@ -60,9 +72,8 @@ const FALLBACK_RETRY_DELAY_MS = 2000;
 // once, so a real prompt more than double the size of the one that
 // justified 60000ms still has comfortable headroom. A request that is
 // genuinely hung is still bounded, just at a larger, explicit ceiling.
-// This does not touch GroqProvider.js's own constant/behavior (its
-// MAX_429_RETRY_DELAY_MS is untouched) and does not change Gemini's 429
-// retry count, retry-delay sourcing, or cooldown logic below.
+// This does not change Gemini's 429 retry count, retry-delay sourcing, or
+// cooldown logic below.
 const GEMINI_REQUEST_TIMEOUT_MS = 120000;
 
 // Provider-local pacing floor, added after a real GitHub Actions run hit
@@ -126,6 +137,25 @@ function extractGeminiRetryDelayMs(providerBody) {
 }
 
 /**
+ * True for a fetch() rejection that is a timeout/abort/network interruption
+ * (our own AbortController timeout, a DNS/socket failure, a reset), as
+ * opposed to a programming error. Safe to retry: generateContent has no
+ * side effects.
+ */
+function isTransientNetworkError(err) {
+  if (!err) return false;
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') return true;
+  if (err instanceof TypeError) return true; // undici: "fetch failed"
+  const code = err.code ?? err.cause?.code;
+  return typeof code === 'string' && /^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|UND_ERR_)/.test(code);
+}
+
+/** Exponential backoff: 1s, 2s, 4s... for retry number `retryNumber` (1-based). */
+function transientBackoffMs(retryNumber) {
+  return TRANSIENT_BACKOFF_BASE_MS * 2 ** (retryNumber - 1);
+}
+
+/**
  * Reads and parses a non-2xx Gemini response body exactly once. Returns
  * `{ providerBody, providerMessage, retryDelayMs }` -- the parsed JSON
  * body (or a bounded plain-text excerpt if the body wasn't JSON), the
@@ -178,14 +208,11 @@ function buildGeminiRequestError(res, { providerBody, providerMessage }) {
 /**
  * Real implementation of the 'gemini-free' provider id (see candidates.js /
  * REGISTRY and ADR-0001's LLMProvider abstraction). Google's Gemini
- * Developer API (generativelanguage.googleapis.com), using a free-tier
- * model, added to unblock the Discovery LLM workload from Groq's free-tier
- * TPM limit -- Groq's integration is untouched (see GroqProvider.js) and
- * remains selectable via config.llmProviderPriority / the router's normal
- * fallthrough.
+ * Developer API (generativelanguage.googleapis.com), using a
+ * model. Gemini is the sole production LLM provider.
  *
- * Mirrors GroqProvider's fetchImpl-injection pattern so tests never make a
- * real network call and never need a real key.
+ * Uses a fetchImpl-injection pattern so tests never make a real network call
+ * and never need a real key.
  *
  * Contract (LLMProvider): complete() returns exactly
  * { text, model, requestId, inputTokens, outputTokens, estimatedCost, isPaid }
@@ -200,8 +227,10 @@ function buildGeminiRequestError(res, { providerBody, providerMessage }) {
  * is retried once (see MAX_ATTEMPTS_ON_429), waiting for whichever of these
  * yields a value first: the Retry-After header, Gemini's own RetryInfo
  * detail, the "Please retry in Ns" text in its message, or otherwise
- * FALLBACK_RETRY_DELAY_MS. Every other non-2xx status remains immediately
- * non-retryable. This is transport-layer resilience only: it does not
+ * FALLBACK_RETRY_DELAY_MS. HTTP 500/502/503/504 are retried up to twice with
+ * 1s/2s backoff (Retry-After honored, capped at 30s), and a timeout / abort /
+ * network interruption is retried once. Every other non-2xx status
+ * (400/401/403/404, ...) remains immediately non-retryable. This is transport-layer resilience only: it does not
  * change provider selection (LLMRouter is untouched), request semantics,
  * or the success/error contract shapes documented above.
  */
@@ -232,8 +261,7 @@ export class GeminiProvider extends LLMProvider {
     this._now = nowImpl;
     // Timestamp (per nowImpl) that the most recent complete() call started
     // its request at. null until the first call. Instance-scoped, so
-    // pacing is per-GeminiProvider-instance -- Groq/OpenRouter, and any
-    // other provider, are entirely unaffected (see module docstring).
+    // pacing is per-GeminiProvider-instance (see module docstring).
     this._lastRequestStartedAt = null;
   }
 
@@ -286,7 +314,13 @@ export class GeminiProvider extends LLMProvider {
     await this._waitForPacingSlot();
 
     let res;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS_ON_429; attempt++) {
+    // Independent, bounded retry budgets. The 429 budget is unchanged
+    // (MAX_ATTEMPTS_ON_429 - 1 retries); transient 5xx and
+    // timeout/abort/network failures each have their own small budget.
+    let retries429 = 0;
+    let retriesStatus = 0;
+    let retriesNetwork = 0;
+    for (let attempt = 1; ; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
       try {
@@ -299,6 +333,16 @@ export class GeminiProvider extends LLMProvider {
           body: JSON.stringify(body),
           signal: controller.signal
         }), (r) => ({ status: r?.status }));
+      } catch (err) {
+        // Timeout / abort / network interruption: no response was received.
+        if (isTransientNetworkError(err) && retriesNetwork < MAX_RETRIES_ON_NETWORK_FAILURE) {
+          retriesNetwork++;
+          const delayMs = transientBackoffMs(retriesNetwork);
+          recordRetrySleep(delayMs); // diagnostics only
+          await traceAsync('llm.retry.sleep', { provider: 'gemini-free', delayMs, reason: 'network' }, () => this._sleep(delayMs));
+          continue;
+        }
+        throw err;
       } finally {
         clearTimeout(timer);
       }
@@ -306,38 +350,50 @@ export class GeminiProvider extends LLMProvider {
       if (res.ok) break;
 
       // The body is read at most once per attempt (never again below),
-      // whether this attempt is the final failure or a retryable 429.
+      // whether this attempt is the final failure or a retryable one.
       const errorBody = await traceAsync('llm.http.errorBody', { provider: 'gemini-free', status: res.status }, () => readGeminiErrorBody(res));
 
-      // Every other non-2xx status (400/401/403/404/5xx, etc.) throws
-      // immediately here, exactly as before this change -- unaffected by
-      // Phase 1 (provider cooldown/health-memory), which is scoped to 429
-      // rate-limit responses only (never a generic failure).
+      // Transient server errors: bounded exponential backoff, honoring
+      // Retry-After when present (but never waiting longer than
+      // MAX_TRANSIENT_RETRY_DELAY_MS -- then the request fails instead).
+      if (TRANSIENT_STATUSES.has(res.status)) {
+        if (retriesStatus < MAX_RETRIES_ON_TRANSIENT_STATUS) {
+          const retryAfterMs = parseSecondsToMs(res.headers?.get?.('retry-after'));
+          const delayMs = retryAfterMs ?? transientBackoffMs(retriesStatus + 1);
+          if (delayMs <= MAX_TRANSIENT_RETRY_DELAY_MS) {
+            retriesStatus++;
+            recordRetrySleep(delayMs); // diagnostics only
+            await traceAsync('llm.retry.sleep', { provider: 'gemini-free', delayMs, reason: `http_${res.status}` }, () => this._sleep(delayMs));
+            continue;
+          }
+        }
+        throw buildGeminiRequestError(res, errorBody);
+      }
+
+      // Every other non-2xx status except 429 (400/401/403/404, etc.) throws
+      // immediately -- deterministic client/config errors are never
+      // retried. Provider cooldown/health-memory is scoped to 429 only.
       if (res.status !== 429) {
         throw buildGeminiRequestError(res, errorBody);
       }
 
       recordLlm429(); // diagnostics only
-      // Same delay-source order and fallback as before this change; only
-      // now computed once per 429 response so both branches below (retry
-      // sleep, or the exhausted-retry cooldown) can use the same value.
+      // Delay-source order and fallback unchanged; computed once per 429
+      // response so both branches below can use the same value.
       const delayMs = parseSecondsToMs(res.headers?.get?.('retry-after'))
         ?? errorBody.retryDelayMs
         ?? FALLBACK_RETRY_DELAY_MS;
 
-      // Only up to MAX_ATTEMPTS_ON_429 total attempts -- an exhausted 429
-      // retry still throws immediately here, exactly as before this
-      // change. Phase 1 adds: the provider is still rate-limited, so
-      // record a cooldown (using the same delay the exhausted retry itself
-      // would have slept for) before throwing, so LLMRouter can skip this
-      // provider on the next, independent complete() call instead of
-      // paying this same sleep again.
-      if (attempt === MAX_ATTEMPTS_ON_429) {
+      // An exhausted 429 retry records a cooldown (the same delay the retry
+      // itself would have slept for) before throwing, so LLMRouter can skip
+      // this provider on the next, independent complete() call.
+      if (retries429 + 1 >= MAX_ATTEMPTS_ON_429) {
         recordProviderRateLimit('gemini-free', delayMs);
         traceEvent('llm.provider.cooldown.recorded', { provider: 'gemini-free', cooldownMs: delayMs });
         throw buildGeminiRequestError(res, errorBody);
       }
 
+      retries429++;
       recordRetrySleep(delayMs); // diagnostics only
       await traceAsync('llm.retry.sleep', { provider: 'gemini-free', delayMs }, () => this._sleep(delayMs));
     }
@@ -345,14 +401,18 @@ export class GeminiProvider extends LLMProvider {
     const data = await traceAsync('llm.http.body', { provider: 'gemini-free' }, () => res.json());
     const parts = data?.candidates?.[0]?.content?.parts;
     const text = Array.isArray(parts) ? parts.map((p) => p?.text ?? '').join('') : '';
-    if (!text) {
-      throw new Error('GeminiProvider received a response with no usable completion text.');
-    }
-
-    // Observability only: Gemini's `candidates[0].finishReason` (e.g. 'STOP',
-    // 'MAX_TOKENS'), added only when present so the result shape is otherwise
-    // unchanged.
+    // Observability: Gemini's `candidates[0].finishReason` (e.g. 'STOP',
+    // 'MAX_TOKENS'), added to the result only when present so the result
+    // shape is otherwise unchanged.
     const finishReason = data?.candidates?.[0]?.finishReason;
+    if (!text) {
+      const emptyErr = new Error('GeminiProvider received a response with no usable completion text.');
+      // Machine-readable, so callers (research claim extraction) can tell an
+      // empty completion from a transport failure and see why it ended.
+      emptyErr.code = 'EMPTY_COMPLETION';
+      emptyErr.finishReason = typeof finishReason === 'string' ? finishReason : null;
+      throw emptyErr;
+    }
 
     return {
       text,

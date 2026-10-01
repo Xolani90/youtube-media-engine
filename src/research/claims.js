@@ -4,17 +4,66 @@ import { traceEvent } from '../diagnostics/trace.js';
 
 const CLAIM_TYPES = Object.values(CLAIM_TYPE);
 
-// Observability only (no behavior depends on these). Distinguishes the ways
-// an extraction completion can end up as a given number of claims, because
-// a parse failure and a genuine "[]" are both turned into zero claims below
-// and were previously indistinguishable in every log and decision row.
+// Distinguishes the ways an extraction completion ends. A genuine "[]"
+// (PARSED_ZERO_CLAIMS) is the only legitimate zero-claim result; every
+// outcome in EXTRACTION_FAILURE_OUTCOMES is a failure (see extractClaims).
 export const EXTRACTION_PARSE_OUTCOME = Object.freeze({
   PARSED_CLAIMS: 'parsed_claims',           // valid JSON array, >= 1 element
   PARSED_ZERO_CLAIMS: 'parsed_zero_claims', // valid JSON array, 0 elements
   PARSED_NON_ARRAY: 'parsed_non_array',     // valid JSON, but not an array (treated as no claims)
   EMPTY_CONTENT: 'empty_content',           // model content empty/whitespace-only
-  PARSE_FAILED: 'parse_failed'              // non-empty content that is not valid JSON (e.g. truncated)
+  PARSE_FAILED: 'parse_failed',             // non-empty content that is not valid JSON (e.g. truncated)
+  TRUNCATED: 'truncated',                   // provider reported the generation hit its output limit / ended abnormally
+  PROVIDER_FAILED: 'provider_failed'        // the provider call itself failed (after the provider's own transport retries)
 });
+
+// Outcomes that are extraction FAILURES, never evidence and never a
+// legitimate zero-claim result. PARSED_ZERO_CLAIMS (a valid "[]") is the only
+// way an extraction produces zero claims without failing.
+export const EXTRACTION_FAILURE_OUTCOMES = Object.freeze([
+  EXTRACTION_PARSE_OUTCOME.PARSED_NON_ARRAY,
+  EXTRACTION_PARSE_OUTCOME.EMPTY_CONTENT,
+  EXTRACTION_PARSE_OUTCOME.PARSE_FAILED,
+  EXTRACTION_PARSE_OUTCOME.TRUNCATED,
+  EXTRACTION_PARSE_OUTCOME.PROVIDER_FAILED
+]);
+
+// Provider finish reasons (OpenAI-style 'length'; Gemini 'MAX_TOKENS' and
+// other abnormal terminations) that mean the output is incomplete or was
+// withheld. Compared case-insensitively. A response ending this way is not
+// trusted even if its text happens to parse.
+const INCOMPLETE_FINISH_REASONS = new Set([
+  'length', 'max_tokens', 'max_output_tokens',
+  'safety', 'recitation', 'blocklist', 'prohibited_content', 'spii', 'other'
+]);
+
+export function isIncompleteFinishReason(finishReason) {
+  return typeof finishReason === 'string' && INCOMPLETE_FINISH_REASONS.has(finishReason.trim().toLowerCase());
+}
+
+/**
+ * Thrown when claim extraction could not establish a valid extraction result
+ * (after exactly one retry where applicable). Carries metadata only -- never
+ * model output or source text. This is deliberately NOT a zero-claim result.
+ */
+export class ExtractionFailureError extends Error {
+  constructor({ parseOutcome, finishReason = null, attempts = 1, providerUsed = null, model = null, outputTokens = null, contentLength = 0, cause = null }) {
+    super(`Claim extraction failed: ${parseOutcome} (finishReason=${finishReason ?? 'absent'}, attempts=${attempts})${cause?.message ? `: ${cause.message}` : ''}`);
+    this.name = 'ExtractionFailureError';
+    this.parseOutcome = parseOutcome;
+    this.finishReason = finishReason;
+    this.attempts = attempts;
+    this.providerUsed = providerUsed;
+    this.model = model;
+    this.outputTokens = outputTokens;
+    this.contentLength = contentLength;
+    if (cause) this.cause = cause;
+  }
+}
+
+// One bounded retry (two attempts total) for an extraction failure. Never
+// recursive; never more.
+const MAX_EXTRACTION_ATTEMPTS = 2;
 
 // Recognizes a response that is EXACTLY one Markdown code fence wrapping
 // the whole payload and nothing else: optional ```json / ```JSON / bare
@@ -51,7 +100,10 @@ function unwrapRecognizedFence(text) {
  * content length, finish reason, parse outcome, proposed claim count); it never
  * carries model output or source text and no caller behavior depends on it.
  *
- * @returns {Promise<{claims: Array<{claim, claim_type, is_load_bearing, identity}>, providerUsed, model, rawOutput, estimatedCost, isPaid, diagnostics: {provider, model, inputTokens, outputTokens, contentLength, finishReason, parseOutcome, proposedClaimCount}}>}
+ * Throws ExtractionFailureError (after one bounded retry) when no valid extraction
+ * result can be established -- see EXTRACTION_FAILURE_OUTCOMES.
+ *
+ * @returns {Promise<{claims: Array<{claim, claim_type, is_load_bearing, identity}>, providerUsed, model, rawOutput, estimatedCost, isPaid, diagnostics: {provider, model, inputTokens, outputTokens, contentLength, finishReason, parseOutcome, proposedClaimCount, attempts}}>}
  */
 export async function extractClaims({ sourceText, coreQuestion, sourceRole = null, sourceUrl = null }, llmRouter) {
   const prompt = [
@@ -83,29 +135,40 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
     untrustedSourceBlock('SOURCE TEXT', sourceText || '', { sourceRole, sourceUrl })
   ].join('\n');
 
-  const { result, providerUsed } = await llmRouter.complete({ prompt });
-
-  // Observability: `parseOutcome` is recorded alongside the existing parse,
-  // never instead of it. The try/catch and the non-array fallback below are
-  // exactly as before -- an unparseable, empty or non-array response still
-  // becomes [] and never throws.
-  let parsed;
-  let parseOutcome;
-  try {
-    parsed = JSON.parse(unwrapRecognizedFence(result.text));
-    parseOutcome = EXTRACTION_PARSE_OUTCOME.PARSED_CLAIMS; // refined below
-  } catch {
-    parsed = [];
-    const isEmpty = typeof result.text !== 'string' || result.text.trim().length === 0;
-    parseOutcome = isEmpty ? EXTRACTION_PARSE_OUTCOME.EMPTY_CONTENT : EXTRACTION_PARSE_OUTCOME.PARSE_FAILED;
-  }
-  if (!Array.isArray(parsed)) {
-    if (parseOutcome === EXTRACTION_PARSE_OUTCOME.PARSED_CLAIMS) {
-      parseOutcome = EXTRACTION_PARSE_OUTCOME.PARSED_NON_ARRAY;
-    }
-    parsed = [];
+  // Fail-closed extraction: an empty, malformed, non-array, truncated or
+  // provider-failed completion is an extraction FAILURE (one bounded retry,
+  // then ExtractionFailureError) -- never a silent zero-claim result. Only a
+  // valid JSON array (including a valid "[]") that was not reported as
+  // truncated establishes an extraction result. The parser is not loosened:
+  // no partial recovery from truncated JSON.
+  let last = null;
+  for (let attempt = 1; attempt <= MAX_EXTRACTION_ATTEMPTS; attempt++) {
+    last = await attemptExtraction(prompt, llmRouter, attempt);
+    if (last.ok) break;
+    traceEvent('research.claimExtraction.failedAttempt', {
+      attempt, parseOutcome: last.parseOutcome, finishReason: last.finishReason ?? 'absent',
+      willRetry: attempt < MAX_EXTRACTION_ATTEMPTS && last.parseOutcome !== EXTRACTION_PARSE_OUTCOME.PROVIDER_FAILED
+    });
+    // A provider-level failure already received the provider's own bounded
+    // transport retries; an extraction-level retry is for bad/empty/truncated
+    // OUTPUT, not for repeating a failed transport.
+    if (last.parseOutcome === EXTRACTION_PARSE_OUTCOME.PROVIDER_FAILED) break;
   }
 
+  if (!last.ok) {
+    throw new ExtractionFailureError({
+      parseOutcome: last.parseOutcome,
+      finishReason: last.finishReason,
+      attempts: last.attempt,
+      providerUsed: last.providerUsed,
+      model: last.model,
+      outputTokens: last.outputTokens,
+      contentLength: last.contentLength,
+      cause: last.cause
+    });
+  }
+
+  const { result, providerUsed, parsed } = last;
   const claims = parsed.map((c) => ({
     claim: typeof c?.claim === 'string' ? c.claim : null,
     claim_type: typeof c?.claim_type === 'string' ? c.claim_type : null,
@@ -115,9 +178,9 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
     identity: c?.identity && typeof c.identity === 'object' && !Array.isArray(c.identity) ? c.identity : null
   }));
 
-  if (parseOutcome === EXTRACTION_PARSE_OUTCOME.PARSED_CLAIMS && claims.length === 0) {
-    parseOutcome = EXTRACTION_PARSE_OUTCOME.PARSED_ZERO_CLAIMS;
-  }
+  const parseOutcome = claims.length === 0
+    ? EXTRACTION_PARSE_OUTCOME.PARSED_ZERO_CLAIMS
+    : EXTRACTION_PARSE_OUTCOME.PARSED_CLAIMS;
 
   // Metadata only: never the model response or source text (see also the
   // trace module's own safe-token filtering). `finishReason` is null when
@@ -130,7 +193,8 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
     contentLength: typeof result.text === 'string' ? result.text.length : 0,
     finishReason: result.finishReason ?? null,
     parseOutcome,
-    proposedClaimCount: claims.length
+    proposedClaimCount: claims.length,
+    attempts: last.attempt
   };
   traceEvent('research.claimExtraction.result', {
     ...diagnostics,
@@ -146,6 +210,57 @@ export async function extractClaims({ sourceText, coreQuestion, sourceRole = nul
     isPaid: result.isPaid,
     diagnostics
   };
+}
+
+/**
+ * One extraction attempt. Returns { ok: true, result, providerUsed, parsed,
+ * attempt } or { ok: false, parseOutcome, finishReason, ... }; never throws
+ * for a provider/parse problem (those are classified, not swallowed).
+ */
+async function attemptExtraction(prompt, llmRouter, attempt) {
+  let routed;
+  try {
+    routed = await llmRouter.complete({ prompt });
+  } catch (err) {
+    // The router wraps provider errors; recover the machine-readable detail.
+    const detail = Array.isArray(err?.failures) && err.failures.length > 0 ? err.failures[err.failures.length - 1] : err;
+    const finishReason = detail?.finishReason ?? null;
+    const isEmpty = detail?.code === 'EMPTY_COMPLETION';
+    let parseOutcome = EXTRACTION_PARSE_OUTCOME.PROVIDER_FAILED;
+    if (isEmpty) {
+      parseOutcome = isIncompleteFinishReason(finishReason)
+        ? EXTRACTION_PARSE_OUTCOME.TRUNCATED
+        : EXTRACTION_PARSE_OUTCOME.EMPTY_CONTENT;
+    }
+    return { ok: false, attempt, parseOutcome, finishReason, providerUsed: null, model: null, outputTokens: null, contentLength: 0, cause: err };
+  }
+
+  const { result, providerUsed } = routed;
+  const text = result?.text;
+  const finishReason = result?.finishReason ?? null;
+  const base = {
+    ok: false, attempt, finishReason, providerUsed,
+    model: result?.model ?? null, outputTokens: result?.outputTokens ?? null,
+    contentLength: typeof text === 'string' ? text.length : 0
+  };
+
+  if (typeof text !== 'string' || text.trim().length === 0) {
+    return { ...base, parseOutcome: isIncompleteFinishReason(finishReason) ? EXTRACTION_PARSE_OUTCOME.TRUNCATED : EXTRACTION_PARSE_OUTCOME.EMPTY_CONTENT };
+  }
+  // Truncation / abnormal termination is a failure even if the text parses.
+  if (isIncompleteFinishReason(finishReason)) {
+    return { ...base, parseOutcome: EXTRACTION_PARSE_OUTCOME.TRUNCATED };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(unwrapRecognizedFence(text));
+  } catch {
+    return { ...base, parseOutcome: EXTRACTION_PARSE_OUTCOME.PARSE_FAILED };
+  }
+  if (!Array.isArray(parsed)) {
+    return { ...base, parseOutcome: EXTRACTION_PARSE_OUTCOME.PARSED_NON_ARRAY };
+  }
+  return { ok: true, attempt, result, providerUsed, parsed };
 }
 
 /**

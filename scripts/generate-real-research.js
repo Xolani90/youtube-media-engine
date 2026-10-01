@@ -1,8 +1,8 @@
 // Manual, opt-in, one-shot script. NOT part of `npm test`, NOT run at
 // application startup, NOT part of the autonomous runner.
 //
-// Purpose: prove that a real 'groq-free' completion (via the existing
-// GroqProvider / LLMRouter / candidates.js registry) can be consumed by
+// Purpose: prove that a real 'gemini-free' completion (via the existing
+// GeminiProvider / LLMRouter / candidates.js registry) can be consumed by
 // the existing, unmodified runResearchProject() pipeline end to end --
 // real claim extraction, real deterministic source classification, real
 // deterministic evidence grading, real completeness evaluation, real
@@ -18,7 +18,7 @@
 // and RETRIEVAL are deterministic-by-design in this codebase (see
 // src/research/ResearchSourceProvider.js, retrieval.js) and are not the
 // LLM boundary under test here; only the Research-stage claim-extraction
-// LLMRouter is real Groq. This keeps the harness to real API call(s)
+// LLMRouter is real Gemini. This keeps the harness to real API call(s)
 // against the actual extractClaims() -> llmRouter.complete() boundary in
 // src/research/claims.js, without faking or bypassing that boundary and
 // without reproducing or duplicating Research's own validation logic.
@@ -28,14 +28,14 @@
 // autonomous runner is touched or exercised here.
 //
 // Usage:
-//   GROQ_FREE_API_KEY=... node scripts/generate-real-research.js
+//   GEMINI_FREE_API_KEY=... node scripts/generate-real-research.js
 //
 // Exit code is 0 only if the Research project genuinely reaches
 // RESEARCH_COMPLETE via the real, unmodified pipeline with the LLM call
-// answered by groq-free. Any failure -- missing key, no usable claims,
+// answered by gemini-free. Any failure -- missing key, no usable claims,
 // thrown error -- exits non-zero with the real error/reason printed. No
 // fallback to any other provider is attempted; the router is constructed
-// with priority strictly limited to ['groq-free'].
+// with priority strictly limited to ['gemini-free'].
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -48,7 +48,7 @@ import { runResearchProject } from '../src/research/pipeline.js';
 import researchPolicy from '../config/research_policy.json' with { type: 'json' };
 
 function freshStorage() {
-  const dbPath = path.join(os.tmpdir(), `research-real-groq-${Date.now()}-${Math.random()}.db`);
+  const dbPath = path.join(os.tmpdir(), `research-real-gemini-${Date.now()}-${Math.random()}.db`);
   return { storage: new SqliteStorageDriver({ dbPath }), dbPath };
 }
 
@@ -66,7 +66,7 @@ function cleanup(storage, dbPath) {
 function seedHandedOffOpportunity(storage, { coreQuestionType = 'FACTUAL' } = {}) {
   const id = crypto.randomUUID();
   const proposition = {
-    subject: 'Real Groq research harness subject', target_audience: 'Test audience',
+    subject: 'Real Gemini research harness subject', target_audience: 'Test audience',
     audience_problem: 'Test problem',
     core_question: 'Did the product launch cause a measurable sales increase?',
     gap: 'g', angle: 'a', differentiation: 'd', commercial_relevance: 'c',
@@ -74,7 +74,7 @@ function seedHandedOffOpportunity(storage, { coreQuestionType = 'FACTUAL' } = {}
   };
   storage.run(
     `INSERT INTO opportunities (id, title, source, discovered_at, status, opportunity_proposition)
-     VALUES (?, 'Real Groq research generation smoke opportunity', 'rss', ?, 'HANDED_TO_RESEARCH', ?)`,
+     VALUES (?, 'Real Gemini research generation smoke opportunity', 'rss', ?, 'HANDED_TO_RESEARCH', ?)`,
     [id, new Date().toISOString(), JSON.stringify(proposition)]
   );
   return id;
@@ -88,7 +88,7 @@ class SingleSourceProvider extends ResearchSourceProvider {
     super();
     this.urls = urls;
   }
-  get id() { return 'single-source-real-groq-harness'; }
+  get id() { return 'single-source-real-gemini-harness'; }
   async healthCheck() { return true; }
   async discoverCandidates() {
     return { candidates: this.urls.map((url, i) => ({ url, title: `t${i}`, snippet: 's' })) };
@@ -106,10 +106,10 @@ function fakeFetch(bodyByUrl) {
 }
 
 async function main() {
-  const apiKey = process.env.GROQ_FREE_API_KEY;
+  const apiKey = process.env.GEMINI_FREE_API_KEY;
   if (!apiKey) {
     console.error(
-      'FAILED: GROQ_FREE_API_KEY is not set in the process environment.\n' +
+      'FAILED: GEMINI_FREE_API_KEY is not set in the process environment.\n' +
       'This script requires a real key and will not fall back to any other provider.'
     );
     process.exitCode = 1;
@@ -129,13 +129,13 @@ async function main() {
       [url]: '<html><body>Acme reported one billion dollars in Q3 revenue following the product launch.</body></html>'
     });
 
-    // Explicitly limited to groq-free only for the Research claim-
+    // Explicitly limited to gemini-free only for the Research claim-
     // extraction call -- no reliance on the unrelated default provider
     // ordering in config.llmProviderPriority, and no silent fallback to
     // any other provider id (Gemini, OpenRouter, local-stub, etc.).
-    const llmRouter = new LLMRouter({ priority: ['groq-free'] });
+    const llmRouter = new LLMRouter({ priority: ['gemini-free'] });
 
-    console.log('Requesting real Research claim extraction via provider: groq-free ...');
+    console.log('Requesting real Research claim extraction via provider: gemini-free ...');
     const result = await runResearchProject({
       storage, opportunityId, sourceProvider: provider, llmRouter, policy: researchPolicy,
       classification: { authoritativeDomains: ['acme.com'] },
@@ -152,7 +152,7 @@ async function main() {
       return;
     }
 
-    // The model Groq actually returned is not part of runResearchProject()'s
+    // The model Gemini actually returned is not part of runResearchProject()'s
     // return shape -- the pipeline logs it into decision_log's
     // config_snapshot (CLAIM_EXTRACTION/EXTRACTED, src/research/pipeline.js),
     // the same place it already logs it for every other provider. Read it
@@ -169,8 +169,8 @@ async function main() {
        WHERE stage = 'CLAIM_EXTRACTION' AND decision = 'EXTRACTED'
        ORDER BY created_at DESC LIMIT 1`
     );
-    const groqProvider = extractionLog ? extractionLog.provider : null;
-    const groqModel = extractionLog && extractionLog.config_snapshot
+    const geminiProvider = extractionLog ? extractionLog.provider : null;
+    const geminiModel = extractionLog && extractionLog.config_snapshot
       ? JSON.parse(extractionLog.config_snapshot).model
       : null;
 
@@ -178,10 +178,10 @@ async function main() {
     cleanup(storage, dbPath);
     cleanedUp = true;
 
-    console.log('SUCCESS: real Groq-driven Research project reached RESEARCH_COMPLETE.');
+    console.log('SUCCESS: real Gemini-driven Research project reached RESEARCH_COMPLETE.');
     console.log(JSON.stringify({
-      provider: groqProvider,
-      model: groqModel,
+      provider: geminiProvider,
+      model: geminiModel,
       created: true,
       researchProjectId: project.id,
       opportunityId,
@@ -197,7 +197,7 @@ async function main() {
     if (!cleanedUp) {
       try { cleanup(storage, dbPath); } catch { /* best-effort cleanup */ }
     }
-    console.error('FAILED: unexpected error while running the real Groq Research generation.');
+    console.error('FAILED: unexpected error while running the real Gemini Research generation.');
     console.error(err.stack || err.message || err);
     process.exitCode = 1;
   }

@@ -145,12 +145,22 @@ export class LLMRouter {
         );
         return { result, providerUsed: provider.id, attempted };
       } catch (err) {
-        failures.push({ id, error: err?.message ?? String(err) });
+        failures.push({
+          id,
+          error: err?.message ?? String(err),
+          // Machine-readable details, preserved so callers can classify the
+          // failure (e.g. an empty completion vs. a transport error).
+          code: err?.code ?? null,
+          status: err?.status ?? null,
+          finishReason: err?.finishReason ?? null
+        });
       }
     }
 
     const detail = failures.map((f) => `${f.id}: ${f.error}`).join('; ');
-    throw new Error(`All eligible LLM providers failed. Failures: ${detail}`);
+    const allFailed = new Error(`All eligible LLM providers failed. Failures: ${detail}`);
+    allFailed.failures = failures;
+    throw allFailed;
   }
 }
 

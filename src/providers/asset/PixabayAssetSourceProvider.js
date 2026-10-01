@@ -9,7 +9,7 @@ import { AssetSourceProvider } from './AssetSourceProvider.js';
  * one job: acquire ONE real visual asset (image or video_clip) from the
  * Pixabay REST API and return it in the shape AssetSourceProvider
  * defines, mirroring the fetchImpl-injection pattern already used by
- * GroqProvider (src/providers/llm/GroqProvider.js) and YouTubeAdapter
+ * GeminiProvider (src/providers/llm/GeminiProvider.js) and YouTubeAdapter
  * (src/publication/youtube/YouTubeAdapter.js) so tests never need a
  * real key or the network.
  *

@@ -3,7 +3,7 @@
  * Business logic (scoring, research, script generation, etc.) must depend
  * ONLY on this interface, never on a specific provider's SDK or API shape.
  *
- * Providers are pluggable candidates (see ADR-0001) — Gemini/Groq/OpenRouter
+ * Providers are pluggable candidates (see ADR-0001) — Gemini/OpenRouter
  * are initial implementations, not architectural commitments.
  */
 export class LLMProvider {

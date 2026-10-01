@@ -2,10 +2,10 @@
 // autonomous runner, not a replacement for scripts/generate-real-research.js.
 //
 // Purpose: call the real, unmodified extractClaims() from
-// src/research/claims.js exactly once, against real 'groq-free', using the
+// src/research/claims.js exactly once, against real 'gemini-free', using the
 // same essential source text / core question as the Research harness, and
 // print the RAW returned values with no normalization, repair, trimming,
-// or regex extraction -- so a human can see exactly what Groq returned and
+// or regex extraction -- so a human can see exactly what Gemini returned and
 // distinguish (A) malformed/wrapped JSON, (B) valid JSON with no
 // load-bearing claims, (C) valid claims rejected structurally, or (D)
 // something else.
@@ -15,16 +15,16 @@
 // (extractClaims, LLMRouter) and calls them exactly as documented.
 //
 // Usage:
-//   GROQ_FREE_API_KEY=... node scripts/diagnose-real-research-claims.js
+//   GEMINI_FREE_API_KEY=... node scripts/diagnose-real-research-claims.js
 
 import { extractClaims } from '../src/research/claims.js';
 import { LLMRouter } from '../src/providers/llm/router.js';
 
 async function main() {
-  const apiKey = process.env.GROQ_FREE_API_KEY;
+  const apiKey = process.env.GEMINI_FREE_API_KEY;
   if (!apiKey) {
     console.error(
-      'FAILED: GROQ_FREE_API_KEY is not set in the process environment.\n' +
+      'FAILED: GEMINI_FREE_API_KEY is not set in the process environment.\n' +
       'This diagnostic requires a real key and will not fall back to any other provider.'
     );
     process.exitCode = 1;
@@ -36,11 +36,11 @@ async function main() {
   const sourceText = 'Acme reported one billion dollars in Q3 revenue following the product launch.';
   const coreQuestion = 'Did the product launch cause a measurable sales increase?';
 
-  // Explicitly limited to groq-free only -- no fallback to any other
+  // Explicitly limited to gemini-free only -- no fallback to any other
   // provider id.
-  const llmRouter = new LLMRouter({ priority: ['groq-free'] });
+  const llmRouter = new LLMRouter({ priority: ['gemini-free'] });
 
-  console.log('Calling extractClaims() once via provider: groq-free ...');
+  console.log('Calling extractClaims() once via provider: gemini-free ...');
   const extraction = await extractClaims({ sourceText, coreQuestion }, llmRouter);
 
   console.log('\n=== provider metadata ===');

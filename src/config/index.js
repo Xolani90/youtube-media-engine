@@ -178,7 +178,7 @@ export const config = {
 
   // Ordered list of LLM provider IDs to try, in priority order.
   // These are pluggable candidates, not architectural commitments — see ADR-0001.
-  llmProviderPriority: envList('LLM_PROVIDER_PRIORITY', ['gemini-free', 'groq-free', 'openrouter-free']),
+  llmProviderPriority: envList('LLM_PROVIDER_PRIORITY', ['gemini-free']),
 
   opportunityProviderPriority: envList('OPPORTUNITY_PROVIDER_PRIORITY', ['rss']),
 

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { RESEARCH_STAGE, RESEARCH_PROJECT_STATUS, RETRIEVAL_STATUS, EVIDENCE_STATUS, CLAIM_TYPE, CONTRADICTION_RESULT, CONTRADICTION_EXECUTION_STATE } from './constants.js';
 import { acquireSources } from './acquisition.js';
 import { classifySourceRole, classifySourceQuality } from './sourceClassification.js';
-import { extractClaims, validateExtractedClaim } from './claims.js';
+import { extractClaims, validateExtractedClaim, ExtractionFailureError } from './claims.js';
 import { deriveClaimIdentity, summarizeIdentityCoverage } from './claimIdentity.js';
 import { computeEvidenceStatus } from './evidenceGrading.js';
 import { canonicalizePair, recordContradiction, hasUnresolvedContradiction } from './contradictions.js';
@@ -97,6 +97,23 @@ function setEvidenceStatus(storage, claimId, evidenceStatus) {
 }
 
 /**
+ * Discovery query = the proposition's `subject` (the disambiguating entity,
+ * e.g. "OpenAI's Dots proactive assistant") plus the core question. The core
+ * question alone may omit the entity that makes the topic unambiguous (live
+ * run 36628871372: "How does Dots help users..." retrieved a mobile game, an
+ * iPhone accessibility guide and an unrelated receivership notice). The
+ * subject is prepended only when the core question does not already contain it.
+ */
+export function buildResearchQuery(subject, coreQuestion) {
+  const question = typeof coreQuestion === 'string' ? coreQuestion.trim() : '';
+  const anchor = typeof subject === 'string' ? subject.trim() : '';
+  if (!anchor) return coreQuestion;
+  if (!question) return anchor;
+  if (question.toLowerCase().includes(anchor.toLowerCase())) return question;
+  return `${anchor} ${question}`;
+}
+
+/**
  * Runs one opportunity's Research project end to end.
  *
  * Consumes the REAL Discovery -> Research handoff: the opportunity must
@@ -153,7 +170,7 @@ export async function runResearchProject({
 
   // --- Source discovery + bounded acquisition ---
   const acquisitionResult = await acquireSources({
-    provider: sourceProvider, query: coreQuestion, policy, retrieveImpl, fetchImpl
+    provider: sourceProvider, query: buildResearchQuery(proposition.subject, coreQuestion), policy, retrieveImpl, fetchImpl
   });
 
   if (acquisitionResult.discoveryFailed) {
@@ -208,15 +225,39 @@ export async function runResearchProject({
   for (const source of successfulSources) {
     const full = persistedSources.find((s) => s.id === source.id);
     const sourceRow = storage.get('SELECT * FROM sources WHERE id = ?', [source.id]);
-    const extraction = await traceAsync(
-      'research.claimExtraction', { source: source.id },
-      () => extractClaims({ sourceText: sourceRow.content, coreQuestion, sourceRole: sourceRow.role, sourceUrl: sourceRow.url }, llmRouter),
-      (e) => ({ claims: e?.claims?.length })
-    );
+    let extraction;
+    try {
+      extraction = await traceAsync(
+        'research.claimExtraction', { source: source.id },
+        () => extractClaims({ sourceText: sourceRow.content, coreQuestion, sourceRole: sourceRow.role, sourceUrl: sourceRow.url }, llmRouter),
+        (e) => ({ claims: e?.claims?.length })
+      );
+    } catch (err) {
+      // Fail-closed: an extraction that could not establish a valid result
+      // (empty / malformed / truncated / provider failure, after one bounded
+      // retry) is recorded as a FAILURE -- never as a zero-claim EXTRACTED
+      // row -- and the error propagates through the pipeline's existing
+      // failure semantics, exactly as any other provider error does.
+      if (err instanceof ExtractionFailureError) {
+        logDecision(storage, {
+          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
+          decision: 'EXTRACTION_FAILED', reason: err.parseOutcome, provider: err.providerUsed,
+          configSnapshot: {
+            model: err.model, parseOutcome: err.parseOutcome, finishReason: err.finishReason,
+            attempts: err.attempts, outputTokens: err.outputTokens, contentLength: err.contentLength
+          }
+        });
+      }
+      throw err;
+    }
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
       decision: 'EXTRACTED', reason: `${extraction.claims.length}_claims_proposed`, provider: extraction.providerUsed,
-      configSnapshot: { model: extraction.model, estimatedCost: extraction.estimatedCost, isPaid: extraction.isPaid, identity: summarizeIdentityCoverage(extraction.claims) }
+      configSnapshot: {
+        model: extraction.model, estimatedCost: extraction.estimatedCost, isPaid: extraction.isPaid,
+        identity: summarizeIdentityCoverage(extraction.claims),
+        parseOutcome: extraction.diagnostics.parseOutcome, finishReason: extraction.diagnostics.finishReason, attempts: extraction.diagnostics.attempts
+      }
     });
 
     for (const proposed of extraction.claims) {

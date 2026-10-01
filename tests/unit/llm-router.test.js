@@ -310,8 +310,8 @@ class FakeHealthyWithId extends LLMProvider {
 
 // --- Phase 1: provider cooldown / health-memory. These exercise the
 // router's eligibility check against providerHealth.js directly (via
-// recordProviderRateLimit), rather than through a real 429 -- GroqProvider
-// and GeminiProvider's own "an exhausted 429 retry records a cooldown"
+// recordProviderRateLimit), rather than through a real 429 --
+// GeminiProvider's own "an exhausted 429 retry records a cooldown"
 // behavior is covered in their own test files. ---
 
 test('Phase 1 / Test B: a cooled-down provider is skipped without a network call; router selects the next eligible provider, preserving priority among the rest', async () => {

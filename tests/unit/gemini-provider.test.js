@@ -422,7 +422,9 @@ test('complete(): a request that never resolves is aborted after GEMINI_REQUEST_
       });
     });
   };
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+  // A timeout/abort is now retried exactly once (bounded transient retry);
+  // sleepImpl is injected so the 1s backoff never waits in real time.
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl: async () => {} });
 
   const pending = assert.rejects(() => provider.complete({ prompt: 'hi' }), /aborted/i);
   // Let complete()'s pacing-slot await (a real microtask hop, since this is
@@ -441,9 +443,14 @@ test('complete(): a request that never resolves is aborted after GEMINI_REQUEST_
   // ...but a request that never resolves is still bounded: it must be
   // aborted once the full, larger timeout elapses.
   t.mock.timers.tick(60000); // total elapsed: 120000ms
-  await pending;
-
   assert.equal(capturedSignal.aborted, true, 'the request signal must be aborted once GEMINI_REQUEST_TIMEOUT_MS elapses');
+
+  // The single bounded retry then starts a fresh request with its own
+  // 120s timeout; when that also times out the call rejects (no third try).
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(120000);
+  await pending;
 });
 
 test('complete(): a request that resolves after the old 60s timeout, but before the new 120s ceiling, completes successfully without being aborted', async (t) => {

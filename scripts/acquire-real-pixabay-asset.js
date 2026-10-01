@@ -4,7 +4,7 @@
 // Purpose: prove that PixabayAssetSourceProvider can acquire ONE real
 // asset from the real Pixabay API -- a real search request, a real
 // download to a local file, a real SHA-256 checksum -- using an
-// explicitly-provided real API key. Mirrors the existing real Groq
+// explicitly-provided real API key. Mirrors the existing real Gemini
 // harnesses (scripts/generate-real-brief.js, scripts/generate-real-script.js)
 // in shape and discipline: nothing here is wired into Media Production,
 // Asset Provisioning (which does not exist yet), or the runner.
