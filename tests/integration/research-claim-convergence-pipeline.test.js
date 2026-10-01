@@ -339,14 +339,15 @@ test('Gate 5. trusted-first: a trusted claim cannot absorb a later untrusted cla
   } finally { cleanup(storage, dbPath); }
 });
 
-test('Gate 7. exact-text merging is unchanged: identical text still merges even when UNVERIFIED_ORIGIN', async () => {
+test('Gate 7. identical text from another source no longer merges by wording alone (UNVERIFIED_ORIGIN, untrusted)', async () => {
   const { storage, dbPath, result } = await run({
     [A]: [fact(W1, ident())], [B]: [fact(W1, ident())]
   });
   try {
     assert.equal(unverified(storage).length, 2);
-    assert.equal(result.claims.length, 1);
+    assert.equal(result.claims.length, 2);
     assert.equal(decisions(storage, 'MERGED_BY_IDENTITY').length, 0);
-    assert.equal(sourceIdsOf(storage, result.claims[0].id).length, 2);
+    assert.equal(decisions(storage, 'EXACT_TEXT_REJECTED').length, 1);
+    for (const c of result.claims) assert.equal(sourceIdsOf(storage, c.id).length, 1);
   } finally { cleanup(storage, dbPath); }
 });

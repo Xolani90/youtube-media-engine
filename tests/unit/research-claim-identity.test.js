@@ -12,7 +12,7 @@ const fp = (claim, identity, claim_type = 'FACT') => deriveClaimIdentity({ claim
 const TEXT = 'Acme released Widget in March 2026.';
 
 test('fingerprint is deterministic and insensitive to case, punctuation, corporate suffix and qualifier order', () => {
-  const base = fp(TEXT, ident({ qualifiers: ['in Europe', 'Q1 focus'] }));
+  const base = fp('Acme released Widget in March 2026 (Europe, Q1 focus).', ident({ qualifiers: ['in Europe', 'Q1 focus'] }));
   assert.match(base, /^[0-9a-f]{64}$/);
   assert.equal(fp('Acme Inc. released the Widget in March 2026 (Europe, Q1 focus).', ident({ subject: 'ACME, Inc.', object: 'the widget', qualifiers: ['q1 focus', 'In Europe'] })), base);
 });

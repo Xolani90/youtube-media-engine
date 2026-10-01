@@ -59,7 +59,7 @@ function fakeFetch() {
   return async () => ({
     ok: true, status: 200,
     headers: { get: () => 'text/html' },
-    text: async () => '<html><body>Acme reported one billion dollars in Q3 revenue.</body></html>'
+    text: async () => '<html><body>Acme reported $1B in Q3 revenue.</body></html>'
   });
 }
 
@@ -77,6 +77,14 @@ function claimRouter(claimsToReturn) {
 }
 
 const FACT = { claim: 'Acme reported $1B in Q3 revenue.', claim_type: 'FACT', is_load_bearing: true };
+// Same claim with a structured identity fully grounded in its own wording.
+const FACT_ID = {
+  ...FACT,
+  identity: {
+    subject: 'Acme', predicate: 'report', object: 'revenue', qualifiers: ['Q3'], time: null, quantity: 1e9, unit: 'USD',
+    polarity: 'AFFIRMED', modality: 'OCCURRED', relation: 'DESCRIPTIVE'
+  }
+};
 
 async function runWith(urls, claims) {
   const { storage, dbPath } = freshStorage();
@@ -89,17 +97,16 @@ async function runWith(urls, claims) {
   return { storage, dbPath, result };
 }
 
-test('REAL PATH A: one source that yields the same claim twice persists primary+corroborating rows for one source_id, and is NOT VERIFIED', async () => {
+test('REAL PATH A: one source that yields the same claim twice is deduplicated to a single primary link, and is NOT VERIFIED', async () => {
   const { storage, dbPath, result } = await runWith(['https://publisher-one.com/story'], [FACT, FACT]);
   try {
     assert.equal(result.claims.length, 1);
     const claimId = result.claims[0].id;
     const links = storage.all('SELECT source_id, role FROM claim_sources WHERE claim_id = ?', [claimId]);
 
-    // Precondition: the double-role rows really exist for a single source.
-    assert.equal(links.length, 2);
-    assert.equal(new Set(links.map((l) => l.source_id)).size, 1);
-    assert.deepEqual(links.map((l) => l.role).sort(), ['corroborating', 'primary']);
+    // Same source, same wording: deduplicated -- no redundant corroborating row.
+    assert.equal(links.length, 1);
+    assert.deepEqual(links.map((l) => l.role), ['primary']);
 
     assert.equal(result.claims[0].evidence_status, 'PARTIALLY_SUPPORTED');
     const persisted = storage.get('SELECT evidence_status FROM claims WHERE id = ?', [claimId]);
@@ -111,7 +118,7 @@ test('REAL PATH A: one source that yields the same claim twice persists primary+
 
 test('REAL PATH B: two URLs from the same registrable domain corroborating one claim are NOT VERIFIED', async () => {
   const { storage, dbPath, result } = await runWith(
-    ['https://news.example.com/article-a', 'https://www.example.com/article-b'], [FACT]
+    ['https://news.example.com/article-a', 'https://www.example.com/article-b'], [FACT_ID]
   );
   try {
     assert.equal(result.claims.length, 1);
@@ -129,7 +136,7 @@ test('REAL PATH B: two URLs from the same registrable domain corroborating one c
 
 test('REAL PATH C: two URLs from different registrable domains corroborating one claim CAN be VERIFIED', async () => {
   const { storage, dbPath, result } = await runWith(
-    ['https://publisher-one.com/story', 'https://publisher-two.org/story'], [FACT]
+    ['https://publisher-one.com/story', 'https://publisher-two.org/story'], [FACT_ID]
   );
   try {
     assert.equal(result.claims.length, 1);

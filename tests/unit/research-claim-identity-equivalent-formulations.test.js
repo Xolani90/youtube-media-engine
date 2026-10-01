@@ -66,10 +66,11 @@ const dots = (claim, over) => deriveClaimIdentity({
 const DOTS = "In proactive research mode, Dots scan a user's connected apps for ways to help using read-only tools that can't send messages, edit content, or control a computer.";
 
 test('Dots: negation inside a subject relative clause carried by the identity does not veto AFFIRMED', () => {
-  const r = dots(DOTS);
+  const r = dots(DOTS, { qualifiers: ["using read-only tools that can't send messages"] });
   assert.notEqual(r.fingerprint, null, r.reason);
-  assert.notEqual(dots("Dots scan connected apps using read-only tools that don't send messages.").fingerprint, null);
-  assert.notEqual(dots('Dots scan connected apps using read-only tools which cannot send messages.').fingerprint, null);
+  // the carried qualifier must itself be grounded in the claim wording
+  assert.notEqual(dots('Dots scan connected apps using read-only tools that cannot send messages.').fingerprint, null);
+  assert.notEqual(dots('Dots scan connected apps using read-only tools that cannot send messages, edit content, or control a computer.').fingerprint, null);
 });
 
 test('Dots: the relative-clause negation must be carried by the identity, else the veto still applies', () => {
@@ -87,5 +88,5 @@ test('Dots: complementizer "that" and main-clause negations are NOT treated as r
   assert.equal(dots('Dots do not use read-only tools that can\'t send messages.').reason, 'polarity_text_mismatch');
   assert.equal(dots('Read-only tools that can\'t send messages do not require login.', { qualifiers: ['tools that cannot send messages'] }).reason, 'polarity_text_mismatch');
   // genuinely NEGATED and labelled NEGATED still fingerprints
-  assert.notEqual(dots('Dots do not use read-only tools that can\'t send messages.', { polarity: 'NEGATED' }).fingerprint, null);
+  assert.notEqual(dots('Dots do not use read-only tools that can\'t send messages.', { polarity: 'NEGATED', object: 'read-only tools', qualifiers: [] }).fingerprint, null);
 });

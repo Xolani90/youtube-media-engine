@@ -211,11 +211,15 @@ export async function runResearchProject({
 
   // --- Claim extraction + load-bearing classification (LLM-assisted, deterministically validated) ---
   const persistedClaims = [];
-  // key: normalized claim text -> claim id, used only to link additional
-  // (corroborating) sources to an already-extracted equivalent claim.
-  // This is a simple exact-normalized-text match, not NLP-based semantic
-  // clustering.
+  // key: normalized claim text -> claim ids carrying that exact wording.
+  // Exact wording is used ONLY to deduplicate a claim re-extracted from the
+  // SAME source. Identical wording from a different source never creates a
+  // corroborating link by itself: identical text does not prove the same
+  // referent or the same fact, so it must go through the grounded-identity
+  // path (fingerprint) like any other candidate.
   const claimTextIndex = new Map();
+  // claim id -> Set of source ids already linked in this run.
+  const claimSourceIds = new Map();
   // key: deterministic claim-identity fingerprint (see claimIdentity.js) ->
   // { id, claimType, isLoadBearing }. Populated only for FACT claims whose
   // LLM-proposed structured identity passed validation AND agrees with the
@@ -288,9 +292,21 @@ export async function runResearchProject({
       // UNVERIFIED_ORIGIN and missing normalization fail closed, in both
       // arrival orders.
       const identityIndexEligible = proposed.normalization?.convergenceTrusted === true;
-      let claimId = claimTextIndex.get(normalized);
+      let claimId = null;
       let isNewClaim = false;
       let mergedByIdentity = false;
+      const sameTextIds = claimTextIndex.get(normalized) ?? [];
+      // Same exact wording, same source: pure deduplication (no new link,
+      // no corroboration -- the source is already linked to that row).
+      const dedupId = sameTextIds.find((id) => claimSourceIds.get(id)?.has(source.id));
+      if (dedupId) {
+        claimId = dedupId;
+        logDecision(storage, {
+          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+          decision: 'EXACT_TEXT_DEDUPLICATED', reason: 'same_source_same_text',
+          configSnapshot: { sourceId: source.id }
+        });
+      }
       if (!claimId && fingerprint && identityIndexEligible) {
         // Conservative: same fingerprint AND same claim_type AND same
         // is_load_bearing, otherwise the claims stay separate.
@@ -304,7 +320,7 @@ export async function runResearchProject({
         logDecision(storage, {
           runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
           decision: 'MERGED_BY_IDENTITY', reason: 'identity_fingerprint_match',
-          configSnapshot: { fingerprint, sourceId: source.id }
+          configSnapshot: { fingerprint, sourceId: source.id, exactTextMatch: sameTextIds.includes(claimId) }
         });
       }
       let convergenceEligibility = null;
@@ -353,7 +369,17 @@ export async function runResearchProject({
           researchProjectId: project.id, claim: proposed.claim,
           claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing
         });
-        claimTextIndex.set(normalized, claimId);
+        if (sameTextIds.length > 0) {
+          // Identical wording exists on a row from another source but no
+          // grounded fact-identity path proved it is the same fact: keep a
+          // separate row so it stays visible to contradiction analysis.
+          logDecision(storage, {
+            runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+            decision: 'EXACT_TEXT_REJECTED', reason: fingerprint && identityIndexEligible ? 'identity_not_matching' : 'no_grounded_identity',
+            configSnapshot: { sourceId: source.id, matchingClaimIds: sameTextIds }
+          });
+        }
+        claimTextIndex.set(normalized, [...sameTextIds, claimId]);
         if (fingerprint && identityIndexEligible) {
           claimIdentityIndex.set(fingerprint, { id: claimId, claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing });
         }
@@ -372,7 +398,11 @@ export async function runResearchProject({
         });
       }
 
-      linkClaimSource(storage, { claimId, sourceId: source.id, role: isNewClaim ? 'primary' : 'corroborating' });
+      if (!claimSourceIds.get(claimId)?.has(source.id)) {
+        linkClaimSource(storage, { claimId, sourceId: source.id, role: isNewClaim ? 'primary' : 'corroborating' });
+        if (!claimSourceIds.has(claimId)) claimSourceIds.set(claimId, new Set());
+        claimSourceIds.get(claimId).add(source.id);
+      }
       convergenceIndex.noteSource(claimId, source.id);
 
       // Provenance: a reviewer must be able to recover what the source said,

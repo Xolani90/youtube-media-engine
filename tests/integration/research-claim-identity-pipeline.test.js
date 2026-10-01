@@ -241,12 +241,12 @@ test('8. one registrable domain cannot corroborate itself via paraphrase', async
   } finally { cleanup(storage, dbPath); }
 });
 
-test('9. two independent domains still VERIFY under the unchanged policy (exact-text path)', async () => {
+test('9. identical wording with no grounded identity does not corroborate across domains (exact text alone is not evidence)', async () => {
   const text = 'Acme launched Widget in March 2026.';
   const { storage, dbPath, result } = await run({ [A]: [fact(text, null)], [B]: [fact(text, null)] });
   try {
-    assert.equal(result.claims.length, 1);
-    assert.equal(result.claims[0].evidence_status, 'VERIFIED');
+    assert.equal(result.claims.length, 2);
+    assert.ok(result.claims.every((c) => c.evidence_status === 'PARTIALLY_SUPPORTED'));
   } finally { cleanup(storage, dbPath); }
 });
 

@@ -15,7 +15,7 @@ test('negation inside a when/while/if clause does not veto a correctly AFFIRMED 
     "Proactive research lets a dot look for ways to help when you aren't actively working with it.",
     'A Dot performs proactive research when a user is not actively working with it.',
     "When you aren't actively working with it, a dot performs proactive research.",
-    'A Dot keeps working even when the user is not interacting with it.'
+    'A Dot keeps performing proactive research even when the user is not interacting with it.'
   ]) {
     const r = deriveClaimIdentity(fact(claim));
     assert.notEqual(r.fingerprint, null, `${claim} -> ${r.reason}`);
@@ -30,5 +30,5 @@ test('the polarity veto stays two-way: mislabelling either way is still untruste
   assert.equal(deriveClaimIdentity(fact('Dots do not run when the laptop is offline.')).reason, 'polarity_text_mismatch');
   assert.equal(deriveClaimIdentity(fact("When the laptop is offline, Dots don't run.")).reason, 'polarity_text_mismatch');
   // genuinely negated and labelled NEGATED still gets a fingerprint
-  assert.notEqual(deriveClaimIdentity(fact('OpenAI does not train on proactive research.', { polarity: 'NEGATED' })).fingerprint, null);
+  assert.notEqual(deriveClaimIdentity(fact('OpenAI does not train on proactive research.', { polarity: 'NEGATED', subject: 'OpenAI' })).fingerprint, null);
 });

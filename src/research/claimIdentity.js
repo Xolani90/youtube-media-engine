@@ -444,12 +444,60 @@ export function identityTextConflict(claimText, identity, timeParts) {
   return null;
 }
 
+// ---- Grounding (text -> structure) ---------------------------------------
+// The identity is LLM-proposed. A fingerprint is only issued when the
+// components that say WHO / WHAT / WHEN the claim is about actually appear in
+// the claim's own wording: subject, object, qualifiers and the structured
+// year. Predicate and relation are deliberately NOT token-grounded (a
+// legitimate rewording such as "won" / "captured the title" must still
+// converge). Pure, deterministic token-sequence matching only: no similarity,
+// no stemming beyond a trailing plural "s". It can only make an identity
+// untrusted (fingerprint => null); it never decides two claims are equal.
+const DAY_FREQUENCY_IN_TEXT = /\b(?:daily|(?:per|each|every|a) day|(?:in|within) (?:a|one)(?: single)? day|one day)\b/;
+
+function groundingTokens(value) {
+  return normText(typeof value === 'string' ? value.replace(/['\u2019]s\b/gi, '') : value)
+    .split(' ').filter(Boolean)
+    .map((t) => (t.length > 3 && t.endsWith('s') && !NO_SINGULARIZE.test(t) ? t.slice(0, -1) : t));
+}
+
+function containsTokenSequence(haystackTokens, needleTokens) {
+  if (needleTokens.length === 0) return true;
+  for (let i = 0; i + needleTokens.length <= haystackTokens.length; i += 1) {
+    if (needleTokens.every((t, j) => haystackTokens[i + j] === t)) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns null if every load-bearing identity component is grounded in the
+ * claim text, else a short machine reason.
+ */
+export function identityGroundingConflict(claimText, identity, timeParts) {
+  const textTokens = groundingTokens(String(claimText));
+  if (!containsTokenSequence(textTokens, groundingTokens(identity.subject))) return 'subject_not_grounded';
+  if (identity.object && !containsTokenSequence(textTokens, groundingTokens(identity.object))) return 'object_not_grounded';
+  for (const q of identity.qualifiers) {
+    if (q === 'per day') {
+      if (!DAY_FREQUENCY_IN_TEXT.test(normText(String(claimText)))) return 'qualifier_not_grounded';
+    } else if (!containsTokenSequence(textTokens, groundingTokens(q))) {
+      return 'qualifier_not_grounded';
+    }
+  }
+  if (identity.time !== null) {
+    const year = timeParts?.year;
+    if (year === null || year === undefined || !textTokens.includes(String(year))) return 'time_year_not_grounded';
+  }
+  return null;
+}
+
 /**
  * Derives the corroboration fingerprint for one extracted claim, or null.
  *
  * null (=> exact-normalized-text matching only, i.e. previous behavior) when:
  * the claim is not a FACT; there is no identity; the identity is
- * structurally invalid; or it conflicts with the claim's own text.
+ * structurally invalid; it conflicts with the claim's own text; or its
+ * subject / object / qualifiers / structured year are not grounded in that text.
  *
  * @returns {{ fingerprint: string|null, reason: string|null, identity?: object }}
  */
@@ -462,6 +510,8 @@ export function deriveClaimIdentity(proposed) {
   // including when the identity is untrusted, so a run can show WHY two claims
   // did or did not share a fingerprint. It never influences merging.
   if (conflict) return { fingerprint: null, reason: conflict, identity: normalized.identity };
+  const ungrounded = identityGroundingConflict(proposed.claim, normalized.identity, normalized.timeParts);
+  if (ungrounded) return { fingerprint: null, reason: ungrounded, identity: normalized.identity };
 
   const i = normalized.identity;
   // Fixed key order => byte-stable canonical form.
