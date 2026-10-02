@@ -105,11 +105,25 @@ const NO_SINGULARIZE = /(?:ss|us|is|ics)$|^(?:news|series|species)$/;
 const CORPORATE_SUFFIXES = new Set(['inc', 'incorporated', 'corp', 'corporation', 'ltd', 'limited', 'llc', 'llp', 'plc', 'co', 'gmbh']);
 const LEADING_ARTICLES = new Set(['the', 'a', 'an']);
 
+// "51.3 %" and "51.3%" are one spelling of the same percentage. "%" is kept
+// (character class below) but "." is not, so without this the two normalize to
+// ["51","3%"] vs ["51","3","%"]: a claim and its own identity that differ only in
+// that whitespace fail grounding, the relative-negation accounting and the
+// fingerprint. Exactly: an ASCII digit, whitespace, then "%" -> digit + "%".
+// It runs after NFKD (so NBSP / thin spaces are already whitespace and a
+// fullwidth "％" is already "%") and BEFORE punctuation is stripped, so only a
+// literal digit<whitespace>"%" adjacency matches ("5 1.3%", "%51.3", "51.3 percent",
+// "51.3 pct", "51.3 per cent" and "$" are untouched). Applied here, the one helper
+// every grounding token, canonical identity field and haystack comparison goes
+// through, so all of them stay consistent with each other.
+const DIGIT_SPACE_PERCENT = /(\d)\s+%/g;
+
 function normText(value) {
   if (typeof value !== 'string') return '';
   return value
     .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
+    .replace(DIGIT_SPACE_PERCENT, '$1%')
     .replace(/&/g, ' and ')
     .replace(/[^\p{L}\p{N}%$\s]/gu, ' ')
     .replace(/\s+/g, ' ')
