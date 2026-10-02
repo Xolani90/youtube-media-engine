@@ -4,3 +4,9 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+*.log
+*.patch
+run*-db/
+fresh-db/
+tmp/
+run.json
