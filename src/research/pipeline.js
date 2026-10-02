@@ -185,6 +185,10 @@ export async function runResearchProject({
   }
 
   const persistedSources = [];
+  // source id -> the acquisition candidate's publishedAt (provider metadata,
+  // possibly null). Kept beside persistedSources so the returned source shape
+  // is unchanged. Only claim-identity year grounding reads it.
+  const publishedAtBySourceId = new Map();
   for (const acquired of acquisitionResult.acquired) {
     const roleResult = classifySourceRole(acquired.url, classification);
     const qualityTier = classifySourceQuality(acquired.status, roleResult.role);
@@ -202,6 +206,7 @@ export async function runResearchProject({
       decision: roleResult.role, reason: roleResult.ambiguous ? 'ambiguous_deterministic_classification' : 'deterministic_domain_match',
       resultingState: qualityTier
     });
+    publishedAtBySourceId.set(sourceId, acquired.publishedAt ?? null);
     persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString() });
   }
 
@@ -262,12 +267,15 @@ export async function runResearchProject({
       }
       throw err;
     }
+    // Provider id + the candidate's own publication date. claimIdentity.js
+    // trusts it only for specific providers and only to ground a month-only year.
+    const publicationContext = { providerId: sourceProvider?.id, publishedAt: publishedAtBySourceId.get(source.id) ?? null };
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
       decision: 'EXTRACTED', reason: `${extraction.claims.length}_claims_proposed`, provider: extraction.providerUsed,
       configSnapshot: {
         model: extraction.model, estimatedCost: extraction.estimatedCost, isPaid: extraction.isPaid,
-        identity: summarizeIdentityCoverage(extraction.claims),
+        identity: summarizeIdentityCoverage(extraction.claims, publicationContext),
         parseOutcome: extraction.diagnostics.parseOutcome, finishReason: extraction.diagnostics.finishReason, attempts: extraction.diagnostics.attempts
       }
     });
@@ -283,7 +291,7 @@ export async function runResearchProject({
       }
 
       const normalized = proposed.claim.trim().toLowerCase();
-      const { fingerprint, identity: derivedIdentity } = deriveClaimIdentity(proposed);
+      const { fingerprint, identity: derivedIdentity } = deriveClaimIdentity(proposed, publicationContext);
       // The identity is only trusted (usable for convergence) when a fingerprint exists.
       const trustedIdentity = fingerprint ? derivedIdentity : null;
       // Identity-index trust boundary: a claim may query or populate

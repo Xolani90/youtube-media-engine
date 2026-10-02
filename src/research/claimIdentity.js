@@ -499,6 +499,121 @@ export function identityGroundingConflict(claimText, identity, timeParts) {
   return null;
 }
 
+// ---- Publication-date year grounding -------------------------------------
+// A month-only claim ("... in March.") names no year, so `time_year_not_grounded`
+// normally fails it closed. A TRUSTED publication date may vouch for the year,
+// and ONLY for that one check: every other veto and grounding rule still
+// applies first. Every rule below can only reject (fail closed); a resolved
+// year is the publication year, never a guess. Pure and deterministic.
+
+// A publication date is trusted only when the provider's own metadata is an
+// unambiguous publication date. GDELT `seendate` is a crawl/seen time, not a
+// publication time, and is never trusted; DuckDuckGo supplies no date at all.
+const TRUSTED_DATE_PROVIDERS = new Set(['tavily', 'google-news-rss']);
+const DATELESS_PROVIDERS = new Set(['duckduckgo']);
+export const MAX_PUBLICATION_GAP_MONTHS = 3;
+
+// Accepts a single provider id or the production composite
+// "<primary>+<fallback>-fallback". Every component must be a known provider
+// (so any composite containing gdelt, or an unknown id, is rejected) and at
+// least one must be a trusted date source.
+function isTrustedDateProvider(providerId) {
+  if (typeof providerId !== 'string' || providerId === '') return false;
+  const parts = providerId.split('+').map((p) => p.replace(/-fallback$/, ''));
+  if (!parts.every((p) => TRUSTED_DATE_PROVIDERS.has(p) || DATELESS_PROVIDERS.has(p))) return false;
+  return parts.some((p) => TRUSTED_DATE_PROVIDERS.has(p));
+}
+
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const ISO_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+const RFC822_DATE = /^(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun), )?(\d{1,2}) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{4}) (\d{2}):(\d{2})(?::(\d{2}))? (GMT|UTC|UT|Z|[+-]\d{4})$/;
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const RFC822_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function zoneOffsetMinutes(zone) {
+  if (['Z', 'GMT', 'UTC', 'UT'].includes(zone)) return 0;
+  const m = zone.match(/^([+-])(\d{2}):?(\d{2})$/);
+  if (!m || Number(m[2]) > 23 || Number(m[3]) > 59) return null;
+  return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]));
+}
+
+// -> { year, month } or null. Only the three shapes the trusted providers
+// emit are accepted (ISO date, ISO datetime WITH a zone, RFC-822 with a
+// GMT/UT/UTC or numeric zone). A timestamp whose zone offset puts it in a
+// different calendar month than its written date is ambiguous and rejected.
+function parsePublicationDate(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  let year; let month; let day; let hour = 0; let minute = 0; let second = 0; let offset = 0; let weekday = null;
+  let m;
+  if ((m = s.match(ISO_DATE))) {
+    [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  } else if ((m = s.match(ISO_DATETIME))) {
+    [year, month, day, hour, minute, second] = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0)];
+    offset = zoneOffsetMinutes(m[7]);
+  } else if ((m = s.match(RFC822_DATE))) {
+    weekday = m[1] ?? null;
+    [day, year, hour, minute, second] = [Number(m[2]), Number(m[4]), Number(m[5]), Number(m[6]), Number(m[7] ?? 0)];
+    month = RFC822_MONTHS.indexOf(m[3]) + 1;
+    offset = zoneOffsetMinutes(m[8]);
+  } else {
+    return null;
+  }
+  if (offset === null || month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  if (weekday && WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()] !== weekday) return null;
+  const utc = new Date(Date.UTC(year, month - 1, day, hour, minute, second) - offset * 60000);
+  if (utc.getUTCFullYear() !== year || utc.getUTCMonth() + 1 !== month) return null;
+  return { year, month };
+}
+
+// Relative / scoping / recurring wording anywhere in the claim means "March"
+// may not be the single plain calendar month it appears to be.
+const SCOPING_WORDING = /\b(?:last|next|this|previous|prior|past|ago|annual|annually|yearly|every|each|since|until|till|by|early|late|mid|earlier|later|recent|recently|upcoming|current|currently|weekly|monthly|quarterly|anniversary|season|seasonal|per|before|after|between|throughout|during|within)\b/i;
+const FULL_MONTH_NAME = /\b(january|february|march|april|june|july|august|september|october|november|december)\b/gi;
+const ABBREVIATED_MONTH = /\b(?:jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\b/i;
+
+/**
+ * Resolves the missing year of a month-only claim from a trusted publication
+ * date. Returns { ok:true, year } or { ok:false, reason }. It never reads the
+ * LLM-proposed year to decide anything except to REJECT a disagreement.
+ *
+ * @param {string} claimText
+ * @param {{modality:string}} identity
+ * @param {{year:number|null, month:number|null, day:number|null, quarter:number|null, half:number|null}|null} timeParts
+ * @param {{providerId?:string, publishedAt?:string}|null} context
+ */
+export function resolvePublicationYear(claimText, identity, timeParts, context) {
+  const fail = (reason) => ({ ok: false, reason });
+  const text = String(claimText);
+
+  if (identity?.modality !== IDENTITY_MODALITY.OCCURRED && identity?.modality !== IDENTITY_MODALITY.ANNOUNCED) return fail('modality_not_past');
+  if (!timeParts || timeParts.month === null || timeParts.day !== null || timeParts.quarter !== null || timeParts.half !== null) {
+    return fail('time_not_month_level');
+  }
+  if (/\b\d{4}\b/.test(text)) return fail('claim_names_year');
+  // "may" is a modal verb or an unprovable month: never resolved.
+  if (/\bmay\b/i.test(text)) return fail('may_unresolvable');
+  if (SCOPING_WORDING.test(text)) return fail('relative_or_scoping_wording');
+  if (ABBREVIATED_MONTH.test(text)) return fail('month_abbreviated');
+
+  const monthNames = [...text.matchAll(FULL_MONTH_NAME)].map((m) => m[1].toLowerCase());
+  if (monthNames.length !== 1) return fail('claimed_month_not_unique');
+  // The month must be written as a plain "in <Month>" and nothing else.
+  if (!new RegExp(`\\bin ${monthNames[0]}(?![\\p{L}\\p{N}'\\u2019-])`, 'iu').test(text)) return fail('month_wording_not_plain');
+  const claimedMonth = MONTHS.indexOf(monthNames[0]) + 1;
+  if (claimedMonth !== timeParts.month) return fail('claimed_month_mismatch');
+
+  if (!context || typeof context !== 'object' || !isTrustedDateProvider(context.providerId)) return fail('provider_not_trusted');
+  const published = parsePublicationDate(context.publishedAt);
+  if (!published) return fail('publication_date_invalid');
+  // Same calendar year only, and strictly after the claimed month.
+  if (published.month <= claimedMonth) return fail('publication_not_after_claimed_month');
+  if (published.month - claimedMonth > MAX_PUBLICATION_GAP_MONTHS) return fail('publication_gap_too_large');
+  if (timeParts.year !== published.year) return fail('proposed_year_mismatch');
+  return { ok: true, year: published.year };
+}
+
 /**
  * Derives the corroboration fingerprint for one extracted claim, or null.
  *
@@ -507,9 +622,16 @@ export function identityGroundingConflict(claimText, identity, timeParts) {
  * structurally invalid; it conflicts with the claim's own text; or its
  * subject / object / qualifiers / structured year are not grounded in that text.
  *
+ * Optional `publicationContext` ({ providerId, publishedAt }) lets a trusted
+ * publication date vouch for the year of a month-only claim, and nothing
+ * else: it can only satisfy `time_year_not_grounded` (see
+ * resolvePublicationYear). Omitted => behavior is exactly as before.
+ *
+ * @param {object} proposed
+ * @param {{providerId?:string, publishedAt?:string}|null} [publicationContext]
  * @returns {{ fingerprint: string|null, reason: string|null, identity?: object }}
  */
-export function deriveClaimIdentity(proposed) {
+export function deriveClaimIdentity(proposed, publicationContext = null) {
   if (!proposed || proposed.claim_type !== CLAIM_TYPE.FACT) return { fingerprint: null, reason: 'not_a_fact_claim' };
   const normalized = normalizeClaimIdentity(proposed.identity);
   if (!normalized.ok) return { fingerprint: null, reason: normalized.reason };
@@ -519,7 +641,19 @@ export function deriveClaimIdentity(proposed) {
   // did or did not share a fingerprint. It never influences merging.
   if (conflict) return { fingerprint: null, reason: conflict, identity: normalized.identity };
   const ungrounded = identityGroundingConflict(proposed.claim, normalized.identity, normalized.timeParts);
-  if (ungrounded) return { fingerprint: null, reason: ungrounded, identity: normalized.identity };
+  if (ungrounded) {
+    // The year check is the last grounding check, so reaching it means
+    // subject/object/qualifiers are already grounded. Only it may be
+    // satisfied, and only by a resolved publication year.
+    const resolved = ungrounded === 'time_year_not_grounded' && publicationContext
+      ? resolvePublicationYear(proposed.claim, normalized.identity, normalized.timeParts, publicationContext)
+      : null;
+    if (!resolved?.ok) {
+      // An abbreviated month ("Mar.") is a month the veto above cannot account for.
+      const reason = resolved?.reason === 'month_abbreviated' ? 'month_not_accounted' : ungrounded;
+      return { fingerprint: null, reason, identity: normalized.identity };
+    }
+  }
 
   const i = normalized.identity;
   // Fixed key order => byte-stable canonical form.
@@ -543,14 +677,15 @@ export function deriveClaimIdentity(proposed) {
  * `reasons` carries the exact machine reason counts.
  *
  * @param {Array<{claim, claim_type, identity}>} claims
+ * @param {{providerId?:string, publishedAt?:string}|null} [publicationContext] same optional context as deriveClaimIdentity
  * @returns {{ factClaims:number, fingerprinted:number, missing:number, malformed:number, inconsistent:number, reasons:Object<string,number> }}
  */
-export function summarizeIdentityCoverage(claims) {
+export function summarizeIdentityCoverage(claims, publicationContext = null) {
   const summary = { factClaims: 0, fingerprinted: 0, missing: 0, malformed: 0, inconsistent: 0, reasons: {} };
   for (const c of Array.isArray(claims) ? claims : []) {
     if (!c || c.claim_type !== CLAIM_TYPE.FACT || typeof c.claim !== 'string' || c.claim.trim() === '') continue;
     summary.factClaims += 1;
-    const { fingerprint, reason } = deriveClaimIdentity(c);
+    const { fingerprint, reason } = deriveClaimIdentity(c, publicationContext);
     if (fingerprint) { summary.fingerprinted += 1; continue; }
     summary.reasons[reason] = (summary.reasons[reason] ?? 0) + 1;
     if (reason === 'identity_missing') summary.missing += 1;
