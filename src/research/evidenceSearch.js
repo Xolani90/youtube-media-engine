@@ -5,7 +5,7 @@ import { independenceKey } from './evidenceGrading.js';
  *
  * Donor principle (de2pressed/2see, per the Pass 47 brief): retrieve evidence
  * for ONE claim through several query families (literal, entity, metric,
- * attribution, source-domain, official) instead of one formulation.
+ * attribution, official) instead of one formulation.
  *
  * This module only turns a claim into search-query candidates and merges
  * what an existing ResearchSourceProvider returns. It never certifies
@@ -19,7 +19,6 @@ export const QUERY_TYPE = Object.freeze({
   ENTITY: 'entity',
   METRIC: 'metric',
   ATTRIBUTION: 'attribution',
-  SOURCE_DOMAIN: 'sourceDomain',
   OFFICIAL: 'official'
 });
 
@@ -123,12 +122,8 @@ export function buildEvidenceQueries({ claim, subject = null, coreQuestion = nul
     .filter((o) => o.score > 0)
     .sort((a, b) => b.score - a.score || a.i - b.i)
     .slice(0, MAX_OFFICIAL_QUERIES_PER_CLAIM);
-  const blocked = new Set([...(classification.socialDomains ?? []), ...(classification.syndicatedDomains ?? [])]);
-  const linkedDomain = [...new Set((linkedSources ?? []).map((s) => independenceKey(s?.url ?? s)).filter(Boolean))]
-    .sort().find((d) => !blocked.has(d) && !(classification.authoritativeDomains ?? []).includes(d));
 
   if (official[0]) add(QUERY_TYPE.OFFICIAL, `site:${official[0].d} ${keyTerms}`);
-  if (linkedDomain) add(QUERY_TYPE.SOURCE_DOMAIN, `site:${linkedDomain} ${keyTerms}`);
   if (official[1]) add(QUERY_TYPE.OFFICIAL, `site:${official[1].d} ${keyTerms}`);
 
   const seen = new Set();
@@ -143,6 +138,16 @@ export function buildEvidenceQueries({ claim, subject = null, coreQuestion = nul
   return out;
 }
 
+// Pass 48: no `site:<linked source domain>` query. A second page on a domain that
+// already supports the claim is never independent corroboration (one registrable
+// domain = one source), so such a query only spends source slots.
+const LOCALE_PATH = /\/(intl\/[a-z]{2}(-[a-z]{2,4})?|[a-z]{2}-[a-z]{2,4})(\/|$)/i;
+const pathOf = (u) => { try { return new URL(u).pathname; } catch { return ''; } };
+const isLocalized = (u) => LOCALE_PATH.test(pathOf(u));
+const hostOf = (u) => { try { return new URL(u).hostname.toLowerCase(); } catch { return null; } };
+const domainKey = (u) => independenceKey(u) ?? hostOf(u) ?? String(u);
+export const DEFAULT_MAX_CANDIDATES_PER_DOMAIN = 2;
+
 const urlKey = (u) => String(u ?? '').trim().replace(/#.*$/, '').replace(/\/+$/, '');
 
 /**
@@ -156,8 +161,9 @@ const urlKey = (u) => String(u ?? '').trim().replace(/#.*$/, '').replace(/\/+$/,
  *   metadata (title/snippet/publishedAt) its first discovery lacked.
  * - A throwing query is isolated; it only costs that query.
  */
-export async function discoverWithCascade({ provider, queries, maxQueries, maxResults, knownUrls = [], maxCandidates, diagnostics = null }) {
+export async function discoverWithCascade({ provider, queries, maxQueries, maxResults, knownUrls = [], maxCandidates, excludeDomains = [], maxPerDomain = DEFAULT_MAX_CANDIDATES_PER_DOMAIN, diagnostics = null }) {
   const known = new Set([...knownUrls].map(urlKey));
+  const excluded = new Set([...excludeDomains].filter(Boolean).map((d) => String(d).toLowerCase()));
   const attempted = queries.slice(0, Math.max(0, maxQueries));
   const lists = [];
   const failures = [];
@@ -182,17 +188,31 @@ export async function discoverWithCascade({ provider, queries, maxQueries, maxRe
       if (!c) continue;
       const key = urlKey(c.url);
       if (known.has(key)) continue;
+      if (excluded.has(domainKey(c.url))) continue;
       const prev = merged.get(key);
       if (!prev) { merged.set(key, { ...c, discoveryQueryType: type }); continue; }
       for (const f of ['title', 'snippet', 'publishedAt']) if (prev[f] == null && c[f] != null) prev[f] = c[f];
     }
   }
-  const candidates = [...merged.values()].slice(0, Number.isInteger(maxCandidates) ? maxCandidates : undefined);
+  // Prefer canonical (non-localized) URLs, keeping interleave order otherwise (stable),
+  // then allow at most `maxPerDomain` URLs per registrable domain.
+  const ordered = [...merged.values()].map((c, i) => ({ c, i, loc: isLocalized(c.url) ? 1 : 0 }))
+    .sort((a, b) => a.loc - b.loc || a.i - b.i).map((x) => x.c);
+  const perDomain = new Map();
+  const capped = ordered.filter((c) => {
+    const d = domainKey(c.url);
+    const n = perDomain.get(d) ?? 0;
+    if (n >= Math.max(1, maxPerDomain)) return false;
+    perDomain.set(d, n + 1);
+    return true;
+  });
+  const candidates = capped.slice(0, Number.isInteger(maxCandidates) ? maxCandidates : undefined);
   if (diagnostics) {
     diagnostics.queriesGenerated += queries.length;
     diagnostics.queriesAttempted += attempted.length;
     diagnostics.candidatesReturned += returned;
     diagnostics.candidatesDeduplicated += returned - merged.size;
+    diagnostics.candidatesDomainCapped = (diagnostics.candidatesDomainCapped ?? 0) + (ordered.length - capped.length);
     for (const q of queries) diagnostics.queryTypes[q.type] = (diagnostics.queryTypes[q.type] ?? 0) + 1;
   }
   return { candidates, failures, queriesAttempted: attempted.length, candidatesReturned: returned };
@@ -200,5 +220,6 @@ export async function discoverWithCascade({ provider, queries, maxQueries, maxRe
 
 export function newEvidenceSearchDiag() {
   return { queriesGenerated: 0, queriesAttempted: 0, candidatesReturned: 0, candidatesDeduplicated: 0,
-    queryTypes: { literal: 0, entity: 0, metric: 0, attribution: 0, sourceDomain: 0, official: 0 } };
+    candidatesDomainCapped: 0,
+    queryTypes: { literal: 0, entity: 0, metric: 0, attribution: 0, official: 0 } };
 }

@@ -44,12 +44,12 @@ test('numeric/date and attribution queries are absent when the claim has neither
   assert.deepEqual(types(qs), ['literal']);
 });
 
-test('source-domain query uses a linked source domain and skips social/syndicated/authoritative ones', () => {
-  const linked = [{ url: 'https://www.facebook.com/p/1' }, { url: 'https://wire.example/x' }, { url: 'https://blog.google/x' }, { url: 'https://www.cnbc.com/a' }];
-  const cls = { ...classification, syndicatedDomains: ['wire.example'] };
-  const q = buildEvidenceQueries({ claim: CLAIM, linkedSources: linked, classification: cls }).find((x) => x.type === 'sourceDomain');
-  assert.match(q.query, /^site:cnbc\.com /);
-  assert.ok(!buildEvidenceQueries({ claim: CLAIM, linkedSources: [{ url: 'https://www.facebook.com/p/1' }], classification: cls }).some((x) => x.type === 'sourceDomain'));
+test('Pass 48: no site: query is ever built for a linked source domain (same domain cannot corroborate)', () => {
+  const linked = [{ url: 'https://www.cnbc.com/a' }, { url: 'https://wire.example/x' }];
+  const qs = buildEvidenceQueries({ claim: CLAIM, linkedSources: linked, classification });
+  assert.ok(!qs.some((q) => q.type === 'sourceDomain'));
+  assert.ok(!qs.some((q) => /^site:cnbc\.com/.test(q.query)));
+  assert.equal(QUERY_TYPE.SOURCE_DOMAIN, undefined);
 });
 
 test('identical normalized queries collapse to one and ordering is deterministic', () => {
@@ -127,4 +127,35 @@ test('cascade cannot bypass Pass 46.2: a social URL it surfaces is social_media 
 test('a date fragment is never an entity (no bare "30" in any query)', () => {
   const qs = buildEvidenceQueries({ claim: CLAIM, classification });
   for (const q of qs.filter((x) => x.type === 'entity' || x.type === 'attribution')) assert.doesNotMatch(q.query, /(^|\s)30 September/);
+});
+
+test('Pass 48: URLs on an excluded (already-linked) registrable domain are dropped, subdomains included', async () => {
+  const p = fakeProvider(() => [{ url: 'https://www.cnbc.com/a' }, { url: 'https://video.cnbc.com/b' }, { url: 'https://other.com/c' }]);
+  const qs = buildEvidenceQueries({ claim: CLAIM, classification }).slice(0, 2);
+  const r = await discoverWithCascade({ provider: p, queries: qs, maxQueries: 2, maxResults: 5, excludeDomains: ['cnbc.com'] });
+  assert.deepEqual(r.candidates.map((c) => c.url), ['https://other.com/c']);
+});
+
+test('Pass 48: at most maxPerDomain URLs per registrable domain; extras are counted, not returned', async () => {
+  const p = fakeProvider(() => [1, 2, 3, 4].map((i) => ({ url: `https://news.example/p${i}` })).concat([{ url: 'https://b.com/x' }]));
+  const diag = newEvidenceSearchDiag();
+  const qs = buildEvidenceQueries({ claim: CLAIM, classification }).slice(0, 1);
+  const r = await discoverWithCascade({ provider: p, queries: qs, maxQueries: 1, maxResults: 5, diagnostics: diag });
+  assert.equal(r.candidates.filter((c) => c.url.includes('news.example')).length, 2);
+  assert.equal(diag.candidatesDomainCapped, 2);
+  const one = await discoverWithCascade({ provider: p, queries: qs, maxQueries: 1, maxResults: 5, maxPerDomain: 1 });
+  assert.equal(one.candidates.filter((c) => c.url.includes('news.example')).length, 1);
+});
+
+test('Pass 48: a canonical URL outranks a localized copy of the same domain when the cap bites', async () => {
+  const p = fakeProvider(() => [
+    { url: 'https://blog.google/intl/id-id/products/gemini-4-argon' },
+    { url: 'https://blog.google/products/gemini-4-argon' },
+    { url: 'https://blog.google/updates/september' }
+  ]);
+  const qs = buildEvidenceQueries({ claim: CLAIM, classification }).slice(0, 1);
+  const r = await discoverWithCascade({ provider: p, queries: qs, maxQueries: 1, maxResults: 5, maxPerDomain: 1 });
+  assert.deepEqual(r.candidates.map((c) => c.url), ['https://blog.google/products/gemini-4-argon']);
+  const two = await discoverWithCascade({ provider: p, queries: qs, maxQueries: 1, maxResults: 5, maxPerDomain: 2 });
+  assert.ok(!two.candidates.some((c) => c.url.includes('/intl/id-id/')));
 });

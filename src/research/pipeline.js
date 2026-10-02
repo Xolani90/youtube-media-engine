@@ -305,6 +305,8 @@ async function enrichEvidence({
   // remaining acquisition attempts, and merged candidates by the remaining
   // attempts too, so the existing acquisition policy stays authoritative.
   const topLinked = linksOf(topFact.claim.id).map((l) => persistedSources.find((s) => s.id === l.source_id)).filter(Boolean);
+  // Pass 48: pages on a domain that already supports this claim cannot corroborate it.
+  const linkedDomains = [...new Set(topLinked.map((s) => independenceKey(s.url)).filter(Boolean))];
   const evidenceQueries = buildEvidenceQueries({
     claim: topFact.claim,
     linkedSources: topLinked, classification: classification ?? {}
@@ -314,7 +316,7 @@ async function enrichEvidence({
     discoverCandidates: async ({ maxResults }) => {
       const cascade = await discoverWithCascade({
         provider: sourceProvider, queries: evidenceQueries, maxQueries: remainingAttempts, maxResults,
-        knownUrls: [...known], maxCandidates: remainingAttempts, diagnostics: diag?.evidenceSearch ?? null
+        knownUrls: [...known], maxCandidates: remainingAttempts, excludeDomains: linkedDomains, diagnostics: diag?.evidenceSearch ?? null
       });
       return { candidates: cascade.candidates, failures: cascade.failures };
     }
