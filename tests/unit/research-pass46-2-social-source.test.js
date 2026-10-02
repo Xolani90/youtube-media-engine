@@ -14,7 +14,7 @@ const FB = 'https://www.facebook.com/JamoraquaiPage/posts/google-announced-gemin
 const mk = (id, url, role, quality_tier, content = 'x') => ({ id, url, role, quality_tier, content, retrieval_status: 'SUCCESS', retrieved_at: recent });
 
 test('1. config: facebook.com is social, blog.google stays authoritative', () => {
-  assert.deepEqual(classificationConfig.socialDomains, ['facebook.com']);
+  assert.ok(classificationConfig.socialDomains.includes('facebook.com'));
   assert.deepEqual(classificationConfig.authoritativeDomains, ['blog.google']);
 });
 
@@ -80,4 +80,33 @@ test('7. a weak social-looking page is never evidence because of domain config',
   // an unlisted social-looking domain is plain independent_reporting; admissibility still rests on content
   const b = assessEvidenceAdmissibility('SUCCESS', classifySourceRole('https://www.instagram.com/p/1', CFG).role, 'Log in.');
   assert.equal(b.admissible, false);
+});
+
+test('Pass 49: every major social platform is social_media, including subdomains, and never independent', () => {
+  for (const u of [
+    'https://www.instagram.com/p/Dd8e-BPq9pa', 'https://x.com/Google/status/2105388143902175529', 'https://twitter.com/Google/status/1',
+    'https://mobile.twitter.com/a/status/1', 'https://m.facebook.com/p/1', 'https://t.co/abc', 'https://www.threads.net/@a/post/1',
+    'https://www.tiktok.com/@a/video/1', 'https://www.linkedin.com/posts/a-1', 'https://old.reddit.com/r/x/comments/1',
+    'https://www.youtube.com/watch?v=l6jusMhGXVk', 'https://youtu.be/l6jusMhGXVk', 'https://bsky.app/profile/a/post/1', 'https://fb.watch/abc'
+  ]) assert.equal(classifySourceRole(u, CFG).role, 'social_media', u);
+});
+
+test('Pass 49: lookalike and unrelated domains are not social; authoritative stays exact-match', () => {
+  for (const u of ['https://notx.com/a', 'https://fox.com/a', 'https://reuters.com/a', 'https://nextdoor.example/a'])
+    assert.equal(classifySourceRole(u, CFG).role, 'independent_reporting', u);
+  assert.equal(classifySourceRole('https://blog.google/a', CFG).role, 'primary_authoritative');
+  assert.equal(classifySourceRole('https://evil.blog.google.attacker.com/a', CFG).role, 'independent_reporting');
+});
+
+test('Pass 49: an X post plus one independent publisher is ONE independent domain, not VERIFIED', () => {
+  const reuters = mk('r', 'https://reuters.com/a', 'independent_reporting', 'MEDIUM');
+  const xRole = classifySourceRole('https://x.com/Google/status/1', CFG).role;
+  const x = mk('x', 'https://x.com/Google/status/1', xRole, 'MEDIUM');
+  const sourcesById = new Map([['r', reuters], ['x', x]]);
+  const links = [{ claim_id: 'c', source_id: 'r' }, { claim_id: 'c', source_id: 'x' }];
+  const ex = explainEvidenceSources({ claimSourceLinks: links, sourcesById, policy: researchPolicy, nowMs: NOW });
+  assert.equal(xRole, 'social_media');
+  assert.equal(ex.independentCount, 1);
+  assert.ok(!ex.independentDomains.includes('x.com'));
+  assert.notEqual(computeEvidenceStatus({ claimSourceLinks: links, sourcesById, policy: researchPolicy, nowMs: NOW }), 'VERIFIED');
 });

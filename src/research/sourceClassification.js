@@ -21,7 +21,9 @@ export function classifySourceRole(url, { authoritativeDomains = [], syndicatedD
   if (domain && authoritativeDomains.includes(domain)) {
     return { role: SOURCE_ROLE.PRIMARY_AUTHORITATIVE, ambiguous: false };
   }
-  if (domain && socialDomains.includes(domain)) {
+  // Social platforms match by suffix so m.facebook.com, mobile.twitter.com, old.reddit.com etc.
+  // cannot slip through as independent reporting. Authoritative stays exact-match (trust is never widened).
+  if (domain && socialDomains.some((d) => domain === d || domain.endsWith(`.${d}`))) {
     return { role: SOURCE_ROLE.SOCIAL_MEDIA, ambiguous: false };
   }
   if (domain && syndicatedDomains.includes(domain)) {
