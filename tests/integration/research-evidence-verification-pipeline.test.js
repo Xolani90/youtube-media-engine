@@ -226,8 +226,8 @@ test('evidence expansion: acquires an extra tracked source via the existing prov
   const provider = new ScriptedProvider([[URL_A], [URL_A, URL_B]]);
   const { storage, dbPath, result } = await run({ urls: [], router, provider });
   try {
-    assert.equal(provider.calls.length, 2);
-    assert.equal(provider.calls[1], CLAIM_A, 'expansion query is the claim text');
+    assert.ok(provider.calls.length >= 2 && provider.calls.length <= 1 + 6, 'initial discovery + bounded evidence-search cascade');
+    assert.equal(provider.calls[1], CLAIM_A, 'first cascade query is the literal claim text');
     assert.equal(storage.get('SELECT COUNT(*) AS n FROM sources').n, 2, 'new source is a tracked row in the project');
     assert.equal(result.claims[0].evidence_status, 'VERIFIED');
     assert.deepEqual(linksOf(storage, result.claims[0].id).map((l) => l.role).sort(), ['corroborating', 'primary']);

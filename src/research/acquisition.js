@@ -102,6 +102,7 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
       title: candidate.title ?? null,
       snippet: candidate.snippet ?? null,
       publishedAt: candidate.publishedAt ?? null,
+      ...(candidate.discoveryQueryType ? { discoveryQueryType: candidate.discoveryQueryType } : {}),
       status: result.status,
       content: result.content,
       error: result.error,

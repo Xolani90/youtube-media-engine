@@ -13,6 +13,7 @@ export function buildSourceProvenance(acquired, { retrievedAt = new Date().toISO
       title: acquired.title ?? null,
       snippet: acquired.snippet ?? null,
       publishedAt: acquired.publishedAt ?? null,
+      ...(acquired.discoveryQueryType ? { discovery_query_type: acquired.discoveryQueryType } : {}),
       publishedAtProvenance: acquired.publishedAt ? 'provider_reported_unverified' : null
     },
     retrieval: {

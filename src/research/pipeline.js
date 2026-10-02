@@ -3,6 +3,7 @@ import { RESEARCH_STAGE, RESEARCH_PROJECT_STATUS, RETRIEVAL_STATUS, EVIDENCE_STA
 import { acquireSources } from './acquisition.js';
 import { classifySourceRole, assessEvidenceAdmissibility } from './sourceClassification.js';
 import { buildSourceProvenance } from './sourceProvenance.js';
+import { buildEvidenceQueries, discoverWithCascade, newEvidenceSearchDiag } from './evidenceSearch.js';
 import { extractClaims, validateExtractedClaim, ExtractionFailureError } from './claims.js';
 import { deriveClaimIdentity, summarizeIdentityCoverage } from './claimIdentity.js';
 import { ConvergenceIndex, evaluateConvergence, explainConvergence, isConvergenceEligible } from './claimConvergence.js';
@@ -129,7 +130,8 @@ function newResearchDiag() {
   return {
     retrieval: { plainAttempts: 0, plainSuccesses: 0, fallbackAttempts: 0, fallbackSuccesses: 0, weakSourcesRejected: 0, unusableSources: 0 },
     sourceQuality: { primaryAuthoritative: 0, independentReporting: 0, syndicated: 0, socialMedia: 0, weakOrRejected: 0 },
-    relevance: { candidatesScored: 0, candidatesRejectedAsIrrelevant: 0, entries: [] }
+    relevance: { candidatesScored: 0, candidatesRejectedAsIrrelevant: 0, entries: [] },
+    evidenceSearch: newEvidenceSearchDiag()
   };
 }
 
@@ -297,11 +299,24 @@ async function enrichEvidence({
     return;
   }
   const known = new Set(persistedSources.map((s) => s.url));
+  // Pass 47: one deterministic query cascade for the top FACT claim instead of
+  // a single query. It runs through the SAME provider and the SAME
+  // acquireSources() below; the number of discovery calls is bounded by the
+  // remaining acquisition attempts, and merged candidates by the remaining
+  // attempts too, so the existing acquisition policy stays authoritative.
+  const topLinked = linksOf(topFact.claim.id).map((l) => persistedSources.find((s) => s.id === l.source_id)).filter(Boolean);
+  const evidenceQueries = buildEvidenceQueries({
+    claim: topFact.claim,
+    linkedSources: topLinked, classification: classification ?? {}
+  });
   const expansionProvider = {
     id: sourceProvider.id,
-    discoverCandidates: async (args) => {
-      const discovery = await sourceProvider.discoverCandidates({ ...args, alreadyAcquiredUrls: [...known] });
-      return { ...discovery, candidates: (discovery?.candidates || []).filter((c) => !known.has(c.url)) };
+    discoverCandidates: async ({ maxResults }) => {
+      const cascade = await discoverWithCascade({
+        provider: sourceProvider, queries: evidenceQueries, maxQueries: remainingAttempts, maxResults,
+        knownUrls: [...known], maxCandidates: remainingAttempts, diagnostics: diag?.evidenceSearch ?? null
+      });
+      return { candidates: cascade.candidates, failures: cascade.failures };
     }
   };
   const expansionPolicy = {
@@ -915,6 +930,7 @@ export async function runResearchProject({
         verifiedLoadBearingFact, stoppingConditionMet,
         evidenceVerification: { ...evidenceVerificationTrace, verifiedLoadBearingFact },
         retrieval: researchDiag.retrieval, sourceQuality: researchDiag.sourceQuality,
+        evidenceSearch: researchDiag.evidenceSearch,
         relevance: { candidatesScored: researchDiag.relevance.candidatesScored, candidatesRejectedAsIrrelevant: researchDiag.relevance.candidatesRejectedAsIrrelevant, entries: researchDiag.relevance.entries.slice(0, 50) } } });
   } catch { /* diagnostics must never affect research */ }
 
