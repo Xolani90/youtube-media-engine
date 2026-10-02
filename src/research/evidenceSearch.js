@@ -161,9 +161,14 @@ const urlKey = (u) => String(u ?? '').trim().replace(/#.*$/, '').replace(/\/+$/,
  *   metadata (title/snippet/publishedAt) its first discovery lacked.
  * - A throwing query is isolated; it only costs that query.
  */
-export async function discoverWithCascade({ provider, queries, maxQueries, maxResults, knownUrls = [], maxCandidates, excludeDomains = [], maxPerDomain = DEFAULT_MAX_CANDIDATES_PER_DOMAIN, diagnostics = null }) {
+export async function discoverWithCascade({ provider, queries, maxQueries, maxResults, knownUrls = [], maxCandidates, excludeDomains = [], socialDomains = [], maxPerDomain = DEFAULT_MAX_CANDIDATES_PER_DOMAIN, diagnostics = null }) {
   const known = new Set([...knownUrls].map(urlKey));
   const excluded = new Set([...excludeDomains].filter(Boolean).map((d) => String(d).toLowerCase()));
+  // Pass 50: social platforms can never corroborate (role social_media), so they must not
+  // consume source slots. Same suffix rule as classifySourceRole.
+  const social = [...socialDomains].filter(Boolean).map((d) => String(d).toLowerCase());
+  const isSocial = (u) => { const h = (hostOf(u) ?? '').replace(/^www\./, ''); return social.some((d) => h === d || h.endsWith(`.${d}`)); };
+  const socialDropped = new Set();
   const attempted = queries.slice(0, Math.max(0, maxQueries));
   const lists = [];
   const failures = [];
@@ -189,6 +194,7 @@ export async function discoverWithCascade({ provider, queries, maxQueries, maxRe
       const key = urlKey(c.url);
       if (known.has(key)) continue;
       if (excluded.has(domainKey(c.url))) continue;
+      if (isSocial(c.url)) { socialDropped.add(key); continue; }
       const prev = merged.get(key);
       if (!prev) { merged.set(key, { ...c, discoveryQueryType: type }); continue; }
       for (const f of ['title', 'snippet', 'publishedAt']) if (prev[f] == null && c[f] != null) prev[f] = c[f];
@@ -211,7 +217,8 @@ export async function discoverWithCascade({ provider, queries, maxQueries, maxRe
     diagnostics.queriesGenerated += queries.length;
     diagnostics.queriesAttempted += attempted.length;
     diagnostics.candidatesReturned += returned;
-    diagnostics.candidatesDeduplicated += returned - merged.size;
+    diagnostics.candidatesDeduplicated += returned - merged.size - socialDropped.size;
+    diagnostics.candidatesSocialDropped = (diagnostics.candidatesSocialDropped ?? 0) + socialDropped.size;
     diagnostics.candidatesDomainCapped = (diagnostics.candidatesDomainCapped ?? 0) + (ordered.length - capped.length);
     for (const q of queries) diagnostics.queryTypes[q.type] = (diagnostics.queryTypes[q.type] ?? 0) + 1;
   }
@@ -220,6 +227,6 @@ export async function discoverWithCascade({ provider, queries, maxQueries, maxRe
 
 export function newEvidenceSearchDiag() {
   return { queriesGenerated: 0, queriesAttempted: 0, candidatesReturned: 0, candidatesDeduplicated: 0,
-    candidatesDomainCapped: 0,
+    candidatesDomainCapped: 0, candidatesSocialDropped: 0,
     queryTypes: { literal: 0, entity: 0, metric: 0, attribution: 0, official: 0 } };
 }

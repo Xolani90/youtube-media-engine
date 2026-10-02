@@ -316,7 +316,7 @@ async function enrichEvidence({
     discoverCandidates: async ({ maxResults }) => {
       const cascade = await discoverWithCascade({
         provider: sourceProvider, queries: evidenceQueries, maxQueries: remainingAttempts, maxResults,
-        knownUrls: [...known], maxCandidates: remainingAttempts, excludeDomains: linkedDomains, diagnostics: diag?.evidenceSearch ?? null
+        knownUrls: [...known], maxCandidates: remainingAttempts, excludeDomains: linkedDomains, socialDomains: classification?.socialDomains ?? [], diagnostics: diag?.evidenceSearch ?? null
       });
       return { candidates: cascade.candidates, failures: cascade.failures };
     }

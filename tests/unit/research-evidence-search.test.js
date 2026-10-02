@@ -159,3 +159,23 @@ test('Pass 48: a canonical URL outranks a localized copy of the same domain when
   const two = await discoverWithCascade({ provider: p, queries: qs, maxQueries: 1, maxResults: 5, maxPerDomain: 2 });
   assert.ok(!two.candidates.some((c) => c.url.includes('/intl/id-id/')));
 });
+
+test('Pass 50: social-platform URLs never enter the candidate list and are counted', async () => {
+  const p = fakeProvider(() => [
+    { url: 'https://www.instagram.com/p/1' }, { url: 'https://m.facebook.com/x/1' }, { url: 'https://x.com/Google/status/1' },
+    { url: 'https://www.reuters.com/a' }, { url: 'https://notx.com/b' }
+  ]);
+  const diag = newEvidenceSearchDiag();
+  const qs = buildEvidenceQueries({ claim: CLAIM, classification }).slice(0, 2);
+  const r = await discoverWithCascade({ provider: p, queries: qs, maxQueries: 2, maxResults: 5, socialDomains: classification.socialDomains, diagnostics: diag });
+  assert.deepEqual(r.candidates.map((c) => c.url), ['https://www.reuters.com/a', 'https://notx.com/b']);
+  assert.equal(diag.candidatesSocialDropped, 3);
+  assert.equal(diag.candidatesDeduplicated, diag.candidatesReturned - 3 - 2, 'repeats of the same URL still count as duplicates');
+});
+
+test('Pass 50: without socialDomains nothing is dropped (behaviour unchanged for other callers)', async () => {
+  const p = fakeProvider(() => [{ url: 'https://www.instagram.com/p/1' }]);
+  const qs = buildEvidenceQueries({ claim: CLAIM, classification }).slice(0, 1);
+  const r = await discoverWithCascade({ provider: p, queries: qs, maxQueries: 1, maxResults: 5 });
+  assert.equal(r.candidates.length, 1);
+});
