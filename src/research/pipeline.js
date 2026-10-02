@@ -4,6 +4,7 @@ import { acquireSources } from './acquisition.js';
 import { classifySourceRole, assessEvidenceAdmissibility } from './sourceClassification.js';
 import { buildSourceProvenance } from './sourceProvenance.js';
 import { buildEvidenceQueries, discoverWithCascade, newEvidenceSearchDiag } from './evidenceSearch.js';
+import { createLlmWorkload, guardRouter } from './llmWorkload.js';
 import { extractClaims, validateExtractedClaim, ExtractionFailureError } from './claims.js';
 import { deriveClaimIdentity, summarizeIdentityCoverage } from './claimIdentity.js';
 import { ConvergenceIndex, evaluateConvergence, explainConvergence, isConvergenceEligible } from './claimConvergence.js';
@@ -263,6 +264,10 @@ async function enrichEvidence({
   const verifyOne = async (entry) => {
     const { claim, candidates } = entry;
     if (candidates.length === 0 || callsRemaining <= 0) return { verified: false, ran: false };
+    if (llmRouter.workload && !llmRouter.workload.canConsume()) {
+      trace.stopReason = trace.stopReason ?? 'llm_workload_stopped';
+      return { verified: false, ran: false };
+    }
     trace.candidateSources += candidates.length;
     const out = await evidenceVerifier({
       claim, candidateSources: candidates.map((c) => withContent(c.source)), llmRouter, limits, callBudget: callsRemaining,
@@ -382,9 +387,13 @@ async function enrichEvidence({
  * @param {string} [deps.runId]
  */
 export async function runResearchProject({
-  storage, opportunityId, sourceProvider, llmRouter, policy, classification = {},
+  storage, opportunityId, sourceProvider, llmRouter: rawLlmRouter, policy, classification = {},
   retrieveImpl, fetchImpl, detectContradiction = null, runId = null, evidenceVerifier = verifyClaimAgainstSources
 }) {
+  // WS7: ONE project-local workload guard shared by claim extraction,
+  // contradiction detection and evidence verification (all receive this router).
+  const llmWorkload = createLlmWorkload(policy?.llm_workload);
+  const llmRouter = guardRouter(rawLlmRouter, llmWorkload);
   const opportunity = storage.get('SELECT * FROM opportunities WHERE id = ?', [opportunityId]);
   if (!opportunity) {
     throw new Error(`opportunity ${opportunityId} not found`);
@@ -932,7 +941,7 @@ export async function runResearchProject({
         verifiedLoadBearingFact, stoppingConditionMet,
         evidenceVerification: { ...evidenceVerificationTrace, verifiedLoadBearingFact },
         retrieval: researchDiag.retrieval, sourceQuality: researchDiag.sourceQuality,
-        evidenceSearch: researchDiag.evidenceSearch,
+        evidenceSearch: researchDiag.evidenceSearch, llmWorkload: llmWorkload.snapshot(),
         relevance: { candidatesScored: researchDiag.relevance.candidatesScored, candidatesRejectedAsIrrelevant: researchDiag.relevance.candidatesRejectedAsIrrelevant, entries: researchDiag.relevance.entries.slice(0, 50) } } });
   } catch { /* diagnostics must never affect research */ }
 

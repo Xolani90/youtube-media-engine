@@ -2,6 +2,7 @@ import { RETRIEVAL_STATUS, SOURCE_ROLE } from './constants.js';
 import { untrustedSourceBlock, derivedContentBlock } from '../providers/llm/promptTrust.js';
 import { independenceKey, isEligibleEvidenceSource } from './evidenceGrading.js';
 import { parseSourceProvenance } from './sourceProvenance.js';
+import { isWorkloadHalt } from './llmWorkload.js';
 
 /**
  * Evidence-centric verification (Pass 44).
@@ -232,6 +233,7 @@ export async function verifyClaimAgainstSource({ claim, source, llmRouter, limit
   try {
     routed = await llmRouter.complete({ prompt });
   } catch (err) {
+    if (isWorkloadHalt(err)) return { ...base, called: false, workloadHalt: true, rejectionReason: REJECTION_REASON.PROVIDER_ERROR, error: err.message };
     return { ...base, called: true, rejectionReason: REJECTION_REASON.PROVIDER_ERROR, error: err?.message ?? 'provider error' };
   }
   const validated = validateVerifierResponse(routed?.result?.text, { source, sourceText: fullText, minQuoteChars: lim.minQuoteChars });
@@ -444,6 +446,7 @@ export async function verifyClaimAgainstSources({ claim, candidateSources, llmRo
     const decision = await verifyClaimAgainstSource({ claim, source, llmRouter, limits: lim });
     if (decision.called) callsUsed += 1;
     decisions.push(decision);
+    if (decision.workloadHalt) break; // shared workload budget/breaker refused: no further model calls
     if (decision.rejectionReason === REJECTION_REASON.PROVIDER_ERROR) {
       providerFailures += 1;
       consecutiveErrors += 1;

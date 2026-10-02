@@ -46,5 +46,10 @@
   },
   "contradiction": {
     "max_eligible_claims": 8
+  },
+  "llm_workload": {
+    "max_calls_per_project": 56,
+    "max_consecutive_transient_failures": 3,
+    "max_consecutive_rate_limit_failures": 2
   }
 }
