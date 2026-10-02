@@ -168,6 +168,51 @@ export function validateVerifierResponse(text, { source, sourceText, minQuoteCha
   return { ...base, result: candidate, quote: normalizedQuote, quoteAccepted: true };
 }
 
+// ---------------------------------------------------------------------------
+// Source-text windowing (Pass 52): deterministic, no LLM, no fuzzy matching.
+// ---------------------------------------------------------------------------
+
+const WINDOW_SEPARATOR = '\n[...]\n';
+
+function splitIntoChunks(text, maxChunkChars) {
+  const chunks = [];
+  let offset = 0;
+  for (const para of text.split(/\n{2,}/)) {
+    const start = text.indexOf(para, offset);
+    offset = start + para.length;
+    if (para.trim() === '') continue;
+    if (para.length <= maxChunkChars) { chunks.push({ start, text: para }); continue; }
+    for (let i = 0; i < para.length; i += maxChunkChars) chunks.push({ start: start + i, text: para.slice(i, i + maxChunkChars) });
+  }
+  return chunks;
+}
+
+/**
+ * Returns the text shown to the verifier. Sources within budget are returned
+ * unchanged. Longer sources are cut to the highest-overlap passages (document
+ * order preserved) instead of blindly keeping the first maxChars characters,
+ * so a relevant passage deep in a long page is not lost. Ties favour earlier text.
+ */
+export function selectSourceWindow(sourceText, claimText, maxChars = DEFAULT_VERIFICATION_LIMITS.maxSourceChars) {
+  const text = String(sourceText ?? '');
+  if (text.length <= maxChars) return text;
+  const terms = claimTerms(claimText);
+  const chunkMax = Math.max(400, Math.min(1500, Math.floor(maxChars / 8)));
+  const ranked = splitIntoChunks(text, chunkMax)
+    .map((c, i) => ({ ...c, i, score: overlapScore(terms, sourceTokenSet(c.text)) }))
+    .sort((a, b) => (b.score - a.score) || (a.i - b.i));
+  const picked = [];
+  let used = 0;
+  for (const c of ranked) {
+    const cost = c.text.length + WINDOW_SEPARATOR.length;
+    if (used + cost > maxChars) continue;
+    picked.push(c);
+    used += cost;
+  }
+  if (picked.length === 0) return text.slice(0, maxChars);
+  return picked.sort((a, b) => a.start - b.start).map((c) => c.text).join(WINDOW_SEPARATOR);
+}
+
 /**
  * Verifies one claim against one application-supplied source.
  * A provider failure is returned as an UNCERTAIN result with
@@ -176,7 +221,8 @@ export function validateVerifierResponse(text, { source, sourceText, minQuoteCha
 export async function verifyClaimAgainstSource({ claim, source, llmRouter, limits = {} }) {
   const lim = { ...DEFAULT_VERIFICATION_LIMITS, ...limits };
   const claimText = typeof claim === 'string' ? claim : claim?.claim;
-  const sourceText = String(source?.content ?? '').slice(0, lim.maxSourceChars);
+  const fullText = String(source?.content ?? '');
+  const sourceText = selectSourceWindow(fullText, typeof claim === 'string' ? claim : claim?.claim, lim.maxSourceChars);
   const base = { sourceId: source?.id, url: source?.url, result: VERIFICATION_RESULT.UNCERTAIN, quote: '', quoteAccepted: false, rejectionReason: null, provider: null, model: null, called: false };
   if (normalizeWhitespace(sourceText).length === 0 || typeof claimText !== 'string' || claimText.trim() === '') {
     return { ...base, rejectionReason: REJECTION_REASON.EMPTY_SOURCE_TEXT };
@@ -188,7 +234,7 @@ export async function verifyClaimAgainstSource({ claim, source, llmRouter, limit
   } catch (err) {
     return { ...base, called: true, rejectionReason: REJECTION_REASON.PROVIDER_ERROR, error: err?.message ?? 'provider error' };
   }
-  const validated = validateVerifierResponse(routed?.result?.text, { source, sourceText, minQuoteChars: lim.minQuoteChars });
+  const validated = validateVerifierResponse(routed?.result?.text, { source, sourceText: fullText, minQuoteChars: lim.minQuoteChars });
   return { ...validated, provider: routed?.providerUsed ?? null, model: routed?.result?.model ?? null, called: true };
 }
 
