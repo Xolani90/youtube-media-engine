@@ -349,7 +349,7 @@ async function enrichEvidence({
       resultingState: qualityTier
     });
     contentBySourceId.set(sourceId, acquired.content);
-    persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString() });
+    persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString(), notes: buildSourceProvenance(acquired) });
     known.add(acquired.url);
     if (acquired.status === RETRIEVAL_STATUS.SUCCESS) trace.expansionSourcesAcquired += 1;
   }
@@ -460,7 +460,7 @@ export async function runResearchProject({
     });
     publishedAtBySourceId.set(sourceId, acquired.publishedAt ?? null);
     contentBySourceId.set(sourceId, acquired.content);
-    persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString() });
+    persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString(), notes: buildSourceProvenance(acquired) });
   }
 
   // Failure isolation (v0.4 S12): failed/unparseable sources don't abort

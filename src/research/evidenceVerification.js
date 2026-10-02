@@ -1,6 +1,7 @@
 import { RETRIEVAL_STATUS, SOURCE_ROLE } from './constants.js';
 import { untrustedSourceBlock, derivedContentBlock } from '../providers/llm/promptTrust.js';
 import { independenceKey, isEligibleEvidenceSource } from './evidenceGrading.js';
+import { parseSourceProvenance } from './sourceProvenance.js';
 
 /**
  * Evidence-centric verification (Pass 44).
@@ -273,6 +274,41 @@ const QUALITY_RANK = { HIGH: 3, MEDIUM: 2, LOW: 1, UNUSABLE: 0 };
 const MIN_OVERLAP = 0.2;
 
 /**
+ * Pass 51 candidate PRIORITY (ordering only). Donor principle (browser-research /
+ * research_agent / 2see): rank by relevance, credibility and freshness. This score
+ * decides which candidates the bounded verifier sees first. It NEVER admits a source
+ * (relevance >= MIN_OVERLAP, social/syndicated/unusable/stale exclusions and domain
+ * independence still apply first) and NEVER grants VERIFIED (that stays with
+ * computeEvidenceStatus after literal-quote verification).
+ */
+export const PRIORITY_WEIGHTS = Object.freeze({ relevance: 0.5, credibility: 0.35, freshness: 0.15 });
+export const CREDIBILITY_BY_TIER = Object.freeze({ HIGH: 0.9, MEDIUM: 0.6, LOW: 0.3, UNUSABLE: 0 });
+const FRESH_FULL_DAYS = 30;
+const FRESH_ZERO_DAYS = 365;
+const NEUTRAL_FRESHNESS = 0.5;
+
+export function sourceCredibility(source) {
+  if (source?.role === SOURCE_ROLE.PRIMARY_AUTHORITATIVE) return 1;
+  return CREDIBILITY_BY_TIER[source?.quality_tier] ?? 0;
+}
+
+/** Provider-reported publishedAt is unverified metadata: ranking input only, never proof. */
+export function sourceFreshness(source, nowMs = Date.now()) {
+  const published = parseSourceProvenance(source?.notes)?.discovery?.publishedAt;
+  const t = published ? Date.parse(published) : NaN;
+  if (!Number.isFinite(t) || t > nowMs) return NEUTRAL_FRESHNESS;
+  const days = (nowMs - t) / 86400000;
+  if (days <= FRESH_FULL_DAYS) return 1;
+  if (days >= FRESH_ZERO_DAYS) return 0;
+  return 1 - (days - FRESH_FULL_DAYS) / (FRESH_ZERO_DAYS - FRESH_FULL_DAYS);
+}
+
+export function candidatePriority(relevance, source, nowMs = Date.now(), weights = PRIORITY_WEIGHTS) {
+  const v = weights.relevance * relevance + weights.credibility * sourceCredibility(source) + weights.freshness * sourceFreshness(source, nowMs);
+  return Math.round(v * 1e6) / 1e6;
+}
+
+/**
  * Ranks other eligible sources as corroboration candidates for ONE claim.
  *
  * - already-linked sources are excluded (they are context, not candidates);
@@ -308,7 +344,9 @@ export function selectCandidateSources({ claim, sources, linkedSourceIds = [], p
       diagnostics.entries.push({ sourceId: s.id, domain: key, score, breakdown: relevance.breakdown, decision: rejected ? 'rejected' : 'candidate', reason: rejected ? 'below_min_overlap' : 'meets_min_overlap' });
     }
     if (score < MIN_OVERLAP) continue;
-    scored.push({ source: s, score, domain: key });
+    const priority = candidatePriority(score, s, nowMs);
+    if (diagnostics) diagnostics.entries[diagnostics.entries.length - 1].priority = priority;
+    scored.push({ source: s, score, priority, domain: key });
   }
   const bestByDomain = new Map();
   for (const c of scored.sort(compareCandidates)) {
@@ -318,6 +356,7 @@ export function selectCandidateSources({ claim, sources, linkedSourceIds = [], p
 }
 
 function compareCandidates(a, b) {
+  if (b.priority !== a.priority) return b.priority - a.priority;
   if (b.score !== a.score) return b.score - a.score;
   const q = (QUALITY_RANK[b.source.quality_tier] ?? 0) - (QUALITY_RANK[a.source.quality_tier] ?? 0);
   if (q !== 0) return q;
