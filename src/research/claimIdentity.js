@@ -134,7 +134,10 @@ function normEntity(value) {
 const DAY_FREQUENCY = /^(?:daily|(?:per|each|every|a) day|(?:in|within) (?:a|one)(?: single)? day)$/;
 
 function normQualifier(value) {
-  const text = normText(value);
+  // Possessive marker is presentation, not identity (same rule as normEntity and
+  // groundingTokens): normText would otherwise leave a stray "s" token
+  // ("Zapier's" -> "zapier s") that the claim-side grounding tokens never contain.
+  const text = normText(typeof value === 'string' ? value.replace(/['\u2019]s\b/gi, '') : value);
   if (DAY_FREQUENCY.test(text)) return 'per day';
   const tokens = text.split(' ').filter(Boolean);
   while (tokens.length > 1 && (LEADING_ARTICLES.has(tokens[0]) || tokens[0] === 'in')) tokens.shift();
