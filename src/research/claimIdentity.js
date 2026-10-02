@@ -390,6 +390,112 @@ function identityHaystack(identity) {
   return [identity.subject, identity.object, ...identity.qualifiers].filter(Boolean).join(' ');
 }
 
+// ---- Identity coverage (compound claims) --------------------------------
+// A trusted fingerprint must describe the WHOLE claim. These checks look for
+// deterministic evidence that the text asserts more than one proposition and
+// that a single identity (one predicate, one polarity, one modality) cannot
+// represent all of them. They use only the existing verb vocabulary
+// (VERB_BASE / normPredicate); no verb or synonym is added, and the identity's
+// own subject/object/qualifier words are deliberately NOT consulted, so
+// copying a second event into object/qualifiers cannot hide it. Lexical only,
+// fail-closed (can only make an identity untrusted), never a general compound
+// detector: a plain "and", "but", comma, list, appositive or purpose phrase
+// is not by itself evidence of anything.
+const VERB_KIND = new Map(); // surface form -> 'base' | 'past' | 'sg' | 'ing'
+for (const [base, ...forms] of VERB_FORMS) {
+  // Table layout: [base, 3sg, past(/participle)?, -ing]; "cut" has no distinct past.
+  const kinds = forms.length === 3 ? ['sg', 'past', 'ing'] : ['sg', 'ing'];
+  if (!VERB_KIND.has(base)) VERB_KIND.set(base, 'base');
+  forms.forEach((f, i) => { if (!VERB_KIND.has(f)) VERB_KIND.set(f, kinds[i]); });
+}
+const COVERAGE_ADVERBS = '(?:(?:also|already|subsequently|later|just|now|previously|since|not|never|yet|still)\\s+)*';
+const VERB_ALT = [...VERB_KIND.keys()].sort((a, b) => b.length - a.length).join('|');
+const BE_HAVE_PAST = new RegExp(`\\b(?:was|were|is|are|been|be|being|has|have|had)\\s+${COVERAGE_ADVERBS}(${VERB_ALT})\\b`, 'g');
+const AFTER_BOUNDARY = new RegExp(`(?:^|\\b(?:and|but|yet|then)\\b|;)\\s*${COVERAGE_ADVERBS}(${VERB_ALT})\\b`, 'g');
+const AFTER_BOUNDARY_MODAL = new RegExp(`(?:\\b(?:and|but|yet|then)\\b|;)\\s*(?:will|would|can|could|may|might|should|must)\\s+${COVERAGE_ADVERBS}(${VERB_ALT})\\b`, 'g');
+// Explicit sequencing ("then expanded"): the following -ed word is a second
+// event even when it is not in the verb table (e.g. "expanded"). Only the
+// "then" connector qualifies, never a bare "and".
+const THEN_SEQUENCE = new RegExp(`\\bthen\\s+${COVERAGE_ADVERBS}([a-z]{3,}ed)\\b`, 'g');
+
+function coverageText(text) {
+  return stripConditionClauses(String(text)).toLowerCase().replace(/[\u2019]/g, "'").replace(/,/g, ' , ').replace(/[^a-z0-9';,\s-]+/g, ' ').replace(/\s+/g, ' ');
+}
+
+// Subordinate material is not an independently asserted top-level event.
+// Verbs inside a content clause ("announced that Argon was released"), a
+// relative clause (", which Google said was advanced,") or an adverbial
+// subordinate clause ("after Google announced it") are masked BEFORE event
+// detection. A masked span runs to the next hard top-level boundary (";",
+// but/yet, then, or "and" + auxiliary), or, for a comma-delimited relative
+// clause, to its closing comma. The boundary itself is left in place, so
+// "announced that Argon launched, then expanded testing" still exposes the
+// "then" event. Bare "and" and bare commas never end a masked span, so
+// "announced that X was released and opened" stays one proposition.
+// "to" (purpose/infinitive) is not a boundary and base verbs after it are
+// never counted; -ing forms are never counted.
+const SUBORDINATE_START = /,\s*(?:which|who|whom|whose)\b|\b(?:that|which|who|whom|whose|after|before|because|although|though|until|whereas)\b/g;
+const HARD_BOUNDARY = /;|,?\s*\b(?:but|yet)\b|,?\s*(?:and\s+)?\bthen\b|\band\s+(?:also\s+|already\s+)*(?=(?:has|have|had|is|are|was|were|will|would|does|do|did|can|could)\b)/g;
+
+function maskSubordinate(t) {
+  let out = '';
+  let pos = 0;
+  SUBORDINATE_START.lastIndex = 0;
+  for (;;) {
+    SUBORDINATE_START.lastIndex = pos;
+    const m = SUBORDINATE_START.exec(t);
+    if (!m) break;
+    const from = m.index;
+    const bodyStart = from + m[0].length;
+    let end = t.length;
+    HARD_BOUNDARY.lastIndex = bodyStart;
+    const hb = HARD_BOUNDARY.exec(t);
+    if (hb) end = hb.index;
+    if (m[0].startsWith(',')) {
+      const comma = t.indexOf(',', bodyStart);
+      if (comma >= 0 && comma < end) end = comma + 1;
+    }
+    out += `${t.slice(pos, from)} _ `;
+    pos = end;
+  }
+  return out + t.slice(pos);
+}
+
+/** Distinct event labels asserted in verbal position (normalized predicate, or "then:<word>"). */
+export function recognizedEvents(claimText) {
+  const t = ` ${maskSubordinate(coverageText(claimText))}`;
+  const events = new Set();
+  const add = (form, allowed) => {
+    const kind = VERB_KIND.get(form);
+    if (kind && allowed.includes(kind)) events.add(normPredicate(form));
+  };
+  for (const m of t.matchAll(BE_HAVE_PAST)) add(m[1], ['past']);
+  for (const m of t.matchAll(AFTER_BOUNDARY)) add(m[1], ['past', 'sg']);
+  for (const m of t.matchAll(AFTER_BOUNDARY_MODAL)) add(m[1], ['base']);
+  for (const m of t.matchAll(THEN_SEQUENCE)) {
+    if (VERB_KIND.has(m[1])) add(m[1], ['past']);
+    else events.add(`then:${m[1]}`);
+  }
+  return events;
+}
+
+const CLAUSE_BOUNDARY = /;|\s+(?:but|yet)\s+|,?\s+(?:and\s+)?then\s+|\s+and\s+(?:also\s+|already\s+)*(?=(?:has|have|had|is|are|was|were|will|would|does|do|did|can|could)\b)/gi;
+
+function compoundTextConflict(claimText, identity, hay) {
+  // (1) Event coverage: any recognized event other than the identity's own predicate.
+  for (const e of recognizedEvents(claimText)) {
+    if (e !== identity.predicate) return 'compound_text_partial_identity';
+  }
+  // (2) Mixed polarity: clauses disagree on negation, so one polarity cannot represent the claim.
+  const base = stripConditionClauses(String(claimText)).replace(/\bnot\s+only\b/gi, ' ');
+  const clauses = base.split(CLAUSE_BOUNDARY).filter((c) => c && c.trim());
+  if (clauses.length > 1) {
+    const flags = new Set(clauses.map((c) => NEGATION_CUE.test(stripAccountedRelativeNegation(c, normText(hay)))));
+    if (flags.size > 1) return 'compound_text_mixed_polarity';
+  }
+  return null;
+}
+
 /**
  * Returns null if the claim text is consistent with the identity, else a
  * short machine reason. Pure and deterministic.
@@ -466,7 +572,8 @@ export function identityTextConflict(claimText, identity, timeParts) {
     if (!(timeParts && timeParts.quarter === q) && !hay.includes(`q${q}`)) return 'quarter_not_accounted';
   }
 
-  return null;
+  // Last, so every existing reason keeps its precedence.
+  return compoundTextConflict(text, identity, hay);
 }
 
 // ---- Grounding (text -> structure) ---------------------------------------

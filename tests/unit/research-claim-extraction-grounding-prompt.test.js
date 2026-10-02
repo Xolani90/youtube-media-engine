@@ -61,3 +61,16 @@ test('Pass 11: the month-only / publication-resolver instruction is absent', asy
     assert.doesNotMatch(p, banned);
   }
 });
+
+test('Pass 32: safe-fallback contract is in the prompt and the omission wording is gone', async () => {
+  const p = await capturePrompt();
+  for (const needle of [
+    'ONLY when every resulting claim is fully self-contained',
+    'Never invent a subject; the only permitted repair is the "They" rewrite above',
+    'Never silently omit a source assertion',
+    "keep the whole original sentence as ONE claim in the source's exact words and set its identity to null",
+    'must never carry an identity that describes only one of its propositions'
+  ]) assert.ok(p.includes(needle), `missing: ${needle}`);
+  assert.doesNotMatch(p, /omit the rest/i);
+  assert.doesNotMatch(p, /emit only the clauses/i);
+});
