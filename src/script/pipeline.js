@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { SCRIPT_STAGE } from './constants.js';
 import { checkBriefEligibility } from './eligibility.js';
 import { generateScriptFields, validateGeneratedScript } from './generate.js';
-import { validateScriptClaimReferences, buildClaimLinks } from './claims.js';
+import { validateScriptClaimReferences, buildClaimLinks, validateSectionFigures } from './claims.js';
 import { canTransition, transition, InvalidTransitionError } from '../state/ContentStateMachine.js';
 import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, FAILURE_NATURE, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
@@ -91,6 +91,15 @@ export async function createScript({ storage, contentBriefId, llmRouter, policy,
   const allowCallToAction = policy?.allow_call_to_action === true;
   const maxAttempts = policy?.generation?.max_attempts ?? 3;
 
+  // Claim TEXT for the Brief's own key_claims (read-only lookup by id; no
+  // evidence re-evaluation). Without it the model only sees opaque ids.
+  const idPlaceholders = eligibility.keyClaimIds.map(() => '?').join(',');
+  const eligibleClaims = storage.all(`SELECT id, claim FROM claims WHERE id IN (${idPlaceholders})`, eligibility.keyClaimIds)
+    .filter((c) => typeof c.claim === 'string' && c.claim.trim() !== '');
+  const claimTextById = new Map(eligibleClaims.map((c) => [c.id, c.claim]));
+  const briefText = ['working_title', 'core_question', 'hook', 'angle', 'narrative_structure', 'counterpoints', 'original_insights']
+    .map((f) => brief[f]).join(' ');
+
   // --- Generation + deterministic Validation, bounded retry ---
   let accepted = null;
   let attemptsUsed = 0;
@@ -99,7 +108,7 @@ export async function createScript({ storage, contentBriefId, llmRouter, policy,
   while (attemptsUsed < maxAttempts && !accepted) {
     attemptsUsed++;
     const generation = await generateScriptFields(
-      { brief, eligibleClaimIds: eligibility.keyClaimIds, allowCallToAction },
+      { brief, eligibleClaimIds: eligibility.keyClaimIds, eligibleClaims, allowCallToAction },
       llmRouter
     );
 
@@ -120,6 +129,17 @@ export async function createScript({ storage, contentBriefId, llmRouter, policy,
       logDecision(storage, {
         runId, stage: SCRIPT_STAGE.VALIDATION, subjectType: 'content_brief', subjectId: contentBriefId,
         decision: 'REJECTED', reason: claimCheck.reason, provider: generation.providerUsed,
+        configSnapshot: { model: generation.model, estimatedCost: generation.estimatedCost, isPaid: generation.isPaid, attempt: attemptsUsed }
+      });
+      continue;
+    }
+
+    const figureCheck = validateSectionFigures(generation.parsed.sections, claimTextById, briefText);
+    if (!figureCheck.valid) {
+      lastFailureReason = figureCheck.reason;
+      logDecision(storage, {
+        runId, stage: SCRIPT_STAGE.VALIDATION, subjectType: 'content_brief', subjectId: contentBriefId,
+        decision: 'REJECTED', reason: figureCheck.reason, provider: generation.providerUsed,
         configSnapshot: { model: generation.model, estimatedCost: generation.estimatedCost, isPaid: generation.isPaid, attempt: attemptsUsed }
       });
       continue;

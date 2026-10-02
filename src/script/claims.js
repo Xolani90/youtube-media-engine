@@ -41,3 +41,33 @@ export function buildClaimLinks(sections) {
     claim_ids: Array.isArray(section.claim_ids) ? section.claim_ids : []
   }));
 }
+
+// Figures worth checking: money, percentages, decimals, thousands-separated
+// numbers and 4-digit years. Plain small integers ("3 steps") are ignored so
+// ordinary prose is not rejected.
+const FIGURE_PATTERN = /\$\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s?%|\b\d+\.\d+\b|\b\d{1,3}(?:,\d{3})+\b|\b(?:19|20)\d{2}\b/g;
+
+export function extractFigures(text) {
+  return new Set((String(text ?? '').match(FIGURE_PATTERN) ?? []).map((f) => f.replace(/[\s,]/g, '')));
+}
+
+/**
+ * Deterministic grounding guard: every figure in a section's content must
+ * appear in the text of that section's referenced claims or in the Brief
+ * fields. Skipped (valid) when any referenced claim text is unavailable, so
+ * a missing lookup can never cause a rejection. Not semantic judgment.
+ */
+export function validateSectionFigures(sections, claimTextById, briefText = '') {
+  const briefFigures = extractFigures(briefText);
+  for (const section of sections) {
+    const texts = section.claim_ids.map((id) => claimTextById.get(id));
+    if (texts.some((t) => typeof t !== 'string')) continue;
+    const allowed = extractFigures(texts.join(' '));
+    for (const f of extractFigures(`${section.heading} ${section.content}`)) {
+      if (!allowed.has(f) && !briefFigures.has(f)) {
+        return { valid: false, reason: `UNGROUNDED_FIGURE_${f}` };
+      }
+    }
+  }
+  return { valid: true, reason: null };
+}
