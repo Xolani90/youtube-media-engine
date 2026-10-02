@@ -351,3 +351,35 @@ test('Gate 7. identical text from another source no longer merges by wording alo
     for (const c of result.claims) assert.equal(sourceIdsOf(storage, c.id).length, 1);
   } finally { cleanup(storage, dbPath); }
 });
+
+// ---------------- Owner decision (Pass 24): canonical identity divergence is never overridden ----------------
+
+test('Pass 24. unequal canonical fingerprints with only COMPATIBLE field differences stay separate and never MERGED_BY_CONVERGENCE', async () => {
+  const qualifier = await run({
+    [A]: [fact('Spain won the final in 2026.', ident())],
+    [B]: [fact('Spain won the final in 2026 after extra time.', ident({ qualifiers: ['extra time'] }))]
+  }, { bodies: { [A]: 'Spain won the final in 2026.', [B]: 'Spain won the final in 2026 after extra time.' } });
+  try {
+    assert.equal(qualifier.result.claims.length, 2);
+    assert.equal(qualifier.result.convergence.candidates, 1, 'reached the comparator');
+    assert.equal(qualifier.result.convergence.promoted, 0);
+    assert.equal(decisions(qualifier.storage, 'CANDIDATE_SAME_FACT')[0].reason, 'not_promoted_fields_not_deterministic');
+    assert.equal(decisions(qualifier.storage, 'MERGED_BY_CONVERGENCE').length, 0);
+    assert.equal(decisions(qualifier.storage, 'MERGED_BY_IDENTITY').length, 0);
+    for (const c of qualifier.result.claims) {
+      assert.equal(sourceIdsOf(qualifier.storage, c.id).length, 1);
+      assert.notEqual(c.evidence_status, 'VERIFIED');
+    }
+  } finally { cleanup(qualifier.storage, qualifier.dbPath); }
+  const object = await run({
+    [A]: [fact('Spain won the final in 2026.', ident())],
+    [B]: [fact('Spain won the world cup final in 2026.', ident({ object: 'the world cup final' }))]
+  }, { bodies: { [A]: 'Spain won the final in 2026.', [B]: 'Spain won the world cup final in 2026.' } });
+  try {
+    assert.equal(object.result.claims.length, 2);
+    assert.equal(object.result.convergence.promoted, 0);
+    assert.equal(decisions(object.storage, 'MERGED_BY_CONVERGENCE').length, 0);
+    assert.equal(decisions(object.storage, 'MERGED_BY_IDENTITY').length, 0);
+    for (const c of object.result.claims) assert.notEqual(c.evidence_status, 'VERIFIED');
+  } finally { cleanup(object.storage, object.dbPath); }
+});

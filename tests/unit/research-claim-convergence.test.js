@@ -7,6 +7,7 @@ import {
 } from '../../src/research/claimConvergence.js';
 import { applySafeNormalization, NORMALIZATION_STATUS } from '../../src/research/claimNormalization.js';
 import { extractClaims, ExtractionFailureError, EXTRACTION_PARSE_OUTCOME } from '../../src/research/claims.js';
+import { deriveClaimIdentity } from '../../src/research/claimIdentity.js';
 
 const id = (over = {}) => ({
   subject: 'spain', predicate: 'win', object: 'final', qualifiers: [], time: '2026', quantity: null, unit: null,
@@ -289,4 +290,48 @@ test('extractClaims: missing original_claim on a non-verbatim claim does not fai
   assert.equal(out.claims[0].claim, 'Spain lifted the trophy.');
   assert.equal(out.claims[0].normalization.convergenceTrusted, false);
   assert.equal(out.claims[0].normalization.status, NORMALIZATION_STATUS.UNVERIFIED_ORIGIN);
+});
+
+// ---------------- Owner decision (Pass 24): canonical identity divergence is never overridden ----------------
+// If two claims both carry a valid, trusted canonical fingerprint and the
+// fingerprints differ, convergence must not promote them, even when the
+// field-level comparison finds only COMPATIBLE / UNRESOLVED differences (no
+// CONFLICT). Only EXACT promotes.
+
+const derived = (claim, over = {}) => {
+  const r = deriveClaimIdentity({ claim, claim_type: 'FACT', is_load_bearing: true, identity: id({ subject: 'Spain', predicate: 'win', object: 'the final', ...over }) });
+  assert.notEqual(r.fingerprint, null, `fixture must be a trusted identity: ${claim} (${r.reason})`);
+  return r;
+};
+
+test('different canonical fingerprints are never promoted by convergence (COMPATIBLE / UNRESOLVED differences only)', () => {
+  const baseText = 'Spain won the final in 2026.';
+  const cases = [
+    ['object specificity (COMPATIBLE)', derived(baseText), derived('Spain won the world cup final in 2026.', { object: 'the world cup final' }), 'object', FIELD_STATUS.COMPATIBLE],
+    ['qualifier subset (COMPATIBLE)', derived(baseText), derived('Spain won the final in 2026 after extra time.', { qualifiers: ['extra time'] }), 'qualifiers', FIELD_STATUS.COMPATIBLE],
+    ['time granularity (COMPATIBLE)', derived(baseText), derived('Spain won the final in March 2026.', { time: '2026-03' }), 'time', FIELD_STATUS.COMPATIBLE],
+    ['partial entity overlap (UNRESOLVED)', derived('Spain won the world cup final in 2026.', { object: 'the world cup final' }), derived('Spain won the european cup final in 2026.', { object: 'the european cup final' }), 'object', FIELD_STATUS.UNRESOLVED]
+  ];
+  for (const [name, a, b, field, status] of cases) {
+    assert.notEqual(a.fingerprint, b.fingerprint, `${name}: fingerprints must differ`);
+    const r = compareClaimIdentities(a.identity, b.identity, meta);
+    assert.equal(r.fields[field].status, status, `${name}: field-level result`);
+    assert.equal(r.verdict, CONVERGENCE_VERDICT.CANDIDATE_SAME_FACT, `${name}: a candidate, not DISTINCT`);
+    assert.equal(r.promotion.eligible, false, `${name}: must not be promotion-eligible`);
+    assert.equal(r.promotion.rule, null);
+    // Only EXACT promotes: eligibility is exactly "every field status is exact".
+    assert.equal(r.promotion.eligible, Object.values(r.fields).every((f) => f.status === FIELD_STATUS.EXACT));
+    const index = new ConvergenceIndex();
+    index.add({ claimId: 'x', identity: a.identity, claimType: 'FACT', isLoadBearing: true, sourceIds: ['s1'] });
+    const ev = evaluateConvergence(index, { identity: b.identity, claimType: 'FACT', isLoadBearing: true, sourceId: 's2' });
+    assert.equal(ev.candidates.length, 1, `${name}: reaches the comparator`);
+    assert.equal(ev.promoted, null, `${name}: never promoted`);
+  }
+});
+
+test('control: equal canonical fingerprints with different wording are promotion-eligible', () => {
+  const a = derived('Spain won the final in 2026.');
+  const b = derived('The final in 2026 was won by Spain.');
+  assert.equal(a.fingerprint, b.fingerprint);
+  assert.equal(compareClaimIdentities(a.identity, b.identity, meta).promotion.eligible, true);
 });

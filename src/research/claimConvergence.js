@@ -293,7 +293,7 @@ export class ConvergenceIndex {
  * Evaluates one incoming trusted claim against the index.
  *
  * Promotion happens ONLY when exactly one candidate is promotion-eligible
- * (all fields exact or deterministically equivalent) and that candidate does
+ * (every field EXACT; COMPATIBLE, UNRESOLVED and EQUIVALENT never promote) and that candidate does
  * not already carry this source. Ambiguity (two eligible targets) fails
  * closed: no promotion. Candidates sharing the same source are skipped
  * (they add no independent evidence).
