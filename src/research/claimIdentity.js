@@ -383,6 +383,58 @@ function stripAccountedRelativeNegation(text, hay) {
     if (tokens.length === 0 || !tokens.every((t) => hayTokens.has(t))) continue;
     out = `${out.slice(0, start)} ${out.slice(end)}`;
   }
+  return stripAccountedWithoutAdjunct(out, hay);
+}
+
+// "without <noun phrase / gerund>" is a prepositional adjunct ("ships without
+// source code", "freeing memory without buying hardware"): it qualifies HOW the
+// proposition holds, it does not negate the proposition. Same safety principle
+// as the relative-clause case above: the word is only set aside when the
+// identity itself carries the adjunct (the word "without", its first two
+// following words contiguously, and every word up to the end of the phrase), so
+// the fingerprint still distinguishes "ships without X" from plain "ships".
+// An adjunct the identity dropped stays a negation cue and the two-way polarity
+// veto applies exactly as before. Only the word "without" is removed; every
+// other negation cue in the text ("did not ship ... without ...") is still seen.
+function stripAccountedWithoutAdjunct(text, hay) {
+  const hayTokens = hay.split(' ').filter(Boolean);
+  if (!hayTokens.includes('without')) return text;
+  const hayTokenSet = new Set(hayTokens);
+  const paddedHay = ` ${hayTokens.join(' ')} `;
+  let out = text;
+  for (const m of [...text.matchAll(/\bwithout\b/gi)].reverse()) {
+    const start = m.index;
+    const end = start + m[0].length;
+    let tail = text.slice(end).split(/[,;.]/)[0];
+    const next = tail.search(NEGATION_CUE);
+    if (next >= 0) tail = tail.slice(0, next);
+    const tokens = normText(tail).split(' ').filter(Boolean);
+    if (tokens.length === 0 || !tokens.every((t) => hayTokenSet.has(t))) continue;
+    if (!paddedHay.includes(` without ${tokens.slice(0, 2).join(' ')} `)) continue;
+    out = `${out.slice(0, start)} ${out.slice(end)}`;
+  }
+  return out;
+}
+
+// A non-numeric approximator over a duration/amount ("for more than a decade",
+// "nearly a year after ...", "almost anyone") is wording about the size of a
+// span, not hedging of the proposition. It is only set aside when its operand
+// (the next two words) contains no digit and no spelled number AND the identity
+// carries the cue + operand contiguously, so the fingerprint still tells "more
+// than a decade" from "a decade". Numeric bounds ("more than 500", "up to
+// 800K", "nearly a dozen") are untouched and still veto an OCCURRED label, and
+// every other modality cue (will, may, estimated, announced, ...) is still seen.
+const APPROXIMATOR = /\b(more\s+than|less\s+than|at\s+least|at\s+most|nearly|almost|roughly|approximately|up\s+to)(\s+\S+(?:\s+\S+)?)/gi;
+function stripAccountedApproximators(text, hay) {
+  const paddedHay = ` ${hay} `;
+  let out = text;
+  for (const m of [...text.matchAll(APPROXIMATOR)].reverse()) {
+    const operand = m[2];
+    if (/\d/.test(operand) || SPELLED_NUMBER.test(operand)) continue;
+    const phrase = normText(`${m[1]}${operand}`);
+    if (!paddedHay.includes(` ${phrase} `)) continue;
+    out = `${out.slice(0, m.index)} ${out.slice(m.index + m[1].length)}`;
+  }
   return out;
 }
 
@@ -516,7 +568,8 @@ export function identityTextConflict(claimText, identity, timeParts) {
   if (associative && identity.relation !== IDENTITY_RELATION.ASSOCIATIVE) return 'relation_text_mismatch';
 
   // Hedged / planned / estimated / bounded wording cannot be labelled OCCURRED.
-  if ((MODALITY_CUE.test(text) || MODAL_MAY.test(text)) && identity.modality === IDENTITY_MODALITY.OCCURRED) return 'modality_text_mismatch';
+  const modalText = stripAccountedApproximators(text, normText(hay));
+  if ((MODALITY_CUE.test(modalText) || MODAL_MAY.test(modalText)) && identity.modality === IDENTITY_MODALITY.OCCURRED) return 'modality_text_mismatch';
 
   // Every digit-number in the text must be accounted for by the structure:
   // a number followed by a scale word/suffix ("1 billion", "$2B") must equal
