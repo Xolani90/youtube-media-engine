@@ -4,11 +4,15 @@ import { acquireSources } from './acquisition.js';
 import { classifySourceRole, classifySourceQuality } from './sourceClassification.js';
 import { extractClaims, validateExtractedClaim, ExtractionFailureError } from './claims.js';
 import { deriveClaimIdentity, summarizeIdentityCoverage } from './claimIdentity.js';
-import { ConvergenceIndex, evaluateConvergence, isConvergenceEligible } from './claimConvergence.js';
-import { computeEvidenceStatus } from './evidenceGrading.js';
+import { ConvergenceIndex, evaluateConvergence, explainConvergence, isConvergenceEligible } from './claimConvergence.js';
+import { computeEvidenceStatus, explainEvidenceSources, independenceKey } from './evidenceGrading.js';
 import { canonicalizePair, recordContradiction, hasUnresolvedContradiction } from './contradictions.js';
 import { evaluateCompleteness } from './completeness.js';
 import { traceAsync } from '../diagnostics/trace.js';
+
+// Research diagnostics (CLAIM_TRACE / EVIDENCE_TRACE / RESEARCH_TRACE_SUMMARY and the
+// convergence explanation) are inert unless explicitly enabled, matching diagnostics/trace.js.
+const diagnosticsEnabled = () => process.env.DIAGNOSTIC_TRACE === 'true';
 
 /**
  * Records a decision_log entry, same shape/discipline as Discovery's
@@ -238,6 +242,7 @@ export async function runResearchProject({
   // existing detector. Candidate similarity != same fact != VERIFIED.
   const convergenceIndex = new ConvergenceIndex();
   const convergence = { eligible: 0, skipped: 0, candidates: 0, promoted: 0, ambiguous: 0 };
+  const identityTrace = { factClaims: 0, loadBearingFactFingerprinted: 0, reasons: {} };
 
   for (const source of successfulSources) {
     const full = persistedSources.find((s) => s.id === source.id);
@@ -291,7 +296,13 @@ export async function runResearchProject({
       }
 
       const normalized = proposed.claim.trim().toLowerCase();
-      const { fingerprint, identity: derivedIdentity } = deriveClaimIdentity(proposed, publicationContext);
+      const { fingerprint, reason: identityReason, identity: derivedIdentity } = deriveClaimIdentity(proposed, publicationContext);
+      if (proposed.claim_type === CLAIM_TYPE.FACT) {
+        identityTrace.factClaims += 1;
+        if (proposed.is_load_bearing && fingerprint) identityTrace.loadBearingFactFingerprinted += 1;
+        const key = identityReason === null ? 'null' : String(identityReason);
+        identityTrace.reasons[key] = (identityTrace.reasons[key] ?? 0) + 1;
+      }
       // The identity is only trusted (usable for convergence) when a fingerprint exists.
       const trustedIdentity = fingerprint ? derivedIdentity : null;
       // Identity-index trust boundary: a claim may query or populate
@@ -303,6 +314,7 @@ export async function runResearchProject({
       let claimId = null;
       let isNewClaim = false;
       let mergedByIdentity = false;
+      let convergenceDiagnostic = null;
       const sameTextIds = claimTextIndex.get(normalized) ?? [];
       // Same exact wording, same source: pure deduplication (no new link,
       // no corroboration -- the source is already linked to that row).
@@ -338,6 +350,19 @@ export async function runResearchProject({
           convergence.skipped += 1;
         } else {
           convergence.eligible += 1;
+          // Must precede evaluation and must remain side-effect free.
+          if (diagnosticsEnabled()) try {
+            convergenceDiagnostic = explainConvergence(convergenceIndex, {
+              identity: trustedIdentity, claimType: proposed.claim_type,
+              isLoadBearing: proposed.is_load_bearing, sourceId: source.id
+            });
+            if (!convergenceDiagnostic.error) {
+              convergenceDiagnostic.pairs = convergenceDiagnostic.pairs.map((pair) => ({
+                ...pair,
+                sourceDomains: pair.sourceIds.map((id) => independenceKey(storage.get('SELECT url FROM sources WHERE id = ?', [id])?.url))
+              }));
+            }
+          } catch { convergenceDiagnostic = { error: true }; }
           const evaluation = evaluateConvergence(convergenceIndex, {
             identity: trustedIdentity, claimType: proposed.claim_type,
             isLoadBearing: proposed.is_load_bearing, sourceId: source.id
@@ -412,6 +437,28 @@ export async function runResearchProject({
         claimSourceIds.get(claimId).add(source.id);
       }
       convergenceIndex.noteSource(claimId, source.id);
+
+      // Diagnostics are strictly best-effort and occur only after the final
+      // claim/source relationship is established.
+      if (diagnosticsEnabled() && proposed.claim_type === CLAIM_TYPE.FACT) {
+        try {
+          const normForTrace = proposed.normalization || {};
+          logDecision(storage, {
+            runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+            decision: 'CLAIM_TRACE', reason: dedupId ? 'DEDUP_SAME_SOURCE' : (mergedByIdentity ? 'MERGED_BY_IDENTITY' : (convergenceDiagnostic?.pairs?.some((p) => p.promotionEligible) && !isNewClaim ? 'MERGED_BY_CONVERGENCE' : 'NEW_CLAIM')),
+            configSnapshot: {
+              sourceId: source.id, sourceDomain: independenceKey(sourceRow.url), sourceRole: sourceRow.role,
+              claimText: proposed.claim, claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing,
+              normalizationStatus: normForTrace.status ?? null, convergenceTrusted: normForTrace.convergenceTrusted === true,
+              identityDiscarded: normForTrace.identityDiscarded === true, identityPresent: !!proposed.identity,
+              identityReason, fingerprintPresent: !!fingerprint, fingerprintPrefix: fingerprint ? fingerprint.slice(0, 12) : null,
+              identityIndexEligible, identity: derivedIdentity ?? null, path: dedupId ? 'DEDUP_SAME_SOURCE' : (mergedByIdentity ? 'MERGED_BY_IDENTITY' : (isNewClaim ? 'NEW_CLAIM' : 'MERGED_BY_CONVERGENCE')),
+              convergenceEligible: convergenceEligibility?.eligible ?? false, convergenceSkipReason: convergenceEligibility?.reason ?? null,
+              relevance: convergenceEligibility?.relevance ?? null, convergence: convergenceDiagnostic
+            }
+          });
+        } catch { /* diagnostics must never affect research */ }
+      }
 
       // Provenance: a reviewer must be able to recover what the source said,
       // what the model proposed, and what normalization decided. The persisted
@@ -568,6 +615,15 @@ export async function runResearchProject({
     });
     setEvidenceStatus(storage, claimRow.id, evidenceStatus);
     claimRow.evidence_status = evidenceStatus;
+    if (diagnosticsEnabled() && claimRow.claim_type === CLAIM_TYPE.FACT && claimRow.is_load_bearing === true) {
+      try {
+        logDecision(storage, {
+          runId, stage: RESEARCH_STAGE.EVIDENCE_GRADING, subjectType: 'claim', subjectId: claimRow.id,
+          decision: 'EVIDENCE_TRACE', reason: evidenceStatus,
+          configSnapshot: { ...explainEvidenceSources({ claimSourceLinks: links, sourcesById, policy }), contested }
+        });
+      } catch { /* diagnostics must never affect research */ }
+    }
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.EVIDENCE_GRADING, subjectType: 'claim', subjectId: claimRow.id,
       decision: evidenceStatus, reason: contested ? 'unresolved_contradiction' : 'deterministic_corroboration_check'
@@ -593,6 +649,21 @@ export async function runResearchProject({
   const completenessResult = evaluateCompleteness({
     claims: persistedClaims, policy, coreQuestionType, stoppingConditionMet
   });
+
+  if (diagnosticsEnabled()) try {
+    const factClaims = persistedClaims.filter((c) => c.claim_type === CLAIM_TYPE.FACT);
+    const loadBearingFact = factClaims.filter((c) => c.is_load_bearing);
+    const verifiedLoadBearingFact = loadBearingFact.filter((c) => c.evidence_status === EVIDENCE_STATUS.VERIFIED).length;
+    const successfulPersistedSources = persistedSources.filter((s) => s.retrieval_status === RETRIEVAL_STATUS.SUCCESS);
+    const sourceDomains = new Set(successfulPersistedSources.map((s) => independenceKey(s.url)).filter(Boolean));
+    const independentReportingDomains = new Set(successfulPersistedSources.filter((s) => s.role === 'independent_reporting').map((s) => independenceKey(s.url)).filter(Boolean));
+    logDecision(storage, { runId, stage: RESEARCH_STAGE.COMPLETENESS_CHECK, subjectType: 'research_project', subjectId: project.id,
+      decision: 'RESEARCH_TRACE_SUMMARY', reason: completenessResult.status,
+      configSnapshot: { factClaims: factClaims.length, loadBearingFact: loadBearingFact.length,
+        loadBearingFactFingerprinted: identityTrace.loadBearingFactFingerprinted, identityReasonHistogram: identityTrace.reasons, convergence,
+        distinctSuccessfulDomains: sourceDomains.size, independentReportingDomains: independentReportingDomains.size,
+        verifiedLoadBearingFact, stoppingConditionMet } });
+  } catch { /* diagnostics must never affect research */ }
 
   logDecision(storage, {
     runId, stage: RESEARCH_STAGE.COMPLETENESS_CHECK, subjectType: 'research_project', subjectId: project.id,

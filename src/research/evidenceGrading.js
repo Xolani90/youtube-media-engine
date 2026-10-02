@@ -57,6 +57,29 @@ function isSourceEligible(source, policy, nowMs) {
   );
 }
 
+/** Pure evidence-grade diagnostic using exactly the production eligibility rules. */
+export function explainEvidenceSources({ claimSourceLinks, sourcesById, policy, nowMs = Date.now() }) {
+  const uniqueSourceIds = [...new Set((claimSourceLinks || []).map((link) => link.source_id))];
+  const sources = uniqueSourceIds.map((sourceId) => {
+    const source = sourcesById.get(sourceId);
+    if (!source) return { sourceId, domain: null, role: null, qualityTier: null, retrievalStatus: null, fresh: false, qualityOk: false, eligible: false };
+    const fresh = isSourceFresh(source, policy, nowMs);
+    const qualityOk = meetsMinimumQuality(source.quality_tier, policy.evidence.source_quality.minimum_quality_tier_for_corroboration);
+    return {
+      sourceId, domain: independenceKey(source.url), role: source.role,
+      qualityTier: source.quality_tier, retrievalStatus: source.retrieval_status,
+      fresh, qualityOk, eligible: isSourceEligible(source, policy, nowMs)
+    };
+  });
+  const eligible = sources.filter((source) => source.eligible);
+  const independentDomains = [...new Set(eligible
+    .filter((source) => source.role === SOURCE_ROLE.INDEPENDENT_REPORTING && policy.evidence.source_roles.independent_reporting.counts_toward_corroboration)
+    .map((source) => source.domain).filter(Boolean))];
+  const hasPrimaryAuthoritative = eligible.some((source) => source.role === SOURCE_ROLE.PRIMARY_AUTHORITATIVE && policy.evidence.source_roles.primary_authoritative.sufficient_alone);
+  return { sources, independentDomains, independentCount: independentDomains.length,
+    required: policy.evidence.independent_reporting_minimum, hasPrimaryAuthoritative };
+}
+
 /**
  * Deterministic evidence_status computation (Validation, never Generation
  * — the LLM never self-certifies evidence_status, v0.4 R7).

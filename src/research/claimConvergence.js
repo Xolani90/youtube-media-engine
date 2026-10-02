@@ -319,6 +319,48 @@ export function evaluateConvergence(index, { identity, claimType, isLoadBearing,
   return { candidates, promoted: null, ambiguous: eligible.length > 1 };
 }
 
+/**
+ * Observational counterpart to evaluateConvergence.  This deliberately reads
+ * buckets rather than candidatesFor() so inspecting a run cannot increment the
+ * index overflow counter or otherwise influence later convergence decisions.
+ */
+export function explainConvergence(index, { identity, claimType, isLoadBearing, sourceId }) {
+  try {
+    const keysChecked = blockingKeys(identity, claimType);
+    const overflowedKeys = [];
+    const sameSourceSkipped = [];
+    const seen = new Set();
+    const pairs = [];
+    for (const key of keysChecked) {
+      const bucket = index.buckets.get(key);
+      if (!bucket) continue;
+      if (bucket.length > index.maxBucketSize) { overflowedKeys.push(key); continue; }
+      for (const entry of bucket) {
+        if (seen.has(entry.claimId)) continue;
+        seen.add(entry.claimId);
+        if (entry.sourceIds.has(sourceId)) { sameSourceSkipped.push(entry.claimId); continue; }
+        const comparison = compareClaimIdentities(entry.identity, identity, {
+          claimTypeA: entry.claimType, claimTypeB: claimType,
+          loadBearingA: entry.isLoadBearing, loadBearingB: !!isLoadBearing
+        });
+        const conflictFields = Object.entries(comparison.fields)
+          .filter(([, value]) => value.status === S.CONFLICT || value.status === S.UNRESOLVED)
+          .map(([field, value]) => `${field}:${value.detail ?? value.status}`);
+        pairs.push({
+          claimId: entry.claimId,
+          sourceIds: [...entry.sourceIds],
+          verdict: comparison.verdict,
+          conflictFields,
+          promotionEligible: comparison.promotion.eligible
+        });
+      }
+    }
+    return { keysChecked, overflowedKeys, sameSourceSkipped, pairs };
+  } catch {
+    return { error: true };
+  }
+}
+
 // ---- self-contained / relevance signals (deterministic, prioritisation only) -
 
 const VAGUE_OPENING = /^\s*(?:they|it|he|she|this|these|those|its|their|the\s+(?:team|company|winner|tournament|squad|club|player|firm|group|organization|organisation))\b/i;
