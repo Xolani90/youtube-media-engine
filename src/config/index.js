@@ -156,7 +156,8 @@ function loadResearchSourceClassification() {
   const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
   return {
     authoritativeDomains: Array.isArray(parsed.authoritativeDomains) ? parsed.authoritativeDomains : [],
-    syndicatedDomains: Array.isArray(parsed.syndicatedDomains) ? parsed.syndicatedDomains : []
+    syndicatedDomains: Array.isArray(parsed.syndicatedDomains) ? parsed.syndicatedDomains : [],
+    socialDomains: Array.isArray(parsed.socialDomains) ? parsed.socialDomains : []
   };
 }
 

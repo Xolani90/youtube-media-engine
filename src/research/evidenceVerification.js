@@ -279,7 +279,7 @@ const MIN_OVERLAP = 0.2;
  * - any source sharing a registrable domain with an already-linked supporting
  *   source is excluded (it could never add an independent publisher);
  * - failed / unusable / stale / below-quality sources are excluded;
- * - syndicated sources never count toward corroboration so they are skipped;
+ * - syndicated and social_media sources never count toward corroboration so they are skipped;
  * - at most ONE candidate per registrable domain (the best-scoring one);
  * - ranked by overlap score, then quality tier, then role, then id (stable).
  */
@@ -294,7 +294,7 @@ export function selectCandidateSources({ claim, sources, linkedSourceIds = [], p
     if (linked.has(s.id)) continue;
     if (s.retrieval_status !== RETRIEVAL_STATUS.SUCCESS) continue;
     if (typeof s.content !== 'string' || s.content.trim() === '') continue;
-    if (s.role === SOURCE_ROLE.SYNDICATED) continue;
+    if (s.role === SOURCE_ROLE.SYNDICATED || s.role === SOURCE_ROLE.SOCIAL_MEDIA) continue;
     if (!isEligibleEvidenceSource(s, policy, nowMs)) continue;
     const key = independenceKey(s.url);
     if (!key || linkedDomains.has(key)) continue;

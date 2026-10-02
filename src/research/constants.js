@@ -58,7 +58,10 @@ export const EVIDENCE_STATUS = Object.freeze({
 export const SOURCE_ROLE = Object.freeze({
   PRIMARY_AUTHORITATIVE: 'primary_authoritative',
   INDEPENDENT_REPORTING: 'independent_reporting',
-  SYNDICATED: 'syndicated'
+  SYNDICATED: 'syndicated',
+  // User-generated/social material: useful for discovery/context, never
+  // independent reporting by default (Pass 46.2).
+  SOCIAL_MEDIA: 'social_media'
 });
 
 export const SOURCE_QUALITY = Object.freeze({

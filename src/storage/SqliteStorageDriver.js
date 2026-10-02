@@ -62,6 +62,9 @@ export class SqliteStorageDriver extends StorageDriver {
       // stage_retry_state and stage_retry_cycle_history (drops+recreates,
       // adds `provider`), the same rebuild/FK-toggle convention as 0017.
       '0026_provider_scoped_publication_retry.sql',
+      // Pass 46.2: 0028 rebuilds `sources` to widen the role CHECK with
+      // 'social_media' (same rebuild/FK-toggle convention as 0013/0018).
+      '0028_sources_social_media_role.sql',
     ]);
 
     for (const file of files) {

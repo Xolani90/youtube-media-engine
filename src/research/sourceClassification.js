@@ -16,10 +16,13 @@ import { assessContent, CONTENT_VERDICT } from './contentAssessment.js';
  * LLM call should be spent where a domain lookup suffices; a genuinely
  * ambiguous case can be escalated by the caller via `ambiguous: true`.
  */
-export function classifySourceRole(url, { authoritativeDomains = [], syndicatedDomains = [] } = {}) {
+export function classifySourceRole(url, { authoritativeDomains = [], syndicatedDomains = [], socialDomains = [] } = {}) {
   const domain = extractDomain(url);
   if (domain && authoritativeDomains.includes(domain)) {
     return { role: SOURCE_ROLE.PRIMARY_AUTHORITATIVE, ambiguous: false };
+  }
+  if (domain && socialDomains.includes(domain)) {
+    return { role: SOURCE_ROLE.SOCIAL_MEDIA, ambiguous: false };
   }
   if (domain && syndicatedDomains.includes(domain)) {
     return { role: SOURCE_ROLE.SYNDICATED, ambiguous: false };
@@ -44,6 +47,8 @@ export function classifySourceQuality(retrievalStatus, role) {
   }
   if (role === SOURCE_ROLE.PRIMARY_AUTHORITATIVE) return SOURCE_QUALITY.HIGH;
   if (role === SOURCE_ROLE.SYNDICATED) return SOURCE_QUALITY.LOW;
+  // Social posts keep provenance but fall below the corroboration minimum.
+  if (role === SOURCE_ROLE.SOCIAL_MEDIA) return SOURCE_QUALITY.LOW;
   return SOURCE_QUALITY.MEDIUM; // independent_reporting default
 }
 

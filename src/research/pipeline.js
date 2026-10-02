@@ -128,7 +128,7 @@ const QUOTE_REJECTIONS = new Set([REJECTION_REASON.QUOTE_MISSING, REJECTION_REAS
 function newResearchDiag() {
   return {
     retrieval: { plainAttempts: 0, plainSuccesses: 0, fallbackAttempts: 0, fallbackSuccesses: 0, weakSourcesRejected: 0, unusableSources: 0 },
-    sourceQuality: { primaryAuthoritative: 0, independentReporting: 0, syndicated: 0, weakOrRejected: 0 },
+    sourceQuality: { primaryAuthoritative: 0, independentReporting: 0, syndicated: 0, socialMedia: 0, weakOrRejected: 0 },
     relevance: { candidatesScored: 0, candidatesRejectedAsIrrelevant: 0, entries: [] }
   };
 }
@@ -151,6 +151,7 @@ function noteAcquiredDiag(diag, acquired, roleResult, admissibility) {
   const q = diag.sourceQuality;
   if (roleResult.role === 'primary_authoritative') q.primaryAuthoritative += 1;
   else if (roleResult.role === 'syndicated') q.syndicated += 1;
+  else if (roleResult.role === 'social_media') q.socialMedia += 1;
   else q.independentReporting += 1;
 }
 
@@ -356,7 +357,7 @@ async function enrichEvidence({
  * @param {import('./ResearchSourceProvider.js').ResearchSourceProvider} deps.sourceProvider
  * @param {object} deps.llmRouter
  * @param {object} deps.policy - research_policy.json
- * @param {object} [deps.classification] - { authoritativeDomains, syndicatedDomains } for sourceClassification
+ * @param {object} [deps.classification] - { authoritativeDomains, syndicatedDomains, socialDomains } for sourceClassification
  * @param {function} [deps.retrieveImpl] - injectable retrieval fn for testing
  * @param {function} [deps.fetchImpl] - forwarded to retrieveImpl
  * @param {function} [deps.detectContradiction] - async (claimA, claimB, llmRouter) => one of CONTRADICTION_RESULT ('CONTRADICTS'|'NO_CONTRADICTION'|'UNCERTAIN'); a thrown/rejected call is treated as ERROR by the caller. LLM-assisted semantic judgment, RG-02 contract (see ./contradictionDetector.js for the production implementation). Optional: no contradiction detection performed if omitted (logged as NOT_CHECKED).
