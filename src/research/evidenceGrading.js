@@ -49,6 +49,20 @@ export function isSourceFresh(source, policy, nowMs = Date.now()) {
   return ageHours <= policy.staleness.maximum_source_age_hours;
 }
 
+/** Same eligibility rule the grader uses; exported so evidence verification selects only gradeable sources. */
+export function isEligibleEvidenceSource(source, policy, nowMs = Date.now()) {
+  return isSourceEligible(source, policy, nowMs);
+}
+
+// A claim_sources link whose role is 'contradicting' records source evidence
+// that directly conflicts with the claim. It is never support. Links with no
+// role (legacy / fixtures) are treated as supporting, as before.
+const CONTRADICTING_ROLE = 'contradicting';
+
+function isSupportingLink(link) {
+  return link?.role !== CONTRADICTING_ROLE;
+}
+
 function isSourceEligible(source, policy, nowMs) {
   return (
     source.retrieval_status === RETRIEVAL_STATUS.SUCCESS &&
@@ -59,7 +73,9 @@ function isSourceEligible(source, policy, nowMs) {
 
 /** Pure evidence-grade diagnostic using exactly the production eligibility rules. */
 export function explainEvidenceSources({ claimSourceLinks, sourcesById, policy, nowMs = Date.now() }) {
-  const uniqueSourceIds = [...new Set((claimSourceLinks || []).map((link) => link.source_id))];
+  const supportingLinks = (claimSourceLinks || []).filter(isSupportingLink);
+  const contradictingIds = new Set((claimSourceLinks || []).filter((link) => !isSupportingLink(link)).map((link) => link.source_id));
+  const uniqueSourceIds = [...new Set(supportingLinks.map((link) => link.source_id))];
   const sources = uniqueSourceIds.map((sourceId) => {
     const source = sourcesById.get(sourceId);
     if (!source) return { sourceId, domain: null, role: null, qualityTier: null, retrievalStatus: null, fresh: false, qualityOk: false, eligible: false };
@@ -76,8 +92,12 @@ export function explainEvidenceSources({ claimSourceLinks, sourcesById, policy, 
     .filter((source) => source.role === SOURCE_ROLE.INDEPENDENT_REPORTING && policy.evidence.source_roles.independent_reporting.counts_toward_corroboration)
     .map((source) => source.domain).filter(Boolean))];
   const hasPrimaryAuthoritative = eligible.some((source) => source.role === SOURCE_ROLE.PRIMARY_AUTHORITATIVE && policy.evidence.source_roles.primary_authoritative.sufficient_alone);
+  const eligibleContradictingSourceIds = [...contradictingIds].filter((id) => {
+    const source = sourcesById.get(id);
+    return source ? isSourceEligible(source, policy, nowMs) : false;
+  });
   return { sources, independentDomains, independentCount: independentDomains.length,
-    required: policy.evidence.independent_reporting_minimum, hasPrimaryAuthoritative };
+    required: policy.evidence.independent_reporting_minimum, hasPrimaryAuthoritative, eligibleContradictingSourceIds };
 }
 
 /**
@@ -113,9 +133,20 @@ export function computeEvidenceStatus({ claimSourceLinks, sourcesById, policy, h
     return EVIDENCE_STATUS.CONTESTED;
   }
 
+  // Direct source-level contradiction (a claim_sources row with role
+  // 'contradicting', recorded by evidence verification with a validated
+  // quote) makes the claim CONTESTED when the contradicting source is itself
+  // eligible evidence. It is NOT a claim-to-claim CONTRADICTS relation.
+  const contradictingSourceIds = [...new Set((claimSourceLinks || []).filter((link) => !isSupportingLink(link)).map((link) => link.source_id))];
+  const hasEligibleSourceContradiction = contradictingSourceIds
+    .map((sourceId) => sourcesById.get(sourceId))
+    .filter(Boolean)
+    .some((s) => isSourceEligible(s, policy, nowMs));
+  if (hasEligibleSourceContradiction) return EVIDENCE_STATUS.CONTESTED;
+
   // A source is one piece of evidence regardless of how many claim_sources
-  // rows (roles) link it to this claim.
-  const uniqueSourceIds = [...new Set((claimSourceLinks || []).map((link) => link.source_id))];
+  // rows (roles) link it to this claim. Contradicting links are never support.
+  const uniqueSourceIds = [...new Set((claimSourceLinks || []).filter(isSupportingLink).map((link) => link.source_id))];
   const eligibleSources = uniqueSourceIds
     .map((sourceId) => sourcesById.get(sourceId))
     .filter(Boolean)

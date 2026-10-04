@@ -74,3 +74,14 @@ test('Pass 32: safe-fallback contract is in the prompt and the omission wording 
   assert.doesNotMatch(p, /omit the rest/i);
   assert.doesNotMatch(p, /emit only the clauses/i);
 });
+
+test('Pass 44: announcement modality clarification is in the extraction prompt', async () => {
+  const p = await capturePrompt();
+  for (const needle of [
+    '"modality" must describe the event asserted by this claim.',
+    'Use ANNOUNCED when the claim itself says that a person or organization announced, unveiled, revealed, or stated the proposition; the announcement itself is the event being asserted.',
+    'Use OCCURRED when the claim states that the underlying event itself happened and there is no announcement/planning/estimation wording governing that event.',
+    'Use PLANNED, POSSIBLE, or ESTIMATED only when the claim itself expresses that future, uncertain, or estimated status.',
+    'Do not infer modality from the article context, headline, or neighboring claims.'
+  ]) assert.ok(p.includes(needle), `missing modality instruction: ${needle}`);
+});

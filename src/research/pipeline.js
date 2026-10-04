@@ -6,6 +6,10 @@ import { extractClaims, validateExtractedClaim, ExtractionFailureError } from '.
 import { deriveClaimIdentity, summarizeIdentityCoverage } from './claimIdentity.js';
 import { ConvergenceIndex, evaluateConvergence, explainConvergence, isConvergenceEligible } from './claimConvergence.js';
 import { computeEvidenceStatus, explainEvidenceSources, independenceKey } from './evidenceGrading.js';
+import {
+  verifyClaimAgainstSources, selectCandidateSources, claimPriorityScore,
+  VERIFICATION_RESULT, REJECTION_REASON, DEFAULT_VERIFICATION_LIMITS
+} from './evidenceVerification.js';
 import { canonicalizePair, recordContradiction, hasUnresolvedContradiction } from './contradictions.js';
 import { evaluateCompleteness } from './completeness.js';
 import { traceAsync } from '../diagnostics/trace.js';
@@ -118,6 +122,193 @@ export function buildResearchQuery(subject, coreQuestion) {
   return `${anchor} ${question}`;
 }
 
+const QUOTE_REJECTIONS = new Set([REJECTION_REASON.QUOTE_MISSING, REJECTION_REASON.QUOTE_TOO_SHORT, REJECTION_REASON.QUOTE_NOT_IN_SOURCE]);
+
+function newEvidenceVerificationTrace() {
+  return {
+    claimsConsidered: 0, candidateSources: 0, verifierCalls: 0, supports: 0, contradicts: 0, uncertain: 0,
+    quotesAccepted: 0, quotesRejected: 0, corroboratingLinksAdded: 0, contradictingLinksAdded: 0,
+    providerFailures: 0, expansionSourcesAcquired: 0, stopReason: null, verifiedLoadBearingFact: 0
+  };
+}
+
+/**
+ * Evidence Verification / Enrichment stage (Pass 44).
+ *
+ * Verifies load-bearing FACT/INFERENCE claims directly against retrieved source
+ * TEXT. It never reads or requires claim identity / fingerprint / convergence.
+ * The LLM only classifies claim<->source relationship (SUPPORTS / CONTRADICTS /
+ * UNCERTAIN) and every accepted decision carries a quote that was proven to be a
+ * literal substring of the application-supplied source text. Accepted decisions
+ * become claim_sources rows (`corroborating` / `contradicting`); the existing
+ * deterministic computeEvidenceStatus remains the only authority on VERIFIED.
+ *
+ * Bounded: a project-wide verifier-call budget, a per-claim candidate cap, at
+ * most one candidate per registrable domain, and an early stop as soon as one
+ * load-bearing FACT reaches VERIFIED. Mutates persistedSources only when the
+ * optional evidence expansion acquires additional (tracked) sources.
+ */
+async function enrichEvidence({
+  storage, runId, project, persistedClaims, persistedSources, contentBySourceId, policy, llmRouter,
+  evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace
+}) {
+  if (!llmRouter || typeof llmRouter.complete !== 'function' || typeof evidenceVerifier !== 'function') {
+    trace.stopReason = 'verifier_not_configured';
+    return;
+  }
+  const cfg = policy?.evidence_verification ?? {};
+  const limits = {
+    ...DEFAULT_VERIFICATION_LIMITS,
+    ...(Number.isInteger(cfg.max_verifier_calls_per_project) ? { maxVerifierCallsPerProject: cfg.max_verifier_calls_per_project } : {}),
+    ...(Number.isInteger(cfg.max_candidates_per_claim) ? { maxCandidatesPerClaim: cfg.max_candidates_per_claim } : {})
+  };
+  let callsRemaining = limits.maxVerifierCallsPerProject;
+  const tokenCache = new Map();
+  const withContent = (s) => ({ ...s, content: contentBySourceId.get(s.id) ?? '' });
+  const sourcesNow = () => persistedSources.map(withContent);
+  const sourcesByIdNow = () => new Map(persistedSources.map((s) => [s.id, s]));
+
+  const linksOf = (claimId) => storage.all('SELECT * FROM claim_sources WHERE claim_id = ?', [claimId]);
+  const statusOf = (claim) => computeEvidenceStatus({
+    claimSourceLinks: linksOf(claim.id), sourcesById: sourcesByIdNow(), policy,
+    hasUnresolvedContradiction: hasUnresolvedContradiction(storage, claim.id)
+  });
+  const isLoadBearingFact = (c) => c.claim_type === CLAIM_TYPE.FACT && c.is_load_bearing === true;
+
+  if (persistedClaims.some((c) => isLoadBearingFact(c) && statusOf(c) === EVIDENCE_STATUS.VERIFIED)) {
+    trace.stopReason = 'already_verified';
+    return;
+  }
+
+  const eligible = persistedClaims.filter((c) =>
+    c.is_load_bearing === true && (c.claim_type === CLAIM_TYPE.FACT || c.claim_type === CLAIM_TYPE.INFERENCE) &&
+    [EVIDENCE_STATUS.PARTIALLY_SUPPORTED, EVIDENCE_STATUS.UNSUPPORTED].includes(statusOf(c))
+  );
+
+  const plan = (claims) => claims.map((claim) => {
+    const linkedSourceIds = linksOf(claim.id).filter((l) => l.role !== 'contradicting').map((l) => l.source_id);
+    const candidates = selectCandidateSources({
+      claim, sources: sourcesNow(), linkedSourceIds, policy, maxCandidates: limits.maxCandidatesPerClaim, tokenCache
+    });
+    const best = candidates.length ? candidates[0].score : 0;
+    return { claim, candidates, priority: claimPriorityScore(claim, best) };
+  }).sort((a, b) => {
+    const fa = a.claim.claim_type === CLAIM_TYPE.FACT ? 1 : 0;
+    const fb = b.claim.claim_type === CLAIM_TYPE.FACT ? 1 : 0;
+    if (fb !== fa) return fb - fa;
+    if (b.priority !== a.priority) return b.priority - a.priority;
+    return String(a.claim.id) < String(b.claim.id) ? -1 : 1;
+  });
+
+  const noteDecision = (claim, decision) => {
+    const source = persistedSources.find((s) => s.id === decision.sourceId);
+    const accepted = decision.quoteAccepted === true;
+    if (decision.rejectionReason === REJECTION_REASON.PROVIDER_ERROR) trace.providerFailures += 1;
+    if (QUOTE_REJECTIONS.has(decision.rejectionReason)) trace.quotesRejected += 1;
+    if (accepted) trace.quotesAccepted += 1;
+    if (accepted && decision.result === VERIFICATION_RESULT.SUPPORTS) trace.supports += 1;
+    else if (accepted && decision.result === VERIFICATION_RESULT.CONTRADICTS) trace.contradicts += 1;
+    else trace.uncertain += 1;
+    logDecision(storage, {
+      runId, stage: RESEARCH_STAGE.EVIDENCE_VERIFICATION, subjectType: 'claim', subjectId: claim.id,
+      decision: decision.result, reason: accepted ? 'quote_validated' : (decision.rejectionReason ?? 'no_direct_support'),
+      provider: decision.provider ?? null,
+      configSnapshot: {
+        sourceId: decision.sourceId, sourceUrl: source?.url ?? decision.url, sourceDomain: independenceKey(source?.url ?? decision.url),
+        sourceRole: source?.role ?? null, quote: decision.quote || null, quoteAccepted: accepted,
+        rejectionReason: decision.rejectionReason ?? null, model: decision.model ?? null
+      }
+    });
+    if (!accepted) return;
+    const role = decision.result === VERIFICATION_RESULT.SUPPORTS ? 'corroborating' : 'contradicting';
+    const link = linkClaimSource(storage, { claimId: claim.id, sourceId: decision.sourceId, role });
+    if (link.inserted) {
+      if (role === 'corroborating') trace.corroboratingLinksAdded += 1; else trace.contradictingLinksAdded += 1;
+    }
+  };
+
+  const verifyOne = async (entry) => {
+    const { claim, candidates } = entry;
+    if (candidates.length === 0 || callsRemaining <= 0) return { verified: false, ran: false };
+    trace.candidateSources += candidates.length;
+    const out = await evidenceVerifier({
+      claim, candidateSources: candidates.map((c) => withContent(c.source)), llmRouter, limits, callBudget: callsRemaining,
+      onDecision: (decision) => {
+        noteDecision(claim, decision);
+        const status = statusOf(claim);
+        return status === EVIDENCE_STATUS.VERIFIED || status === EVIDENCE_STATUS.CONTESTED;
+      }
+    });
+    callsRemaining -= out.callsUsed;
+    trace.verifierCalls += out.callsUsed;
+    return { verified: statusOf(claim) === EVIDENCE_STATUS.VERIFIED, ran: true };
+  };
+
+  let ordered = plan(eligible);
+  trace.claimsConsidered = ordered.length;
+  const run = async (entries) => {
+    for (const entry of entries) {
+      if (callsRemaining <= 0) { trace.stopReason = 'call_budget_exhausted'; return false; }
+      const r = await verifyOne(entry);
+      if (r.verified && isLoadBearingFact(entry.claim)) { trace.stopReason = 'verified_load_bearing_fact'; return true; }
+    }
+    return false;
+  };
+  if (await run(ordered)) return;
+  if (trace.stopReason === 'call_budget_exhausted') return;
+
+  // --- Optional evidence expansion (bounded; reuses ResearchSourceProvider + acquisition limits) ---
+  const topFact = ordered.find((e) => e.claim.claim_type === CLAIM_TYPE.FACT);
+  const remainingSources = policy.acquisition.max_sources_per_research_project - acquisitionResult.acquired.length;
+  const remainingAttempts = policy.acquisition.max_acquisition_attempts - acquisitionResult.attemptsUsed;
+  if (!topFact || !sourceProvider || remainingSources <= 0 || remainingAttempts <= 0 || callsRemaining <= 0) {
+    trace.stopReason = trace.stopReason ?? (callsRemaining <= 0 ? 'call_budget_exhausted' : ordered.some((e) => e.candidates.length > 0) ? 'candidates_exhausted' : 'no_candidate_sources');
+    return;
+  }
+  const known = new Set(persistedSources.map((s) => s.url));
+  const expansionProvider = {
+    id: sourceProvider.id,
+    discoverCandidates: async (args) => {
+      const discovery = await sourceProvider.discoverCandidates({ ...args, alreadyAcquiredUrls: [...known] });
+      return { ...discovery, candidates: (discovery?.candidates || []).filter((c) => !known.has(c.url)) };
+    }
+  };
+  const expansionPolicy = {
+    acquisition: { max_sources_per_research_project: remainingSources, max_acquisition_attempts: remainingAttempts },
+    retry: policy.retry
+  };
+  const expanded = await acquireSources({
+    provider: expansionProvider, query: topFact.claim.claim, policy: expansionPolicy, retrieveImpl, fetchImpl
+  });
+  // Budget bookkeeping: expansion consumes the same project-level acquisition ceilings.
+  acquisitionResult.attemptsUsed += expanded.attemptsUsed;
+  for (const acquired of expanded.acquired) {
+    const roleResult = classifySourceRole(acquired.url, classification);
+    const qualityTier = classifySourceQuality(acquired.status, roleResult.role);
+    const sourceId = insertSource(storage, {
+      researchProjectId: project.id, url: acquired.url, sourceType: null, role: roleResult.role, qualityTier,
+      retrievalStatus: acquired.status, content: acquired.content, notes: acquired.error
+    });
+    logDecision(storage, {
+      runId, stage: RESEARCH_STAGE.SOURCE_ACQUISITION, subjectType: 'source', subjectId: sourceId,
+      decision: acquired.status, reason: acquired.error || 'retrieved_for_evidence_expansion', resultingState: acquired.status
+    });
+    logDecision(storage, {
+      runId, stage: RESEARCH_STAGE.SOURCE_CLASSIFICATION, subjectType: 'source', subjectId: sourceId,
+      decision: roleResult.role, reason: roleResult.ambiguous ? 'ambiguous_deterministic_classification' : 'deterministic_domain_match',
+      resultingState: qualityTier
+    });
+    contentBySourceId.set(sourceId, acquired.content);
+    persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString() });
+    known.add(acquired.url);
+    if (acquired.status === RETRIEVAL_STATUS.SUCCESS) trace.expansionSourcesAcquired += 1;
+  }
+  const replanned = plan([topFact.claim]);
+  trace.claimsConsidered = Math.max(trace.claimsConsidered, ordered.length);
+  if (await run(replanned)) return;
+  trace.stopReason = trace.stopReason ?? 'candidates_exhausted';
+}
+
 /**
  * Runs one opportunity's Research project end to end.
  *
@@ -137,11 +328,12 @@ export function buildResearchQuery(subject, coreQuestion) {
  * @param {function} [deps.retrieveImpl] - injectable retrieval fn for testing
  * @param {function} [deps.fetchImpl] - forwarded to retrieveImpl
  * @param {function} [deps.detectContradiction] - async (claimA, claimB, llmRouter) => one of CONTRADICTION_RESULT ('CONTRADICTS'|'NO_CONTRADICTION'|'UNCERTAIN'); a thrown/rejected call is treated as ERROR by the caller. LLM-assisted semantic judgment, RG-02 contract (see ./contradictionDetector.js for the production implementation). Optional: no contradiction detection performed if omitted (logged as NOT_CHECKED).
+ * @param {function} [deps.evidenceVerifier] - claim-vs-source-text verifier (see ./evidenceVerification.js verifyClaimAgainstSources); injectable for testing.
  * @param {string} [deps.runId]
  */
 export async function runResearchProject({
   storage, opportunityId, sourceProvider, llmRouter, policy, classification = {},
-  retrieveImpl, fetchImpl, detectContradiction = null, runId = null
+  retrieveImpl, fetchImpl, detectContradiction = null, runId = null, evidenceVerifier = verifyClaimAgainstSources
 }) {
   const opportunity = storage.get('SELECT * FROM opportunities WHERE id = ?', [opportunityId]);
   if (!opportunity) {
@@ -193,6 +385,9 @@ export async function runResearchProject({
   // possibly null). Kept beside persistedSources so the returned source shape
   // is unchanged. Only claim-identity year grounding reads it.
   const publishedAtBySourceId = new Map();
+  // source id -> retrieved text, kept beside persistedSources (whose returned
+  // shape is unchanged) for the evidence verification stage.
+  const contentBySourceId = new Map();
   for (const acquired of acquisitionResult.acquired) {
     const roleResult = classifySourceRole(acquired.url, classification);
     const qualityTier = classifySourceQuality(acquired.status, roleResult.role);
@@ -211,6 +406,7 @@ export async function runResearchProject({
       resultingState: qualityTier
     });
     publishedAtBySourceId.set(sourceId, acquired.publishedAt ?? null);
+    contentBySourceId.set(sourceId, acquired.content);
     persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString() });
   }
 
@@ -605,6 +801,24 @@ export async function runResearchProject({
     };
   }
 
+  // --- Evidence verification / enrichment (Pass 44) ---
+  // Corroboration is earned from claim TEXT vs source TEXT, never from identity
+  // or fingerprint equality. Fail-isolated: any failure here can only leave a
+  // claim with less evidence, never more, so it never aborts the project.
+  const evidenceVerificationTrace = newEvidenceVerificationTrace();
+  try {
+    await enrichEvidence({
+      storage, runId, project, persistedClaims, persistedSources, contentBySourceId, policy, llmRouter,
+      evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace: evidenceVerificationTrace
+    });
+  } catch (err) {
+    evidenceVerificationTrace.stopReason = 'enrichment_error';
+    logDecision(storage, {
+      runId, stage: RESEARCH_STAGE.EVIDENCE_VERIFICATION, subjectType: 'research_project', subjectId: project.id,
+      decision: 'ENRICHMENT_ERROR', reason: err?.message || 'evidence enrichment failed'
+    });
+  }
+
   // --- Deterministic evidence grading (never LLM self-certified) ---
   const sourcesById = new Map(persistedSources.map((s) => [s.id, s]));
   for (const claimRow of persistedClaims) {
@@ -662,7 +876,8 @@ export async function runResearchProject({
       configSnapshot: { factClaims: factClaims.length, loadBearingFact: loadBearingFact.length,
         loadBearingFactFingerprinted: identityTrace.loadBearingFactFingerprinted, identityReasonHistogram: identityTrace.reasons, convergence,
         distinctSuccessfulDomains: sourceDomains.size, independentReportingDomains: independentReportingDomains.size,
-        verifiedLoadBearingFact, stoppingConditionMet } });
+        verifiedLoadBearingFact, stoppingConditionMet,
+        evidenceVerification: { ...evidenceVerificationTrace, verifiedLoadBearingFact } } });
   } catch { /* diagnostics must never affect research */ }
 
   logDecision(storage, {
