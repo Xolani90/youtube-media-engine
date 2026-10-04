@@ -293,6 +293,7 @@ export async function runAutonomousEntrypoint(deps = {}) {
       // priority.
       research: {
         ...deps.research,
+        classification: deps.research?.classification ?? config.researchSourceClassification,
         detectContradiction: deps.research?.detectContradiction ?? detectContradictionProd,
         sourceProvider: deps.research?.sourceProvider ?? selectDefaultResearchSourceProvider()
       },

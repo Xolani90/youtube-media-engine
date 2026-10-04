@@ -148,6 +148,18 @@ function loadResearchPolicy() {
   throw new Error('config/research_policy.json is required by the Research Subsystem Specification v0.4 and was not found.');
 }
 
+function loadResearchSourceClassification() {
+  const p = path.join(REPO_ROOT, 'config', 'research_source_classification.json');
+  if (!fs.existsSync(p)) {
+    throw new Error('config/research_source_classification.json is required for Research source-role classification and was not found.');
+  }
+  const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+  return {
+    authoritativeDomains: Array.isArray(parsed.authoritativeDomains) ? parsed.authoritativeDomains : [],
+    syndicatedDomains: Array.isArray(parsed.syndicatedDomains) ? parsed.syndicatedDomains : []
+  };
+}
+
 function loadBriefPolicy() {
   const p = path.join(REPO_ROOT, 'config', 'brief_policy.json');
   if (fs.existsSync(p)) {
@@ -244,6 +256,7 @@ export const config = {
   scoringWeights: loadScoringWeights(),
   discoveryPolicy: loadDiscoveryPolicy(),
   researchPolicy: loadResearchPolicy(),
+  researchSourceClassification: loadResearchSourceClassification(),
   briefPolicy: loadBriefPolicy(),
   scriptPolicy: loadScriptPolicy(),
 

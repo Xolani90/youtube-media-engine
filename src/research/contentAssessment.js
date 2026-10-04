@@ -27,6 +27,9 @@ const WRAPPER_PATTERNS = Object.freeze([
   ['bot_check', /\b(verify (that )?you are (a )?human|are you a robot|captcha|checking your browser|unusual traffic|just a moment)\b/i],
   ['access_denied', /\b(access denied|403 forbidden|request blocked|you have been blocked)\b/i],
   ['paywall', /\b(subscribe to (continue|read)|sign in to (continue|read)|create a free account to (continue|read)|subscribers only)\b/i],
+  // Login / account gates. Anchored to gate phrasing ("to continue/see/view/read/access",
+  // "required", "you must log in"), so an article that merely mentions logging in is not matched.
+  ['login_wall', /\b(log ?(in|into)|sign ?(in|up|into))\b[^.!?]{0,40}\bto (continue|see|view|read|access|watch|join)\b|\b(log ?in|sign ?in|login|account) (is )?required\b|\byou must (log ?in|sign ?in)\b/i],
   ['redirect', /\b(redirecting|click here if you are not redirected|you are being redirected)\b/i]
 ]);
 
