@@ -55,7 +55,7 @@ function fakeFetch(bodyByUrl) {
   return async (url) => ({
     ok: true, status: 200,
     headers: { get: () => 'text/html' },
-    text: async () => bodyByUrl[url] || '<html><body>content</body></html>'
+    text: async () => bodyByUrl[url] || '<html><body>The company reported its quarterly results today.</body></html>'
   });
 }
 
@@ -81,7 +81,7 @@ function sequentialClaimRouter(payloadsInOrder) {
 
 const TWO_URLS = ['https://acme.com/a', 'https://acme.com/b'];
 function twoSourceFetch() {
-  return fakeFetch({ [TWO_URLS[0]]: '<html><body>content a</body></html>', [TWO_URLS[1]]: '<html><body>content b</body></html>' });
+  return fakeFetch({ [TWO_URLS[0]]: '<html><body>The first outlet reported the quarterly results today.</body></html>', [TWO_URLS[1]]: '<html><body>The second outlet confirmed the quarterly results today.</body></html>' });
 }
 
 async function runWithTwoFactClaims(storage, opportunityId, detectContradiction) {

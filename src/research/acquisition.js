@@ -105,6 +105,9 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
       status: result.status,
       content: result.content,
       error: result.error,
+      retrievalMethod: result.retrievalMethod ?? 'plain',
+      fallback: result.fallback ?? null,
+      contentAssessment: result.contentAssessment ?? null,
       attemptCount
     });
   }

@@ -117,7 +117,7 @@ test('MIXED: distinct factual + sentiment sources together reach RESEARCH_COMPLE
   const result = await runResearchProject({
     storage, opportunityId, sourceProvider: provider, llmRouter, policy: researchPolicy,
     classification: { authoritativeDomains: ['acme.com'] },
-    fetchImpl: fakeFetch({ [url]: '<html><body>content</body></html>' })
+    fetchImpl: fakeFetch({ [url]: '<html><body>The company reported its quarterly results today.</body></html>' })
   });
 
   assert.equal(result.project.status, 'RESEARCH_COMPLETE');
@@ -164,7 +164,7 @@ test('MIXED: only a factual claim (no sentiment component) does NOT reach RESEAR
   const result = await runResearchProject({
     storage, opportunityId, sourceProvider: provider, llmRouter, policy: researchPolicy,
     classification: { authoritativeDomains: ['acme.com'] },
-    fetchImpl: fakeFetch({ [url]: '<html><body>content</body></html>' })
+    fetchImpl: fakeFetch({ [url]: '<html><body>The company reported its quarterly results today.</body></html>' })
   });
 
   assert.equal(result.project.status, 'INSUFFICIENT_EVIDENCE');
@@ -189,7 +189,7 @@ test('zero load-bearing claims extracted -> INSUFFICIENT_EVIDENCE', async () => 
   const result = await runResearchProject({
     storage, opportunityId, sourceProvider: provider, llmRouter, policy: researchPolicy,
     classification: { authoritativeDomains: ['acme.com'] },
-    fetchImpl: fakeFetch({ [url]: '<html><body>content</body></html>' })
+    fetchImpl: fakeFetch({ [url]: '<html><body>The company reported its quarterly results today.</body></html>' })
   });
 
   assert.equal(result.project.status, 'INSUFFICIENT_EVIDENCE');
@@ -290,7 +290,7 @@ test('research project uniqueness: running twice for the same opportunity does n
   const url = 'https://acme.com/press-release';
   const provider = new SingleSourceProvider([url]);
   const llmRouter = claimRouter([{ claim: 'Acme reported $1B in Q3 revenue.', claim_type: 'FACT', is_load_bearing: true }]);
-  const fetchImpl = fakeFetch({ [url]: '<html><body>content</body></html>' });
+  const fetchImpl = fakeFetch({ [url]: '<html><body>The company reported its quarterly results today.</body></html>' });
 
   const first = await runResearchProject({ storage, opportunityId, sourceProvider: provider, llmRouter, policy: researchPolicy, classification: { authoritativeDomains: ['acme.com'] }, fetchImpl });
   const second = await runResearchProject({ storage, opportunityId, sourceProvider: provider, llmRouter, policy: researchPolicy, classification: { authoritativeDomains: ['acme.com'] }, fetchImpl });
@@ -421,7 +421,7 @@ test('decision_log records the Research-specific audit stages', async () => {
   const result = await runResearchProject({
     storage, opportunityId, sourceProvider: provider, llmRouter, policy: researchPolicy,
     classification: { authoritativeDomains: ['acme.com'] },
-    fetchImpl: fakeFetch({ [url]: '<html><body>content</body></html>' })
+    fetchImpl: fakeFetch({ [url]: '<html><body>The company reported its quarterly results today.</body></html>' })
   });
 
   const stages = storage.all('SELECT DISTINCT stage FROM decision_log WHERE subject_id = ? OR subject_id IN (SELECT id FROM claims WHERE research_project_id = ?) OR subject_id IN (SELECT id FROM sources WHERE research_project_id = ?)',

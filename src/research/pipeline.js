@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import { RESEARCH_STAGE, RESEARCH_PROJECT_STATUS, RETRIEVAL_STATUS, EVIDENCE_STATUS, CLAIM_TYPE, CONTRADICTION_RESULT, CONTRADICTION_EXECUTION_STATE } from './constants.js';
 import { acquireSources } from './acquisition.js';
-import { classifySourceRole, classifySourceQuality } from './sourceClassification.js';
+import { classifySourceRole, assessEvidenceAdmissibility } from './sourceClassification.js';
+import { buildSourceProvenance } from './sourceProvenance.js';
 import { extractClaims, validateExtractedClaim, ExtractionFailureError } from './claims.js';
 import { deriveClaimIdentity, summarizeIdentityCoverage } from './claimIdentity.js';
 import { ConvergenceIndex, evaluateConvergence, explainConvergence, isConvergenceEligible } from './claimConvergence.js';
@@ -124,6 +125,35 @@ export function buildResearchQuery(subject, coreQuestion) {
 
 const QUOTE_REJECTIONS = new Set([REJECTION_REASON.QUOTE_MISSING, REJECTION_REASON.QUOTE_TOO_SHORT, REJECTION_REASON.QUOTE_NOT_IN_SOURCE]);
 
+function newResearchDiag() {
+  return {
+    retrieval: { plainAttempts: 0, plainSuccesses: 0, fallbackAttempts: 0, fallbackSuccesses: 0, weakSourcesRejected: 0, unusableSources: 0 },
+    sourceQuality: { primaryAuthoritative: 0, independentReporting: 0, syndicated: 0, weakOrRejected: 0 },
+    relevance: { candidatesScored: 0, candidatesRejectedAsIrrelevant: 0, entries: [] }
+  };
+}
+
+function noteAcquiredDiag(diag, acquired, roleResult, admissibility) {
+  const r = diag.retrieval;
+  r.plainAttempts += 1;
+  if (acquired.fallback?.attempted) {
+    r.fallbackAttempts += 1;
+    if (acquired.fallback.success) r.fallbackSuccesses += 1;
+  }
+  const viaFallback = acquired.retrievalMethod === 'reader_fallback';
+  if (acquired.status === RETRIEVAL_STATUS.SUCCESS && !viaFallback) r.plainSuccesses += 1;
+  if (!admissibility.admissible) {
+    r.unusableSources += 1;
+    if (/^content_/.test(admissibility.reason) || acquired.contentAssessment) r.weakSourcesRejected += 1;
+    diag.sourceQuality.weakOrRejected += 1;
+    return;
+  }
+  const q = diag.sourceQuality;
+  if (roleResult.role === 'primary_authoritative') q.primaryAuthoritative += 1;
+  else if (roleResult.role === 'syndicated') q.syndicated += 1;
+  else q.independentReporting += 1;
+}
+
 function newEvidenceVerificationTrace() {
   return {
     claimsConsidered: 0, candidateSources: 0, verifierCalls: 0, supports: 0, contradicts: 0, uncertain: 0,
@@ -150,7 +180,7 @@ function newEvidenceVerificationTrace() {
  */
 async function enrichEvidence({
   storage, runId, project, persistedClaims, persistedSources, contentBySourceId, policy, llmRouter,
-  evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace
+  evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace, diag
 }) {
   if (!llmRouter || typeof llmRouter.complete !== 'function' || typeof evidenceVerifier !== 'function') {
     trace.stopReason = 'verifier_not_configured';
@@ -188,7 +218,7 @@ async function enrichEvidence({
   const plan = (claims) => claims.map((claim) => {
     const linkedSourceIds = linksOf(claim.id).filter((l) => l.role !== 'contradicting').map((l) => l.source_id);
     const candidates = selectCandidateSources({
-      claim, sources: sourcesNow(), linkedSourceIds, policy, maxCandidates: limits.maxCandidatesPerClaim, tokenCache
+      claim, sources: sourcesNow(), linkedSourceIds, policy, maxCandidates: limits.maxCandidatesPerClaim, tokenCache, diagnostics: diag.relevance
     });
     const best = candidates.length ? candidates[0].score : 0;
     return { claim, candidates, priority: claimPriorityScore(claim, best) };
@@ -284,10 +314,12 @@ async function enrichEvidence({
   acquisitionResult.attemptsUsed += expanded.attemptsUsed;
   for (const acquired of expanded.acquired) {
     const roleResult = classifySourceRole(acquired.url, classification);
-    const qualityTier = classifySourceQuality(acquired.status, roleResult.role);
+    const admissibility = assessEvidenceAdmissibility(acquired.status, roleResult.role, acquired.content);
+    const qualityTier = admissibility.quality;
+    noteAcquiredDiag(diag, acquired, roleResult, admissibility);
     const sourceId = insertSource(storage, {
       researchProjectId: project.id, url: acquired.url, sourceType: null, role: roleResult.role, qualityTier,
-      retrievalStatus: acquired.status, content: acquired.content, notes: acquired.error
+      retrievalStatus: acquired.status, content: acquired.content, notes: buildSourceProvenance(acquired)
     });
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.SOURCE_ACQUISITION, subjectType: 'source', subjectId: sourceId,
@@ -380,6 +412,7 @@ export async function runResearchProject({
     return { project: storage.get('SELECT * FROM research_projects WHERE id = ?', [project.id]), stopReason: 'SOURCE_DISCOVERY_FAILED' };
   }
 
+  const researchDiag = newResearchDiag();
   const persistedSources = [];
   // source id -> the acquisition candidate's publishedAt (provider metadata,
   // possibly null). Kept beside persistedSources so the returned source shape
@@ -390,11 +423,13 @@ export async function runResearchProject({
   const contentBySourceId = new Map();
   for (const acquired of acquisitionResult.acquired) {
     const roleResult = classifySourceRole(acquired.url, classification);
-    const qualityTier = classifySourceQuality(acquired.status, roleResult.role);
+    const admissibility = assessEvidenceAdmissibility(acquired.status, roleResult.role, acquired.content);
+    const qualityTier = admissibility.quality;
+    noteAcquiredDiag(researchDiag, acquired, roleResult, admissibility);
     const sourceId = insertSource(storage, {
       researchProjectId: project.id, url: acquired.url, sourceType: null,
       role: roleResult.role, qualityTier, retrievalStatus: acquired.status,
-      content: acquired.content, notes: acquired.error
+      content: acquired.content, notes: buildSourceProvenance(acquired)
     });
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.SOURCE_ACQUISITION, subjectType: 'source', subjectId: sourceId,
@@ -809,7 +844,7 @@ export async function runResearchProject({
   try {
     await enrichEvidence({
       storage, runId, project, persistedClaims, persistedSources, contentBySourceId, policy, llmRouter,
-      evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace: evidenceVerificationTrace
+      evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace: evidenceVerificationTrace, diag: researchDiag
     });
   } catch (err) {
     evidenceVerificationTrace.stopReason = 'enrichment_error';
@@ -877,7 +912,9 @@ export async function runResearchProject({
         loadBearingFactFingerprinted: identityTrace.loadBearingFactFingerprinted, identityReasonHistogram: identityTrace.reasons, convergence,
         distinctSuccessfulDomains: sourceDomains.size, independentReportingDomains: independentReportingDomains.size,
         verifiedLoadBearingFact, stoppingConditionMet,
-        evidenceVerification: { ...evidenceVerificationTrace, verifiedLoadBearingFact } } });
+        evidenceVerification: { ...evidenceVerificationTrace, verifiedLoadBearingFact },
+        retrieval: researchDiag.retrieval, sourceQuality: researchDiag.sourceQuality,
+        relevance: { candidatesScored: researchDiag.relevance.candidatesScored, candidatesRejectedAsIrrelevant: researchDiag.relevance.candidatesRejectedAsIrrelevant, entries: researchDiag.relevance.entries.slice(0, 50) } } });
   } catch { /* diagnostics must never affect research */ }
 
   logDecision(storage, {

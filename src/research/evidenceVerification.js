@@ -245,6 +245,30 @@ export function overlapScore(terms, tokenSet) {
   return total === 0 ? 0 : hit / total;
 }
 
+/**
+ * Bounded deterministic relevance breakdown for a claim/source pair (Pass 46,
+ * donor principle: relevance precedes evidence). The score is exactly the
+ * existing overlapScore. It prioritises/rejects candidates only; it never
+ * certifies evidence and creates no identity merge.
+ */
+export function scoreClaimSourceRelevance(claimText, sourceTokens) {
+  const terms = claimTerms(claimText);
+  const raws = tokenize(claimText);
+  const cats = { entities: [], numbers: [], years: [], technicalTerms: [], tokens: [] };
+  raws.forEach((raw, index) => {
+    const t = normToken(raw);
+    if (!t || !terms.has(t)) return;
+    const hit = sourceTokens.has(t);
+    const bucket = /^(19|20)\d{2}$/.test(t) ? 'years'
+      : /\d/.test(t) ? (/[a-z]/i.test(t) && /\d/.test(t) && !/^[\d.]+$/.test(t) ? 'technicalTerms' : 'numbers')
+      : (index > 0 && /^[A-Z]/.test(raw)) ? 'entities' : 'tokens';
+    cats[bucket].push({ term: t, matched: hit });
+  });
+  const breakdown = {};
+  for (const [k, v] of Object.entries(cats)) breakdown[k] = { matched: v.filter((x) => x.matched).length, total: v.length };
+  return { score: overlapScore(terms, sourceTokens), breakdown };
+}
+
 const QUALITY_RANK = { HIGH: 3, MEDIUM: 2, LOW: 1, UNUSABLE: 0 };
 const MIN_OVERLAP = 0.2;
 
@@ -259,7 +283,7 @@ const MIN_OVERLAP = 0.2;
  * - at most ONE candidate per registrable domain (the best-scoring one);
  * - ranked by overlap score, then quality tier, then role, then id (stable).
  */
-export function selectCandidateSources({ claim, sources, linkedSourceIds = [], policy, nowMs = Date.now(), maxCandidates = DEFAULT_VERIFICATION_LIMITS.maxCandidatesPerClaim, tokenCache = new Map() }) {
+export function selectCandidateSources({ claim, sources, linkedSourceIds = [], policy, nowMs = Date.now(), maxCandidates = DEFAULT_VERIFICATION_LIMITS.maxCandidatesPerClaim, tokenCache = new Map(), diagnostics = null }) {
   const linked = new Set(linkedSourceIds);
   const linkedDomains = new Set(
     sources.filter((s) => linked.has(s.id)).map((s) => independenceKey(s.url)).filter(Boolean)
@@ -275,7 +299,14 @@ export function selectCandidateSources({ claim, sources, linkedSourceIds = [], p
     const key = independenceKey(s.url);
     if (!key || linkedDomains.has(key)) continue;
     if (!tokenCache.has(s.id)) tokenCache.set(s.id, sourceTokenSet(s.content));
-    const score = overlapScore(terms, tokenCache.get(s.id));
+    const relevance = scoreClaimSourceRelevance(claim.claim, tokenCache.get(s.id));
+    const score = relevance.score;
+    if (diagnostics) {
+      diagnostics.candidatesScored += 1;
+      const rejected = score < MIN_OVERLAP;
+      if (rejected) diagnostics.candidatesRejectedAsIrrelevant += 1;
+      diagnostics.entries.push({ sourceId: s.id, domain: key, score, breakdown: relevance.breakdown, decision: rejected ? 'rejected' : 'candidate', reason: rejected ? 'below_min_overlap' : 'meets_min_overlap' });
+    }
     if (score < MIN_OVERLAP) continue;
     scored.push({ source: s, score, domain: key });
   }

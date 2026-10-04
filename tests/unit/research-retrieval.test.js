@@ -34,9 +34,17 @@ test('extractText returns null for content that reduces to nothing', () => {
 });
 
 test('retrieveSource returns SUCCESS with extracted content on a normal 200 response', async () => {
-  const result = await retrieveSource('https://example.com', { fetchImpl: fakeFetch() });
+  const text = '<html><body>The tool measurably cuts costs.</body></html>';
+  const result = await retrieveSource('https://example.com', { fetchImpl: fakeFetch({ text }) });
   assert.equal(result.status, 'SUCCESS');
-  assert.equal(result.content, 'Hello world');
+  assert.equal(result.content, 'The tool measurably cuts costs.');
+  assert.equal(result.retrievalMethod, 'plain');
+});
+
+test('retrieveSource: tiny HTTP 200 boilerplate is CONTENT_UNPARSEABLE, not SUCCESS (Pass 46)', async () => {
+  const result = await retrieveSource('https://example.com', { fetchImpl: fakeFetch(), readerBaseUrl: null });
+  assert.equal(result.status, 'CONTENT_UNPARSEABLE');
+  assert.equal(result.content, null);
 });
 
 test('retrieveSource returns FAILED on a non-ok HTTP status', async () => {

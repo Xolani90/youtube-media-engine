@@ -1,5 +1,7 @@
 import { RETRIEVAL_STATUS } from './constants.js';
 import { traceAsync, safeHost } from '../diagnostics/trace.js';
+import { assessContent, CONTENT_VERDICT } from './contentAssessment.js';
+import { readerFallbackBaseUrl, fetchViaReader } from './readerFallback.js';
 
 // Sent on every article retrieval. Many publishers reject Node's default
 // (header-less) fetch with HTTP 403; a descriptive, browser-compatible
@@ -27,7 +29,34 @@ const NON_RETRYABLE_HTTP_STATUSES = Object.freeze([401, 403]);
  * @returns {Promise<{status: 'SUCCESS'|'FAILED'|'CONTENT_UNPARSEABLE', content: string|null, error: string|null, retryable?: false}>}
  *   `retryable: false` is present only on HTTP 401/403 FAILED results.
  */
-export async function retrieveSource(url, { fetchImpl = fetch, timeoutMs = 10000 } = {}) {
+export async function retrieveSource(url, { fetchImpl = fetch, timeoutMs = 10000, readerBaseUrl = readerFallbackBaseUrl(), readerFetchImpl = fetch } = {}) {
+  const plain = await retrievePlain(url, { fetchImpl, timeoutMs });
+  // Substantive plain content, or a hard failure (HTTP/network): no fallback.
+  if (plain.status === RETRIEVAL_STATUS.SUCCESS || plain.status === RETRIEVAL_STATUS.FAILED) {
+    return { ...plain, retrievalMethod: 'plain' };
+  }
+  // Weak / boilerplate / unparseable: exactly one optional reader attempt, fail-closed.
+  const fallback = { attempted: false, success: false, error: null, trigger: plain.error };
+  if (!readerBaseUrl) {
+    return { ...plain, retrievalMethod: 'plain', fallback };
+  }
+  fallback.attempted = true;
+  const viaReader = await traceAsync('research.retrieve.reader_fallback', { host: safeHost(url) }, () => fetchViaReader(url, { baseUrl: readerBaseUrl, fetchImpl: readerFetchImpl, timeoutMs }));
+  if (viaReader.ok) {
+    const assessment = assessContent(viaReader.content);
+    if (assessment.verdict === CONTENT_VERDICT.SUBSTANTIVE) {
+      fallback.success = true;
+      return { status: RETRIEVAL_STATUS.SUCCESS, content: viaReader.content, error: null, retrievalMethod: 'reader_fallback', fallback, contentAssessment: assessment };
+    }
+    fallback.error = `reader content ${assessment.verdict}: ${assessment.reasons.join(',')}`;
+  } else {
+    fallback.error = viaReader.error;
+  }
+  // Never FAILED: acquisition's retry loop must not trigger a second attempt.
+  return { ...plain, status: RETRIEVAL_STATUS.CONTENT_UNPARSEABLE, content: null, retrievalMethod: 'plain', fallback };
+}
+
+async function retrievePlain(url, { fetchImpl, timeoutMs }) {
   let res;
   try {
     const controller = new AbortController();
@@ -68,7 +97,17 @@ export async function retrieveSource(url, { fetchImpl = fetch, timeoutMs = 10000
     };
   }
 
-  return { status: RETRIEVAL_STATUS.SUCCESS, content: extracted, error: null };
+  const assessment = assessContent(extracted);
+  if (assessment.verdict !== CONTENT_VERDICT.SUBSTANTIVE) {
+    return {
+      status: RETRIEVAL_STATUS.CONTENT_UNPARSEABLE,
+      content: null,
+      error: `retrieved content is ${assessment.verdict} (${assessment.reasons.join(',')}), not usable research text`,
+      contentAssessment: assessment
+    };
+  }
+
+  return { status: RETRIEVAL_STATUS.SUCCESS, content: extracted, error: null, contentAssessment: assessment };
 }
 
 /**

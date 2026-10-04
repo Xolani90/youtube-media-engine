@@ -1,4 +1,5 @@
 import { SOURCE_ROLE, SOURCE_QUALITY, RETRIEVAL_STATUS } from './constants.js';
+import { assessContent, CONTENT_VERDICT } from './contentAssessment.js';
 
 /**
  * Deterministic-first source role classification (v0.3 S5 / v0.4).
@@ -52,4 +53,20 @@ function extractDomain(url) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Explicit evidence-admissibility rule (Pass 46). A source may corroborate
+ * only if retrieval SUCCEEDED with substantive text. Unknown domains are not
+ * upgraded merely because they are retrievable; HTTP success with weak or
+ * boilerplate text is UNUSABLE. Role vocabulary and the corroboration count
+ * are unchanged.
+ */
+export function assessEvidenceAdmissibility(retrievalStatus, role, content) {
+  if (retrievalStatus !== RETRIEVAL_STATUS.SUCCESS) return { admissible: false, quality: SOURCE_QUALITY.UNUSABLE, reason: 'retrieval_not_successful' };
+  const assessment = assessContent(content);
+  if (assessment.verdict !== CONTENT_VERDICT.SUBSTANTIVE) {
+    return { admissible: false, quality: SOURCE_QUALITY.UNUSABLE, reason: `content_${assessment.verdict}` };
+  }
+  return { admissible: true, quality: classifySourceQuality(retrievalStatus, role), reason: 'substantive_content' };
 }
