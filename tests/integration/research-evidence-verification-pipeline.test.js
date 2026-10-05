@@ -74,7 +74,9 @@ function scriptedRouter({ extract, verify }) {
       let payload;
       if (prompt.includes('verifying ONE claim')) {
         state.verificationCalls += 1;
-        const key = prompt.includes(TEXT_B) ? 'B' : (prompt.includes(TEXT_A) ? 'A' : '?');
+        // Key by the SOURCE being checked (its domain line), not by text: a claim's own
+        // wording can equal another source's text, which made text-based keying ambiguous.
+        const key = /SOURCE DOMAIN: publisher-two\.org/.test(prompt) ? 'B' : (/SOURCE DOMAIN: publisher-one\.com/.test(prompt) ? 'A' : '?');
         payload = verify(key, prompt);
       } else {
         state.extractionCalls += 1;
@@ -110,34 +112,39 @@ test('Test 10: NO FINGERPRINT REQUIRED - differently worded claims with no ident
     extract: { A: [fact(CLAIM_A)], B: [fact(CLAIM_B)] },
     verify: (key) => supportsFrom(key)
   });
-  const { storage, dbPath, result } = await run({ urls: [URL_A, URL_B], router });
+  const { storage, dbPath, result, sourceProvider } = await run({ urls: [URL_A, URL_B], router });
   try {
+    assert.equal(sourceProvider.calls.length, 1, 'a VERIFIED load-bearing FACT exists: no evidence-expansion discovery runs');
     assert.equal(result.claims.length, 2, 'different wording and no identity: two claim rows, never merged');
     const verified = result.claims.filter((c) => c.evidence_status === 'VERIFIED');
-    assert.equal(verified.length, 1, 'exactly one claim reached VERIFIED (enrichment stops at the first VERIFIED load-bearing FACT)');
-    const links = linksOf(storage, verified[0].id);
-    assert.deepEqual(links.map((l) => l.role).sort(), ['corroborating', 'primary']);
-    assert.equal(new Set(links.map((l) => l.url)).size, 2);
-    assert.equal(router.state.verificationCalls, 1, 'one high-value call, not claim x source');
+    assert.equal(verified.length, 2, 'verification continues past the first VERIFIED load-bearing FACT: both eligible claims are verified');
+    for (const v of verified) {
+      const links = linksOf(storage, v.id);
+      assert.deepEqual(links.map((l) => l.role).sort(), ['corroborating', 'primary']);
+      assert.equal(new Set(links.map((l) => l.url)).size, 2);
+    }
+    assert.equal(router.state.verificationCalls, 2, 'one call per eligible claim (best candidate each), not claim x source');
 
     // Audit trail: validated quote + source recorded in decision_log
     const rows = storage.all(`SELECT decision, reason, config_snapshot FROM decision_log WHERE stage = 'EVIDENCE_VERIFICATION'`);
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].decision, 'SUPPORTS');
-    assert.equal(rows[0].reason, 'quote_validated');
-    const snap = JSON.parse(rows[0].config_snapshot);
-    assert.equal(snap.quoteAccepted, true);
-    assert.ok(snap.quote.length > 10);
+    assert.equal(rows.length, 2);
+    for (const row of rows) {
+      assert.equal(row.decision, 'SUPPORTS');
+      assert.equal(row.reason, 'quote_validated');
+      const snap = JSON.parse(row.config_snapshot);
+      assert.equal(snap.quoteAccepted, true);
+      assert.ok(snap.quote.length > 10);
+    }
 
     assert.equal(result.stopReason, 'COMPLETENESS_CRITERIA_MET');
 
     const summary = storage.get(`SELECT config_snapshot FROM decision_log WHERE decision = 'RESEARCH_TRACE_SUMMARY'`);
     const ev = JSON.parse(summary.config_snapshot).evidenceVerification;
-    assert.equal(ev.verifierCalls, 1);
-    assert.equal(ev.supports, 1);
-    assert.equal(ev.quotesAccepted, 1);
-    assert.equal(ev.corroboratingLinksAdded, 1);
-    assert.equal(ev.verifiedLoadBearingFact, 1);
+    assert.equal(ev.verifierCalls, 2);
+    assert.equal(ev.supports, 2);
+    assert.equal(ev.quotesAccepted, 2);
+    assert.equal(ev.corroboratingLinksAdded, 2);
+    assert.equal(ev.verifiedLoadBearingFact, 2);
     assert.equal(ev.stopReason, 'verified_load_bearing_fact');
   } finally {
     if (prev === undefined) delete process.env.DIAGNOSTIC_TRACE; else process.env.DIAGNOSTIC_TRACE = prev;
@@ -253,4 +260,82 @@ test('a throwing verifier cannot abort the project or add evidence', async () =>
     assert.equal(result.claims[0].evidence_status, 'PARTIALLY_SUPPORTED');
     assert.equal(storage.get(`SELECT COUNT(*) AS n FROM decision_log WHERE decision = 'ENRICHMENT_ERROR'`).n, 1);
   } finally { cleanup(storage, dbPath); }
+});
+
+// ---------------------------------------------------------------------------
+// Verification coverage: enrichment no longer stops at the first VERIFIED
+// load-bearing FACT. Fixture: two differently worded FACT claims, one per
+// source. Claim A is verified against source B's text (key 'B'); claim B is
+// verified against source A's text (key 'A').
+// ---------------------------------------------------------------------------
+const twoClaimExtract = { A: [fact(CLAIM_A)], B: [fact(CLAIM_B)] };
+const claimByText = (claims, text) => claims.find((c) => c.claim === text);
+
+test('coverage: verifier budget still bounds continuation (budget 1 -> one call, one VERIFIED, one left PARTIALLY_SUPPORTED)', async () => {
+  const prevTrace = process.env.DIAGNOSTIC_TRACE;
+  process.env.DIAGNOSTIC_TRACE = 'true'; // RESEARCH_TRACE_SUMMARY is only written when tracing is on
+  const router = scriptedRouter({ extract: twoClaimExtract, verify: (key) => supportsFrom(key) });
+  const policy = { ...researchPolicy, evidence_verification: { max_verifier_calls_per_project: 1, max_candidates_per_claim: 3 } };
+  const { storage, dbPath, result } = await run({ urls: [URL_A, URL_B], router, policy });
+  try {
+    assert.equal(router.state.verificationCalls, 1);
+    const counts = result.claims.reduce((a, c) => { a[c.evidence_status] = (a[c.evidence_status] || 0) + 1; return a; }, {});
+    assert.deepEqual(counts, { VERIFIED: 1, PARTIALLY_SUPPORTED: 1 });
+    const summary = storage.get(`SELECT config_snapshot FROM decision_log WHERE decision = 'RESEARCH_TRACE_SUMMARY'`);
+    assert.equal(JSON.parse(summary.config_snapshot).evidenceVerification.stopReason, 'call_budget_exhausted');
+  } finally {
+    if (prevTrace === undefined) delete process.env.DIAGNOSTIC_TRACE; else process.env.DIAGNOSTIC_TRACE = prevTrace;
+    cleanup(storage, dbPath);
+  }
+});
+
+test('coverage: a later claim cannot become VERIFIED without a validated quote from the source text', async () => {
+  // Source B supports claim A with a real quote; source A "supports" claim B with a fabricated quote.
+  const router = scriptedRouter({
+    extract: twoClaimExtract,
+    verify: (key) => (key === 'B' ? supportsFrom('B') : { result: 'SUPPORTS', quote: 'Pricing starts at exactly $2 for each million input tokens processed.' })
+  });
+  const { storage, dbPath, result } = await run({ urls: [URL_A, URL_B], router });
+  try {
+    assert.equal(router.state.verificationCalls, 2, 'verification continued to the second claim');
+    assert.equal(claimByText(result.claims, CLAIM_A).evidence_status, 'VERIFIED');
+    assert.equal(claimByText(result.claims, CLAIM_B).evidence_status, 'PARTIALLY_SUPPORTED');
+    assert.deepEqual(linksOf(storage, claimByText(result.claims, CLAIM_B).id).map((l) => l.role), ['primary']);
+    assert.equal(storage.get(`SELECT COUNT(*) AS n FROM decision_log WHERE stage = 'EVIDENCE_VERIFICATION' AND reason = 'quote_not_in_source'`).n, 1);
+  } finally { cleanup(storage, dbPath); }
+});
+
+test('coverage: UNCERTAIN and CONTRADICTS results never count as verification coverage', async () => {
+  for (const [label, later] of [['UNCERTAIN', () => ({ result: 'UNCERTAIN', quote: '' })], ['CONTRADICTS', () => ({ result: 'CONTRADICTS', quote: TEXT_A })]]) {
+    const router = scriptedRouter({ extract: twoClaimExtract, verify: (key) => (key === 'B' ? supportsFrom('B') : later()) });
+    const { storage, dbPath, result } = await run({ urls: [URL_A, URL_B], router });
+    try {
+      const verified = result.claims.filter((c) => c.evidence_status === 'VERIFIED');
+      assert.equal(verified.length, 1, `${label}: only the validated SUPPORTS claim is VERIFIED`);
+      assert.equal(verified[0].claim, CLAIM_A);
+      assert.notEqual(claimByText(result.claims, CLAIM_B).evidence_status, 'VERIFIED');
+      assert.equal(result.stopReason, 'COMPLETENESS_CRITERIA_MET', `${label}: completeness semantics unchanged (>=1 VERIFIED FACT)`);
+    } finally { cleanup(storage, dbPath); }
+  }
+});
+
+test('coverage: the shared WS7 workload ceiling still stops additional verifier calls', async () => {
+  const prevTrace = process.env.DIAGNOSTIC_TRACE;
+  process.env.DIAGNOSTIC_TRACE = 'true'; // RESEARCH_TRACE_SUMMARY is only written when tracing is on
+  // 2 extraction calls + 1 verifier call = 3 = the whole shared budget.
+  const router = scriptedRouter({ extract: twoClaimExtract, verify: (key) => supportsFrom(key) });
+  const policy = { ...researchPolicy, llm_workload: { ...researchPolicy.llm_workload, max_calls_per_project: 3 } };
+  const { storage, dbPath, result } = await run({ urls: [URL_A, URL_B], router, policy });
+  try {
+    assert.equal(router.state.extractionCalls, 2);
+    assert.equal(router.state.verificationCalls, 1, 'workload refused the second verifier call before it reached the provider');
+    assert.equal(result.claims.filter((c) => c.evidence_status === 'VERIFIED').length, 1);
+    const summary = storage.get(`SELECT config_snapshot FROM decision_log WHERE decision = 'RESEARCH_TRACE_SUMMARY'`);
+    const snap = JSON.parse(summary.config_snapshot);
+    assert.equal(snap.llmWorkload.used, 3);
+    assert.equal(snap.evidenceVerification.stopReason, 'llm_workload_stopped');
+  } finally {
+    if (prevTrace === undefined) delete process.env.DIAGNOSTIC_TRACE; else process.env.DIAGNOSTIC_TRACE = prevTrace;
+    cleanup(storage, dbPath);
+  }
 });

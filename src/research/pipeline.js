@@ -178,9 +178,14 @@ function newEvidenceVerificationTrace() {
  * deterministic computeEvidenceStatus remains the only authority on VERIFIED.
  *
  * Bounded: a project-wide verifier-call budget, a per-claim candidate cap, at
- * most one candidate per registrable domain, and an early stop as soon as one
- * load-bearing FACT reaches VERIFIED. Mutates persistedSources only when the
- * optional evidence expansion acquires additional (tracked) sources.
+ * most one candidate per registrable domain, and the shared WS7 workload guard.
+ * Verification continues through the priority-ordered eligible claims after a
+ * load-bearing FACT reaches VERIFIED, and stops only when the claims or
+ * candidates are exhausted, the verifier-call budget is spent, or the shared
+ * workload refuses another call. Evidence expansion (extra source acquisition)
+ * still runs only while no load-bearing FACT is VERIFIED. Mutates
+ * persistedSources only when the optional evidence expansion acquires
+ * additional (tracked) sources.
  */
 async function enrichEvidence({
   storage, runId, project, persistedClaims, persistedSources, contentBySourceId, policy, llmRouter,
@@ -209,10 +214,7 @@ async function enrichEvidence({
   });
   const isLoadBearingFact = (c) => c.claim_type === CLAIM_TYPE.FACT && c.is_load_bearing === true;
 
-  if (persistedClaims.some((c) => isLoadBearingFact(c) && statusOf(c) === EVIDENCE_STATUS.VERIFIED)) {
-    trace.stopReason = 'already_verified';
-    return;
-  }
+  const hasVerifiedLoadBearingFact = () => persistedClaims.some((c) => isLoadBearingFact(c) && statusOf(c) === EVIDENCE_STATUS.VERIFIED);
 
   const eligible = persistedClaims.filter((c) =>
     c.is_load_bearing === true && (c.claim_type === CLAIM_TYPE.FACT || c.claim_type === CLAIM_TYPE.INFERENCE) &&
@@ -284,15 +286,23 @@ async function enrichEvidence({
 
   let ordered = plan(eligible);
   trace.claimsConsidered = ordered.length;
+  // Verification coverage: keep verifying the remaining priority-ordered claims
+  // after the first VERIFIED load-bearing FACT. Only the verifier-call budget,
+  // the shared workload guard, or exhaustion of eligible claims/candidates ends
+  // the loop. A claim counts as verified only through statusOf() (the
+  // deterministic computeEvidenceStatus); UNCERTAIN/CONTRADICTS never do.
   const run = async (entries) => {
     for (const entry of entries) {
-      if (callsRemaining <= 0) { trace.stopReason = 'call_budget_exhausted'; return false; }
+      if (callsRemaining <= 0) { trace.stopReason = 'call_budget_exhausted'; return; }
       const r = await verifyOne(entry);
-      if (r.verified && isLoadBearingFact(entry.claim)) { trace.stopReason = 'verified_load_bearing_fact'; return true; }
+      if (!r.ran && trace.stopReason === 'llm_workload_stopped') return;
     }
-    return false;
   };
-  if (await run(ordered)) return;
+  await run(ordered);
+  if (hasVerifiedLoadBearingFact()) {
+    trace.stopReason = trace.stopReason ?? 'verified_load_bearing_fact';
+    return;
+  }
   if (trace.stopReason === 'call_budget_exhausted') return;
 
   // --- Optional evidence expansion (bounded; reuses ResearchSourceProvider + acquisition limits) ---
