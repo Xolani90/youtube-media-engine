@@ -4,6 +4,26 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { AssetSourceProvider } from './AssetSourceProvider.js';
 
+// Pixabay rejects a search term longer than 100 characters with HTTP 400
+// (measured live: 100 chars -> 200, 101 chars -> 400). The provider returns
+// null on any non-OK response, so an over-long query would otherwise surface
+// only as a silent "no asset".
+export const PIXABAY_MAX_QUERY_LENGTH = 100;
+
+/**
+ * Collapses whitespace and bounds the query to PIXABAY_MAX_QUERY_LENGTH,
+ * cutting at the last word boundary that fits (hard cut only when a single
+ * token exceeds the limit). Pure and deterministic.
+ */
+export function boundPixabayQuery(query) {
+  const q = query.replace(/\s+/g, ' ').trim();
+  if (q.length <= PIXABAY_MAX_QUERY_LENGTH) return q;
+  const head = q.slice(0, PIXABAY_MAX_QUERY_LENGTH);
+  if (q[PIXABAY_MAX_QUERY_LENGTH] === ' ') return head.trim();
+  const lastSpace = head.lastIndexOf(' ');
+  return (lastSpace > 0 ? head.slice(0, lastSpace) : head).trim();
+}
+
 /**
  * Concrete 'pixabay' AssetSourceProvider (Milestone C). One provider,
  * one job: acquire ONE real visual asset (image or video_clip) from the
@@ -118,10 +138,11 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
       return null;
     }
 
+    const boundedQuery = boundPixabayQuery(query);
     const searchUrl =
       assetType === 'image'
-        ? this._buildImageSearchUrl(apiKey, query)
-        : this._buildVideoSearchUrl(apiKey, query);
+        ? this._buildImageSearchUrl(apiKey, boundedQuery)
+        : this._buildVideoSearchUrl(apiKey, boundedQuery);
 
     let res;
     try {

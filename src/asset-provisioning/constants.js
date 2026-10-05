@@ -54,4 +54,4 @@ export const PROVISIONING_CLAIM = 'asset-provisioning:auto-visual-v1';
 // Free-text length the derived visual query is truncated to when it is
 // built from a Script fallback (visual_ideas is used verbatim, untouched,
 // since it is already meant to be a short/curated field).
-export const SCRIPT_FALLBACK_QUERY_MAX_LENGTH = 120;
+export const SCRIPT_FALLBACK_QUERY_MAX_LENGTH = 100;

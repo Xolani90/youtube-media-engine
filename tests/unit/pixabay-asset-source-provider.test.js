@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { PixabayAssetSourceProvider } from '../../src/providers/asset/PixabayAssetSourceProvider.js';
+import { PixabayAssetSourceProvider, boundPixabayQuery, PIXABAY_MAX_QUERY_LENGTH } from '../../src/providers/asset/PixabayAssetSourceProvider.js';
 
 function jsonResponse(status, body) {
   return {
@@ -301,5 +301,46 @@ test('acquireVisualAsset: provenance mapping includes pixabay id, source URL, an
     assert.match(result.usageRestrictions, /standalone/);
   } finally {
     cleanupDir(downloadDir);
+  }
+});
+
+test('boundPixabayQuery: a short query is returned unchanged (whitespace normalized)', () => {
+  assert.equal(boundPixabayQuery('  yellow   flowers '), 'yellow flowers');
+});
+
+test('boundPixabayQuery: an over-long query is cut at a word boundary within the 100-char limit', () => {
+  const long = 'A sweeping cinematic aerial shot of snow-capped mountain peaks at sunrise with drifting clouds and a calm alpine lake below';
+  const out = boundPixabayQuery(long);
+  assert.ok(long.length > PIXABAY_MAX_QUERY_LENGTH);
+  assert.ok(out.length <= PIXABAY_MAX_QUERY_LENGTH);
+  assert.ok(long.startsWith(out));
+  assert.ok(long[out.length] === ' ', 'must not cut mid-word');
+});
+
+test('boundPixabayQuery: exactly 100 characters is kept; a single 150-char token is hard-cut to 100', () => {
+  assert.equal(boundPixabayQuery('a'.repeat(100)).length, 100);
+  assert.equal(boundPixabayQuery('a'.repeat(150)).length, 100);
+});
+
+test('acquireVisualAsset: an over-long query is sent to Pixabay bounded to 100 characters (image and video)', async () => {
+  const long = 'word '.repeat(60).trim();
+  for (const assetType of ['image', 'video_clip']) {
+    let capturedUrl;
+    const downloadDir = freshDownloadDir();
+    const fetchImpl = async (url) => {
+      if (!capturedUrl) {
+        capturedUrl = url;
+        return jsonResponse(200, { total: 0, totalHits: 0, hits: [] });
+      }
+      return binaryResponse(200, Buffer.from('x'));
+    };
+    const provider = new PixabayAssetSourceProvider({ fetchImpl, apiKeyProvider: () => 'key123', downloadDir });
+    try {
+      await provider.acquireVisualAsset({ query: long, assetTypes: [assetType] });
+      const q = new URL(capturedUrl).searchParams.get('q');
+      assert.ok(q.length <= PIXABAY_MAX_QUERY_LENGTH, `${assetType} q length ${q.length}`);
+    } finally {
+      cleanupDir(downloadDir);
+    }
   }
 });

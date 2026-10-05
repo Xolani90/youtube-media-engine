@@ -454,3 +454,10 @@ test('a content_version not yet PRODUCED returns NOT_YET_PRODUCED', async () => 
 
   cleanup(storage, dbPath);
 });
+
+test('Script fallback query never exceeds Pixabay\'s 100-character limit', async () => {
+  const { deriveVisualQuery } = await import('../../src/asset-provisioning/visualQuery.js');
+  const body = 'x'.repeat(300) + '. Second sentence.';
+  const q = deriveVisualQuery({ visual_ideas: '' }, { body });
+  assert.ok(q.length <= 100);
+});
