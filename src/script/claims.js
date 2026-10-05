@@ -9,9 +9,16 @@
  * current evidence_status — Script deliberately treats the Brief as the
  * sole authoritative input and does not re-run Research/Brief logic
  * (Script Specification §6).
+ *
+ * A claim id may appear only once across the whole claim_links payload
+ * (within a section or across sections). This mirrors the Fact-Check
+ * structural rule (CLAIM_LINKS_DUPLICATE_CLAIM_REFERENCE_*) so a Script
+ * Fact-Check would reject is rejected here, where the bounded generation
+ * retry can still repair it.
  */
 export function validateScriptClaimReferences(sections, allowedClaimIds) {
   const allowed = new Set(allowedClaimIds);
+  const seen = new Set();
 
   for (const section of sections) {
     if (!Array.isArray(section.claim_ids)) {
@@ -24,6 +31,10 @@ export function validateScriptClaimReferences(sections, allowedClaimIds) {
       if (!allowed.has(id)) {
         return { valid: false, reason: `INVALID_CLAIM_REFERENCE_${id}` };
       }
+      if (seen.has(id)) {
+        return { valid: false, reason: `DUPLICATE_CLAIM_REFERENCE_${id}` };
+      }
+      seen.add(id);
     }
   }
 
