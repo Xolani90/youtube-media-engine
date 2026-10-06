@@ -35,3 +35,23 @@ test('scheduled-run.yml installs espeak-ng before running the autonomous entrypo
 
   assert.match(yaml, /apt-get install -y espeak-ng/, 'must use the same install command documented in README');
 });
+
+// TEMPORARY free-tier operating profile (Owner has no paid Gemini budget):
+// one scheduled invocation per day and a small per-run fresh-evaluation
+// budget. This pins our own configuration only; it does not (and cannot)
+// prove anything about Google's external quota.
+test('scheduled-run.yml uses the free-tier profile: one daily cron and a fresh-evaluation budget of 5', () => {
+  const yaml = readFileSync(workflowPath, 'utf8');
+
+  const crons = [...yaml.matchAll(/^\s*-\s*cron:\s*'([^']+)'/gm)].map((m) => m[1]);
+  assert.deepEqual(crons, ['0 6 * * *'], 'exactly one scheduled invocation per day');
+  assert.match(yaml, /^\s*workflow_dispatch:/m, 'manual dispatch must stay available');
+
+  assert.match(yaml, /^\s*DISCOVERY_FRESH_EVALUATION_BUDGET:\s*'5'\s*$/m);
+
+  // Safety pins are unchanged.
+  assert.match(yaml, /^\s*RUN_MODE:\s*SIMULATION\s*$/m);
+  assert.match(yaml, /^\s*AUTONOMOUS_ENABLED:\s*'false'\s*$/m);
+  assert.match(yaml, /^\s*PUBLICATION_PROVIDER_PRIORITY:\s*'youtube_shorts,facebook_reels'\s*$/m);
+  assert.match(yaml, /group:\s*autonomous-scheduled-run/);
+});

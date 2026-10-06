@@ -19,8 +19,14 @@ name: Scheduled Autonomous Run
 
 on:
   schedule:
-    # Four invocations per day, approximately every 6 hours (ADR-0035 §7).
-    - cron: '0 0,6,12,18 * * *'
+    # TEMPORARY free-tier operating profile: ONE invocation per day, down from
+    # the four-per-day cadence ADR-0035 §7 describes (every ~6 hours). The
+    # Owner currently has no paid Gemini API budget, and the free tier allows
+    # 15 requests/minute and 500 requests/day for gemini-3.5-flash-lite. Restore
+    # '0 0,6,12,18 * * *' (and remove DISCOVERY_FRESH_EVALUATION_BUDGET below)
+    # once paid quota is available. Manual runs stay available via
+    # workflow_dispatch.
+    - cron: '0 6 * * *'
   # Allows an Owner to trigger a run manually from the Actions tab for
   # verification purposes, without changing the automatic cadence above.
   workflow_dispatch:
@@ -50,6 +56,13 @@ jobs:
       RUN_MODE: SIMULATION
       AUTONOMOUS_ENABLED: 'false'
       LLM_PROVIDER_PRIORITY: 'gemini-free'
+      # TEMPORARY free-tier operating profile (see the cron comment above):
+      # cap fresh Discovery evaluations (2 Gemini calls each) at 5 per run so a
+      # run stays within the Gemini free-tier request limits. Applies to this
+      # workflow only; the application default in src/config/index.js is
+      # unchanged. Candidates not evaluated this run are picked up by later
+      # runs via the discovery evaluation schedule.
+      DISCOVERY_FRESH_EVALUATION_BUDGET: '5'
       # ADR-0036: publicly-authorized Discovery RSS sources (not secret
       # configuration — public feed URLs).
       RSS_FEED_URLS: 'https://openai.com/news/rss.xml,https://blog.google/technology/ai/rss/,https://techcrunch.com/category/artificial-intelligence/feed/,https://arstechnica.com/ai/feed/'

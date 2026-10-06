@@ -34,7 +34,14 @@ const TOPICS = [
   { title: 'Rail freight reform passes', description: 'Lawmakers approve overhaul of cargo scheduling rules.' },
   { title: 'Ocean sensor network expands', description: 'Researchers deploy hundreds of new buoys worldwide.' },
   { title: 'Vertical farming pilot opens', description: 'A warehouse district hosts a new hydroponic growing facility.' },
-  { title: 'Municipal bond rating upgraded', description: 'Analysts cite improved reserves after years of deficits.' }
+  { title: 'Municipal bond rating upgraded', description: 'Analysts cite improved reserves after years of deficits.' },
+  { title: 'Glacier retreat measured by satellite', description: 'Orbital radar shows alpine ice thinning faster than models predicted.' },
+  { title: 'Chess federation revises tournament clocks', description: 'Players debate the new increment rules before the championship cycle.' },
+  { title: 'Antibiotic resistance trial reports', description: 'A hospital network compares prescribing guidelines across wards.' },
+  { title: 'Coffee harvest hit by late frost', description: 'Growers in the highlands expect smaller yields and higher export prices.' },
+  { title: 'Museum digitizes medieval manuscripts', description: 'Curators publish high-resolution scans of fragile parchment collections.' },
+  { title: 'Wind turbine blade recycling plant opens', description: 'A coastal factory shreds retired fiberglass into construction filler.' },
+  { title: 'Marathon course certified flat', description: 'Officials confirm elevation change meets record-eligibility standards.' }
 ];
 
 function obs(n) {
@@ -198,5 +205,40 @@ test('E. no evaluationSchedule supplied: unbudgeted behavior is unchanged (back-
     const cols = env.storage.all("SELECT name FROM sqlite_master WHERE type='table' AND name='discovery_evaluation_schedule'");
     assert.equal(cols.length, 1, 'table exists (from migration) but nothing is written without a schedule instance');
     assert.equal(scheduleRows(env).length, 0);
+  });
+});
+test('F. free-tier budget of 5: at most five fresh evaluations (10 LLM-backed calls) over 12 candidates', async () => {
+  await withEnv(async (env) => {
+    const result = await runPipeline(env, {
+      observations: obs(12), evaluationStore: evalStoreFor(env), evaluationSchedule: scheduleFor(env), freshEvaluationBudget: 5
+    });
+    // Discovery's own dedup layer may merge a few of the 12 topics before
+    // scheduling, so the exact skipped count is not pinned; the budget cap is.
+    assert.equal(result.stats.freshEvaluated, 5, 'the budget is fully used and never exceeded');
+    assert.ok(result.stats.budgetSkipped >= 1, 'candidates beyond the budget are skipped');
+    assert.equal(env.calls.proposition, 5);
+    assert.equal(env.calls.features, 5);
+  });
+});
+
+test('G. free-tier budget of 5: reused candidates do not consume it, so new candidates are still evaluated', async () => {
+  await withEnv(async (env) => {
+    const store = evalStoreFor(env);
+    const schedule = scheduleFor(env);
+    const all = obs(10);
+
+    const first = await runPipeline(env, { observations: all.slice(0, 5), evaluationStore: store, evaluationSchedule: schedule, freshEvaluationBudget: 5 });
+    assert.equal(first.stats.freshEvaluated, 5);
+
+    const before = { ...env.calls };
+    const second = await runPipeline(env, { observations: all, evaluationStore: store, evaluationSchedule: schedule, freshEvaluationBudget: 5 });
+    assert.equal(second.stats.reused, 5, 'the first five are durably reusable');
+    // If reuse had consumed the budget, nothing new could be evaluated and
+    // budgetSkipped would be > 0. A few new topics may be merged by dedup, so
+    // the exact new count is not pinned.
+    assert.ok(second.stats.freshEvaluated >= 1, 'new candidates were evaluated despite five reused ones');
+    assert.ok(second.stats.freshEvaluated <= 5);
+    assert.equal(second.stats.budgetSkipped, 0, 'the budget was not exhausted by reuse');
+    assert.equal(env.calls.proposition - before.proposition, second.stats.freshEvaluated, 'only fresh candidates hit the LLM');
   });
 });
