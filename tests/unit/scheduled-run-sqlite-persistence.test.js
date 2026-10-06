@@ -30,10 +30,11 @@ const SKIP_NO_POSIX = process.platform === 'win32' ? 'requires a POSIX shell (ba
 
 const ENTRYPOINT = 'Run autonomous entrypoint (SIMULATION)';
 const DIAGNOSTIC = 'Research source-level diagnostic';
-const RESTORE = 'Restore SQLite state cache';
+const RESTORE = 'Restore run-state cache (SQLite + generated media)';
 const RESTORE_REPORT = 'Report SQLite cache restore result';
 const CHECKPOINT = 'Checkpoint SQLite WAL before saving';
-const SAVE = 'Save SQLite state cache';
+const INTEGRITY = 'Verify persisted state integrity before save';
+const SAVE = 'Save run-state cache (SQLite + generated media)';
 const FINAL_REPORT = 'Report application exit status';
 
 function stepBlock(name) {
@@ -76,9 +77,9 @@ function outputsOf(file) {
 
 // ---------------------------------------------------------------- structure
 
-test('steps are ordered: restore -> entrypoint -> diagnostic -> checkpoint -> save -> final status', () => {
+test('steps are ordered: restore -> entrypoint -> diagnostic -> checkpoint -> integrity -> save -> final status', () => {
   const idx = (n) => yaml.indexOf(`- name: ${n}`);
-  const order = [RESTORE, RESTORE_REPORT, ENTRYPOINT, DIAGNOSTIC, CHECKPOINT, SAVE, FINAL_REPORT].map(idx);
+  const order = [RESTORE, RESTORE_REPORT, ENTRYPOINT, DIAGNOSTIC, CHECKPOINT, INTEGRITY, SAVE, FINAL_REPORT].map(idx);
   order.forEach((i, n) => assert.notEqual(i, -1, `missing step #${n}`));
   for (let i = 1; i < order.length; i += 1) {
     assert.ok(order[i - 1] < order[i], `step ${i} must come after step ${i - 1}`);
@@ -93,20 +94,21 @@ test('cache restore happens before the entrypoint and targets the configured SQL
   );
   const restore = stepBlock(RESTORE);
   assert.match(restore, /uses:\s*actions\/cache\/restore@v4/, 'restore must use the restore-only action so save can be a separate always() step');
-  assert.match(restore, /path:\s*\$\{\{ env\.SQLITE_PATH \}\}/, 'restore path must be the configured SQLITE_PATH, not a second hard-coded path');
+  // The SQLite file and the generated media it points at travel in ONE cache entry, all via job-level env vars.
+  assert.match(restore, /path:\s*\|\s*\n\s*\$\{\{ env\.SQLITE_PATH \}\}\n\s*\$\{\{ env\.MEDIA_ARTIFACTS_DIR \}\}\n\s*\$\{\{ env\.ASSET_DOWNLOAD_DIR \}\}/, 'restore paths must be the configured SQLITE_PATH plus the media/asset dirs, not hard-coded paths');
   assert.match(restore, /key:\s*media-engine-sqlite-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/, 'key must be unique per run/attempt (cache entries are immutable)');
   assert.match(restore, /restore-keys:\s*\|\s*\n\s*media-engine-sqlite-\s*$/m, 'restore-keys must fall back to the most recent entry with the shared prefix');
   assert.ok(yaml.indexOf(`- name: ${RESTORE}`) < yaml.indexOf(`- name: ${ENTRYPOINT}`));
 });
 
-test('cache save uses the same path and key scheme, after the run, and only when a checkpointed DB exists', () => {
+test('cache save uses the same paths and key scheme, after the run, and only when a checkpointed DB exists AND state is consistent', () => {
   const restore = stepBlock(RESTORE);
   const save = stepBlock(SAVE);
   assert.match(save, /uses:\s*actions\/cache\/save@v4/);
-  assert.match(save, /path:\s*\$\{\{ env\.SQLITE_PATH \}\}/);
+  assert.match(save, /path:\s*\|\s*\n\s*\$\{\{ env\.SQLITE_PATH \}\}\n\s*\$\{\{ env\.MEDIA_ARTIFACTS_DIR \}\}\n\s*\$\{\{ env\.ASSET_DOWNLOAD_DIR \}\}/);
   const key = (b) => b.match(/\n {10}key:\s*(.+)/)?.[1].trim();
   assert.equal(key(save), key(restore), 'save must write the key scheme that restore-keys reads');
-  assert.match(save, /if:\s*always\(\)\s*&&\s*steps\.sqlite_checkpoint\.outputs\.saveable\s*==\s*'true'/, 'save must run under always() but only after a successful checkpoint');
+  assert.match(save, /if:\s*always\(\)\s*&&\s*steps\.sqlite_checkpoint\.outputs\.saveable\s*==\s*'true'\s*&&\s*steps\.state_integrity\.outputs\.consistent\s*==\s*'true'/, 'save must run under always() but only after a successful checkpoint AND a passing integrity check');
   assert.ok(yaml.indexOf(`- name: ${ENTRYPOINT}`) < yaml.indexOf(`- name: ${SAVE}`));
 });
 
@@ -296,6 +298,52 @@ test('restore report prints HIT with the matched key and file size, and MISS whe
 
     const ghost = runBash(script, { env: { SQLITE_PATH: path.join(dir, 'gone.db'), CACHE_HIT: 'false', CACHE_MATCHED_KEY: 'media-engine-sqlite-1-1' } });
     assert.match(ghost.stdout, /::warning::SQLite cache reported a hit but no file exists at SQLITE_PATH=/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ------------------------------------------- persisted-state integrity step
+
+function makeMediaDb(dir, { artifactPath }) {
+  const dbPath = path.join(dir, 'data', 'media-engine.db');
+  spawnSync('mkdir', ['-p', path.dirname(dbPath)]);
+  const db = new Database(dbPath);
+  db.exec(`CREATE TABLE media_artifacts (id TEXT PRIMARY KEY, content_version_id TEXT, artifact_path TEXT, artifact_checksum TEXT, narration_path TEXT)`);
+  db.prepare('INSERT INTO media_artifacts VALUES (?, ?, ?, ?, ?)').run('m1', 'cv1', artifactPath, null, path.join(dir, 'narration.wav'));
+  db.close();
+  return dbPath;
+}
+
+test('integrity step: consistent state -> consistent=true and the step succeeds (the save condition is then met)', { skip: SKIP_NO_POSIX }, () => {
+  const dir = tempDir();
+  try {
+    const video = path.join(dir, 'video.mp4');
+    writeFileSync(video, 'not-empty');
+    writeFileSync(path.join(dir, 'narration.wav'), 'not-empty');
+    const dbPath = makeMediaDb(dir, { artifactPath: video });
+    const out = path.join(dir, 'gh-output');
+    const res = runBash(runScript(INTEGRITY), { env: { SQLITE_PATH: dbPath, GITHUB_OUTPUT: out } });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(outputsOf(out), /^consistent=true$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('integrity step: SQLite row whose file is missing -> consistent=false, step fails red, error annotation, nothing repaired', { skip: SKIP_NO_POSIX }, () => {
+  const dir = tempDir();
+  try {
+    const video = path.join(dir, 'video.mp4'); // never written: the persisted row points at a missing file
+    const dbPath = makeMediaDb(dir, { artifactPath: video });
+    const out = path.join(dir, 'gh-output');
+    const res = runBash(runScript(INTEGRITY), { env: { SQLITE_PATH: dbPath, GITHUB_OUTPUT: out } });
+    assert.equal(res.status, 1);
+    assert.match(outputsOf(out), /^consistent=false$/m);
+    assert.doesNotMatch(outputsOf(out), /consistent=true/);
+    assert.match(res.stdout, /::error::Persisted-state integrity check failed/);
+    assert.match(res.stderr, /VIOLATION MEDIA_FILE_MISSING/);
+    assert.equal(existsSync(video), false, 'the missing artifact must not be fabricated');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -4,6 +4,7 @@
 // PRIVACY / SECURITY: no secrets live in this file or in git. See .env.example.
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROVIDER_REGISTRY } from '../publication/providerRegistry.js';
@@ -240,6 +241,17 @@ export const config = {
   // narration audio + rendered .mp4 artifacts. Local only, mirrors
   // productionArtifactsDir exactly — no cloud/object storage.
   mediaArtifactsDir: process.env.MEDIA_ARTIFACTS_DIR || path.join(REPO_ROOT, 'data', 'media_artifacts'),
+
+  // Asset Provisioning (src/asset-provisioning/): local directory downloaded
+  // stock assets are written to. The default is IDENTICAL to
+  // PixabayAssetSourceProvider's own built-in default (os.tmpdir()/
+  // ame-pixabay-assets), so behavior is unchanged unless ASSET_DOWNLOAD_DIR
+  // is set. It is configurable only so an unattended runner can place the
+  // directory somewhere the run-state cache can carry it: assets.location
+  // rows point at these files, and Media Production re-reads them for any
+  // item that has not rendered yet (a missing file there is a render
+  // failure that spends the item's bounded-retry budget).
+  assetDownloadDir: process.env.ASSET_DOWNLOAD_DIR || path.join(os.tmpdir(), 'ame-pixabay-assets'),
 
   schedulerDriver: process.env.SCHEDULER_DRIVER || 'github-actions',
 

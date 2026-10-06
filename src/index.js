@@ -306,7 +306,9 @@ export async function runAutonomousEntrypoint(deps = {}) {
       // a caller-supplied override (tests, controlled callers) still wins.
       assetProvisioning: {
         ...deps.assetProvisioning,
-        provider: deps.assetProvisioning?.provider ?? new PixabayAssetSourceProvider()
+        provider:
+          deps.assetProvisioning?.provider ??
+          new PixabayAssetSourceProvider({ downloadDir: config.assetDownloadDir })
       },
       production: {
         ...deps.production,

@@ -54,6 +54,20 @@ jobs:
       # configuration — public feed URLs).
       RSS_FEED_URLS: 'https://openai.com/news/rss.xml,https://blog.google/technology/ai/rss/,https://techcrunch.com/category/artificial-intelligence/feed/,https://arstechnica.com/ai/feed/'
       SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+      # Run-state filesystem artifacts carried between runs ALONGSIDE the
+      # SQLite file (see "Restore run-state cache" below). Persisted database
+      # rows hold absolute paths into these directories (media_artifacts,
+      # short_form_media_artifacts, assets.location), so a later run can only
+      # use that state if the files are restored at the same paths. Explicit
+      # here, rather than left to the application's REPO_ROOT / os.tmpdir()
+      # defaults, so the persisted state is visible in this file.
+      #   MEDIA_ARTIFACTS_DIR  narration.wav, video.mp4, short-form .mp4, thumbnail.png
+      #   ASSET_DOWNLOAD_DIR   downloaded Pixabay assets (needed to render any
+      #                        item that has not rendered yet)
+      # Deliberately NOT persisted: data/artifacts (production manifest files;
+      # no later stage reads them -- the manifest is read from the database).
+      MEDIA_ARTIFACTS_DIR: ${{ github.workspace }}/data/media_artifacts
+      ASSET_DOWNLOAD_DIR: ${{ github.workspace }}/data/asset_downloads
       # Diagnostic tracing (src/diagnostics/trace.js) -- temporary, for one-off
       # Tavily live-validation observability. Inert unless 'true'; adds
       # BEGIN/END/HEARTBEAT lines to stderr, no behavior change.
@@ -104,7 +118,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Restore SQLite state cache
+      - name: Prepare run-state directories
+        # Created up front so every cached path always exists: a run that
+        # produces no media then saves a valid (empty-directory) entry instead
+        # of tripping actions/cache's missing-path validation.
+        run: |
+          mkdir -p "$(dirname "$SQLITE_PATH")" "$MEDIA_ARTIFACTS_DIR" "$ASSET_DOWNLOAD_DIR"
+
+      - name: Restore run-state cache (SQLite + generated media)
         # SQLite state persistence between GitHub Actions runs.
         #
         # The cache is ONLY a carrier of data/media-engine.db from one runner
@@ -119,15 +140,31 @@ jobs:
         # entries are immutable; restore-keys selects the most recently
         # created entry with the shared prefix.
         #
-        # The cached file is exactly the job-level SQLITE_PATH -- the same
-        # convention src/config/index.js reads -- so the restored file is the
-        # one the entrypoint opens. Only the main database file
-        # is cached: it is saved after a TRUNCATE WAL checkpoint (see the
-        # checkpoint step below), so -wal / -shm carry no state.
+        # The cached SQLite file is exactly the job-level SQLITE_PATH -- the
+        # same convention src/config/index.js reads -- so the restored file is
+        # the one the entrypoint opens. Only the main database file is cached:
+        # it is saved after a TRUNCATE WAL checkpoint (see the checkpoint step
+        # below), so -wal / -shm carry no state.
+        #
+        # The generated filesystem artifacts the database rows point at travel
+        # in the SAME cache entry (one key, one restore, one save), so the
+        # database and the files it references can never be restored from
+        # different runs. Invariant: if SQLite says an item is ready for a later
+        # stage, every local file that stage needs is restored with it. Absolute
+        # paths are preserved, and the runner workspace path is identical
+        # across runs of this repository, so stored paths resolve unchanged.
+        #
+        # NOTE: actions/cache scopes entries by (paths, compression) as well as
+        # key. The first run after the path list changed (this edit) therefore
+        # reports a MISS against older DB-only entries and starts from a fresh
+        # database; later runs hit normally.
         id: sqlite_cache_restore
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.SQLITE_PATH }}
+          path: |
+            ${{ env.SQLITE_PATH }}
+            ${{ env.MEDIA_ARTIFACTS_DIR }}
+            ${{ env.ASSET_DOWNLOAD_DIR }}
           key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             media-engine-sqlite-
@@ -152,6 +189,13 @@ jobs:
           else
             echo "SQLite cache: MISS (no cache matched prefix media-engine-sqlite-); the entrypoint will create a fresh database at SQLITE_PATH=$SQLITE_PATH"
           fi
+
+      - name: Verify restored run state (report only)
+        # Attributes any database/filesystem divergence to the RESTORE rather
+        # than to this run. Never fails the job and never repairs anything:
+        # a divergence it reports is a persisted-state problem, not something
+        # to be hidden by re-rendering.
+        run: node scripts/check-persisted-state-integrity.js --report-only
 
       - name: Run autonomous entrypoint (SIMULATION)
         # Exit code 3 (REFUSED_EXIT_CODE, src/index.js) means another
@@ -233,11 +277,40 @@ jobs:
           echo "[sqlite-persistence] database ready to save: $SQLITE_PATH ($(wc -c < "$SQLITE_PATH") bytes)"
           echo "saveable=true" >> "$GITHUB_OUTPUT"
 
-      - name: Save SQLite state cache
+      - name: Verify persisted state integrity before save
+        # Runs only once the WAL checkpoint has completed (saveable=true). Fails
+        # -- and withholds the cache save -- only when persisted state and
+        # required filesystem state DISAGREE (e.g. a media_artifacts row whose
+        # file is missing or empty, or whose bytes no longer match the recorded
+        # checksum). A run that produced nothing is healthy and saves normally.
+        # Read-only: it never re-renders or fabricates a missing artifact.
+        # set +e / explicit exit so the outcome is recorded as a step output
+        # for the save step's condition while the step itself still fails red.
+        id: state_integrity
         if: always() && steps.sqlite_checkpoint.outputs.saveable == 'true'
+        run: |
+          set +e
+          node scripts/check-persisted-state-integrity.js
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "consistent=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "consistent=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Persisted-state integrity check failed (exit $code); NOT saving the run-state cache over the last consistent entry."
+            exit "$code"
+          fi
+
+      - name: Save run-state cache (SQLite + generated media)
+        # Saved only when ALL required state is ready: the WAL checkpoint
+        # completed AND the database and filesystem artifacts agree.
+        if: always() && steps.sqlite_checkpoint.outputs.saveable == 'true' && steps.state_integrity.outputs.consistent == 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.SQLITE_PATH }}
+          path: |
+            ${{ env.SQLITE_PATH }}
+            ${{ env.MEDIA_ARTIFACTS_DIR }}
+            ${{ env.ASSET_DOWNLOAD_DIR }}
           key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Report application exit status
