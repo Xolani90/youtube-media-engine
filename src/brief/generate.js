@@ -9,6 +9,11 @@ import { derivedContentBlock } from '../providers/llm/promptTrust.js';
 // repairs malformed JSON, and never touches an unfenced response. The
 // unwrapped payload then goes through the same JSON.parse + object check
 // + deterministic validation as any plain response.
+// `visual_ideas` is used downstream as the stock-asset search query. Pixabay
+// rejects any search term over 100 characters (HTTP 400), so the Brief
+// contract itself must not persist a longer value.
+export const VISUAL_IDEAS_MAX_LENGTH = 100;
+
 const FENCED_PAYLOAD = /^```(?:json|JSON)?\r?\n([\s\S]*?)\r?\n```$/;
 
 function unwrapSingleFence(text) {
@@ -52,6 +57,18 @@ export async function generateBriefFields({ coreQuestion, opportunity, eligibleC
     '(all non-empty strings), and "key_claims" (a JSON array of one or more',
     'claim id strings, chosen ONLY from the eligible claims list below —',
     'never invent an id, never include an id not present in that list).',
+    `\"visual_ideas\" has a special contract: it is used verbatim as a stock-photo`,
+    'search query, so write a concise keyword-style query, NOT a sentence.',
+    'Use about 2 to 8 concrete, topic-specific keywords or short keyword',
+    'phrases, comma-separated where useful, at most',
+    `${VISUAL_IDEAS_MAX_LENGTH} characters in total. Prefer the specific subject of the story`,
+    '(its place, objects, people, setting) over generic production terms such',
+    'as infographics, charts, maps, footage, video or illustrations, unless',
+    'those are themselves the subject. Do not write instructions or verbs',
+    'such as show, use, intercut, footage of or illustrating. Examples of the',
+    'right style: \"battery factory construction, industrial plant, workers\";',
+    '\"city buses, trams, public transport, fare increase\";',
+    '\"coastal erosion, cliffs, shoreline, ocean\".',
     'Ground "counterpoints" and "original_insights" only in the given',
     'claims: do not invent facts, do not imply evidence that does not',
     'exist, and do not resolve or conceal a contradiction. A direct',
@@ -109,6 +126,9 @@ export function validateGeneratedBrief(parsed) {
     if (typeof parsed[field] !== 'string' || parsed[field].trim().length === 0) {
       return { valid: false, reason: `MISSING_OR_EMPTY_FIELD_${field}` };
     }
+  }
+  if (parsed.visual_ideas.trim().length > VISUAL_IDEAS_MAX_LENGTH) {
+    return { valid: false, reason: 'VISUAL_IDEAS_TOO_LONG' };
   }
   if (!Array.isArray(parsed.key_claims) || parsed.key_claims.length === 0) {
     return { valid: false, reason: 'MISSING_OR_EMPTY_KEY_CLAIMS' };

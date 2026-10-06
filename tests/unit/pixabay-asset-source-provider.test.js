@@ -344,3 +344,11 @@ test('acquireVisualAsset: an over-long query is sent to Pixabay bounded to 100 c
     }
   }
 });
+
+test('defense in depth: an over-long legacy visual_ideas still yields a query of at most 100 characters', async () => {
+  const { deriveVisualQuery } = await import('../../src/asset-provisioning/visualQuery.js');
+  const legacy = 'Infographics showing the two-year construction timeline alongside projected hiring phases, and maps highlighting the planned site';
+  const q = boundPixabayQuery(deriveVisualQuery({ visual_ideas: legacy }, { body: '' }));
+  assert.ok(legacy.length > 100);
+  assert.ok(q.length <= PIXABAY_MAX_QUERY_LENGTH);
+});

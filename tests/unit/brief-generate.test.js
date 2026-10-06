@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateBriefFields, validateGeneratedBrief } from '../../src/brief/generate.js';
+import { generateBriefFields, validateGeneratedBrief, VISUAL_IDEAS_MAX_LENGTH } from '../../src/brief/generate.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
 
 function stubRouter(responseText) {
@@ -196,4 +196,49 @@ test('B-02a: generation makes exactly one LLM call per invocation, malformed or 
   assert.equal((await runGenerate('not json')).callCount, 1);
   assert.equal((await runGenerate(`${FENCE}json\nnot json\n${FENCE}`)).callCount, 1);
   assert.equal((await runGenerate(`${FENCE}json\n${JSON.stringify(wellFormedFields())}\n${FENCE}`)).callCount, 1);
+});
+
+test('visual_ideas contract: a short keyword query is accepted', () => {
+  const r = validateGeneratedBrief(wellFormedFields({ visual_ideas: 'battery factory construction, industrial plant, workers' }));
+  assert.equal(r.valid, true);
+});
+
+test('visual_ideas contract: exactly 100 characters is accepted', () => {
+  assert.equal(VISUAL_IDEAS_MAX_LENGTH, 100);
+  const r = validateGeneratedBrief(wellFormedFields({ visual_ideas: 'a'.repeat(100) }));
+  assert.equal(r.valid, true);
+});
+
+test('visual_ideas contract: 101 characters is rejected with VISUAL_IDEAS_TOO_LONG', () => {
+  const r = validateGeneratedBrief(wellFormedFields({ visual_ideas: 'a'.repeat(101) }));
+  assert.deepEqual(r, { valid: false, reason: 'VISUAL_IDEAS_TOO_LONG' });
+});
+
+test('visual_ideas contract: the limit applies to the trimmed value, and prose without commas is not rejected on style', () => {
+  assert.equal(validateGeneratedBrief(wellFormedFields({ visual_ideas: '  ' + 'a'.repeat(100) + '  ' })).valid, true);
+  assert.equal(validateGeneratedBrief(wellFormedFields({ visual_ideas: 'city bus tram fare increase' })).valid, true);
+});
+
+test('visual_ideas contract: empty visual_ideas still fails as a missing field, not as too long', () => {
+  const r = validateGeneratedBrief(wellFormedFields({ visual_ideas: '' }));
+  assert.equal(r.reason, 'MISSING_OR_EMPTY_FIELD_visual_ideas');
+});
+
+test('visual_ideas contract: the prompt states the keyword-query contract and the 100-character limit', async () => {
+  let captured;
+  const registry = {
+    'brief-stub': () => ({
+      id: 'brief-stub', isPaid: false,
+      async healthCheck() { return true; },
+      async complete({ prompt }) {
+        captured = prompt;
+        return { text: '{}', model: 'brief-stub', requestId: null, inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false };
+      }
+    })
+  };
+  const router = new LLMRouter({ priority: ['brief-stub'], allowPaidProviders: false, registry });
+  await generateBriefFields({ coreQuestion: 'q', opportunity: { title: 't', description: 'd' }, eligibleClaims: [{ id: 'c1', claim: 'x', claim_type: 'FACT' }] }, router);
+  assert.match(captured, /keyword-style query, NOT a sentence/);
+  assert.match(captured, /at most\s*100 characters/);
+  assert.match(captured, /battery factory construction, industrial plant, workers/);
 });
