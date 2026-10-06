@@ -101,6 +101,13 @@ function buildStages(deps, startedMode) {
         result?.alreadyTerminal !== true &&
         (result?.project?.status === RESEARCH_PROJECT_STATUS.RESEARCH_COMPLETE ||
           result?.project?.status === RESEARCH_PROJECT_STATUS.INSUFFICIENT_EVIDENCE),
+      // ADR-0039: only a genuine transient failure records a RESEARCH attempt
+      // (the result then carries `attempt`), and that item is not retried again
+      // in this invocation. Infrastructure/unclassified failures record none.
+      consumedRetryAttempt: recordedFailedAttempt,
+      // A Research item's identity is its opportunity: a fresh item has no
+      // project yet, and the same item must keep one key once it has one.
+      retryIdentity: (item) => item.opportunityId,
       run: (item, runId) =>
         (fn.research ?? runResearchProject)({
           storage: deps.storage,
@@ -481,7 +488,7 @@ export async function runAutonomousOperation(deps) {
           // Skip only at execution time; the eligible lists and the
           // signature above are intentionally NOT filtered by this set, so
           // no_work / no_progress semantics are unchanged.
-          const retryKey = `${stage.name}:${item.contentBriefId ?? item.researchProjectId}`;
+          const retryKey = `${stage.name}:${stage.retryIdentity ? stage.retryIdentity(item) : (item.contentBriefId ?? item.researchProjectId)}`;
           if (stage.consumedRetryAttempt && retryConsumed.has(retryKey)) continue;
           try {
             const result = await traceAsync(

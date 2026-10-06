@@ -311,7 +311,7 @@ test('migration 0017: preserves 0016 data 1:1, renames to subject_id, drops the 
   // LATEST_MIGRATION is a deliberate, named expectation: a new migration must be
   // acknowledged here on purpose, not merely tolerated.
   const MIGRATION_0017 = '0017_generalize_stage_retry_identity.sql';
-  const LATEST_MIGRATION = '0028_sources_social_media_role.sql';
+  const LATEST_MIGRATION = '0029_research_resumable_recovery.sql';
   assert.ok(files.includes(MIGRATION_0017), 'migration 0017 is present');
   assert.equal(files.at(-1), LATEST_MIGRATION, 'current latest migration (update LATEST_MIGRATION deliberately when one is added)');
   db.pragma('foreign_keys = OFF');
@@ -341,7 +341,8 @@ test('migration 0017: preserves 0016 data 1:1, renames to subject_id, drops the 
   const insert = (stage, subject) => db.prepare(
     `INSERT INTO stage_retry_state (id, subject_id, stage, created_at, updated_at) VALUES (?, ?, ?, 'c', 'u')`
   ).run(crypto.randomUUID(), subject, stage);
-  for (const stage of Object.values(RETRY_STAGE)) insert(stage, 'shared-subject'); // same subject id, every stage: isolated
+  // At the 0017 shape the stage set is the original 9; RESEARCH arrives with 0029 (ADR-0039) and is correctly refused here.
+  for (const stage of Object.values(RETRY_STAGE).filter((st) => st !== 'RESEARCH')) insert(stage, 'shared-subject'); // same subject id, every stage: isolated
   assert.throws(() => insert('BRIEF', 'shared-subject'), /UNIQUE/, 'UNIQUE (stage, subject_id)');
   for (const bad of ['RESEARCH', 'RIGHTS_VERIFICATION', 'NOPE']) {
     assert.throws(() => insert(bad, 'x'), /CHECK/, `${bad} is not an authorized retry stage`);
@@ -349,10 +350,10 @@ test('migration 0017: preserves 0016 data 1:1, renames to subject_id, drops the 
   db.close();
 });
 
-test('RETRY_STAGE is exactly the 9 authorized stages: no Research, no Rights Verification', () => {
+test('RETRY_STAGE is exactly the 10 authorized stages: Research (ADR-0039) yes, no Rights Verification', () => {
   assert.deepEqual(Object.values(RETRY_STAGE).sort(), [
     'ASSET_PROVISIONING', 'BRIEF', 'FACT_CHECK', 'MEDIA_PRODUCTION', 'ORIGINALITY',
-    'PRODUCTION', 'PUBLICATION', 'QUALITY_GATE', 'SCRIPT'
+    'PRODUCTION', 'PUBLICATION', 'QUALITY_GATE', 'RESEARCH', 'SCRIPT'
   ]);
 });
 
@@ -362,7 +363,7 @@ test('policy: identity is (stage, subject_id); contentVersionId alias is refused
   await withStorage((storage) => {
     assert.throws(() => recordFailedAttempt(storage, { contentVersionId: 'x', stage: RETRY_STAGE.BRIEF, reason: 'r' }), /not identified by a content_version_id/);
     assert.throws(() => recordFailedAttempt(storage, { contentVersionId: 'x', stage: RETRY_STAGE.SCRIPT, reason: 'r' }), /not identified by a content_version_id/);
-    assert.throws(() => recordFailedAttempt(storage, { subjectId: 'x', stage: 'RESEARCH', reason: 'r' }), /unknown stage/);
+    assert.throws(() => recordFailedAttempt(storage, { contentVersionId: 'x', stage: RETRY_STAGE.RESEARCH, reason: 'r' }), /not identified by a content_version_id/);
     assert.throws(() => recordFailedAttempt(storage, { subjectId: 'x', stage: 'RIGHTS_VERIFICATION', reason: 'r' }), /unknown stage/);
     assert.throws(() => recordFailedAttempt(storage, { stage: RETRY_STAGE.BRIEF, reason: 'r' }), /requires a subjectId/);
     assert.throws(() => recordFailedAttempt(storage, { subjectId: 'a', contentVersionId: 'b', stage: RETRY_STAGE.FACT_CHECK, reason: 'r' }), /disagree/);

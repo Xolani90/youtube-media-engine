@@ -26,6 +26,10 @@ import crypto from 'node:crypto';
 //   ORIGINALITY         STRUCTURAL_FAILURE
 //   QUALITY_GATE        STRUCTURAL_FAILURE
 //   ASSET_PROVISIONING  NO_ASSET_ACQUIRED | INVALID_PROVIDER_RESULT (one budget)
+//   RESEARCH            RESEARCH_TRANSIENT_FAILURE (ADR-0039: one whole
+//                       runResearchProject attempt abandoned by a genuine
+//                       transient provider/transport failure; subject_id =
+//                       research_projects.id)
 //   MEDIA_PRODUCTION    NARRATION_FAILED | RENDER_FAILED | VALIDATION_FAILED |
 //                       ASSET_CHECKSUM_MISMATCH (one budget)
 // Attempt 1/2/3 = the 1st/2nd/3rd recorded failure in the current cycle.
@@ -41,11 +45,13 @@ export const RETRY_STAGE = Object.freeze({
   ORIGINALITY: 'ORIGINALITY',
   QUALITY_GATE: 'QUALITY_GATE',
   ASSET_PROVISIONING: 'ASSET_PROVISIONING',
-  MEDIA_PRODUCTION: 'MEDIA_PRODUCTION'
+  MEDIA_PRODUCTION: 'MEDIA_PRODUCTION',
+  RESEARCH: 'RESEARCH'
 });
 
 // What a stage's subject_id names, used for decision_log.subject_type.
 const SUBJECT_TYPE = Object.freeze({
+  [RETRY_STAGE.RESEARCH]: 'research_project',
   [RETRY_STAGE.BRIEF]: 'research_project',
   [RETRY_STAGE.SCRIPT]: 'content_brief'
 });

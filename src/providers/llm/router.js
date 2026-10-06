@@ -112,9 +112,13 @@ export class LLMRouter {
     const { eligible, attempted } = await this._selectEligibleProviders();
     if (eligible.length === 0) {
       const detail = attempted.map((a) => `${a.id}: ${a.skipped}`).join('; ');
-      throw new Error(
+      const noProvider = new Error(
         `No usable LLM provider available under current configuration. Attempted: ${detail || '(empty priority list)'}`
       );
+      // Machine-readable marker (ADR-0039): lets callers classify this as a
+      // provider-wide/infrastructure condition without parsing message text.
+      noProvider.code = 'NO_USABLE_PROVIDER';
+      throw noProvider;
     }
 
     const failures = [];
@@ -152,7 +156,9 @@ export class LLMRouter {
           // failure (e.g. an empty completion vs. a transport error).
           code: err?.code ?? null,
           status: err?.status ?? null,
-          finishReason: err?.finishReason ?? null
+          finishReason: err?.finishReason ?? null,
+          name: err?.name ?? null,
+          causeCode: err?.cause?.code ?? null
         });
       }
     }

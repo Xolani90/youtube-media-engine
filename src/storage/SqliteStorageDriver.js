@@ -65,6 +65,9 @@ export class SqliteStorageDriver extends StorageDriver {
       // Pass 46.2: 0028 rebuilds `sources` to widen the role CHECK with
       // 'social_media' (same rebuild/FK-toggle convention as 0013/0018).
       '0028_sources_social_media_role.sql',
+      // ADR-0039 (B4): 0029 rebuilds both retry tables to widen the stage CHECK
+      // with 'RESEARCH' (same rebuild/FK-toggle convention as 0017/0026).
+      '0029_research_resumable_recovery.sql',
     ]);
 
     for (const file of files) {

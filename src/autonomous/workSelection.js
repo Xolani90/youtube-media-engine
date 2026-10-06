@@ -26,13 +26,39 @@ export function selectEligibleResearch(storage) {
   // UNIQUE(opportunity_id) guarantee src/research/pipeline.js itself
   // relies on (createResearchProject) -- this is a pure efficiency
   // pre-filter, not a second source of truth.
-  return storage
+  const fresh = storage
     .all(
       `SELECT id FROM opportunities
        WHERE status = 'HANDED_TO_RESEARCH'
        AND id NOT IN (SELECT opportunity_id FROM research_projects)`
     )
     .map((row) => ({ opportunityId: row.id }));
+  // ADR-0039 (B4): a project left RESEARCHING (an attempt abandoned for a
+  // transient/infrastructure reason, or a hard interruption) is resumable from
+  // its checkpoints. It is re-selected only while (a) it is not RESEARCH-
+  // quarantined and (b) resuming cannot duplicate evidence: either its
+  // SOURCES_PERSISTED checkpoint exists, or it has no sources at all. A
+  // pre-checkpoint partial project (sources, no checkpoint) is never selected.
+  const resumable = storage
+    .all(
+      `SELECT rp.opportunity_id AS opportunity_id
+       FROM research_projects rp
+       JOIN opportunities o ON o.id = rp.opportunity_id
+       WHERE rp.status = 'RESEARCHING'
+       AND o.status = 'HANDED_TO_RESEARCH'
+       AND NOT EXISTS (
+         SELECT 1 FROM stage_retry_state s
+         WHERE s.stage = 'RESEARCH' AND s.subject_id = rp.id AND s.quarantined_at IS NOT NULL
+       )
+       AND (
+         EXISTS (SELECT 1 FROM research_checkpoints c WHERE c.research_project_id = rp.id AND c.checkpoint = 'SOURCES_PERSISTED')
+         OR NOT EXISTS (SELECT 1 FROM sources x WHERE x.research_project_id = rp.id)
+       )`
+    )
+    // Same item shape as a fresh item (the stage only needs the opportunity), so the
+    // runner's eligibility signature does not change when a project row appears.
+    .map((row) => ({ opportunityId: row.opportunity_id }));
+  return [...fresh, ...resumable];
 }
 
 // A4 bounded-retry governance (Owner-authorized): every A4 selector below

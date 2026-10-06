@@ -16,6 +16,12 @@ import {
 import { canonicalizePair, recordContradiction, hasUnresolvedContradiction } from './contradictions.js';
 import { evaluateCompleteness } from './completeness.js';
 import { traceAsync } from '../diagnostics/trace.js';
+import { RESEARCH_CHECKPOINT, readResearchCheckpoints, writeResearchCheckpoint } from './researchCheckpoints.js';
+import {
+  ISOLATE, RESEARCH_FAILURE_NATURE, RESEARCH_STOP_REASON, ResearchAttemptFailure,
+  classifyExtractionFailure, failureBasis
+} from './researchFailure.js';
+import { RETRY_STAGE, FAILURE_NATURE, isQuarantined, recordFailedAttemptIfRetryable, retryFields } from '../state/StageRetryPolicy.js';
 
 // Research diagnostics (CLAIM_TRACE / EVIDENCE_TRACE / RESEARCH_TRACE_SUMMARY and the
 // convergence explanation) are inert unless explicitly enabled, matching diagnostics/trace.js.
@@ -189,7 +195,8 @@ function newEvidenceVerificationTrace() {
  */
 async function enrichEvidence({
   storage, runId, project, persistedClaims, persistedSources, contentBySourceId, policy, llmRouter,
-  evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace, diag
+  evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace, diag,
+  resumeExpansion = null
 }) {
   if (!llmRouter || typeof llmRouter.complete !== 'function' || typeof evidenceVerifier !== 'function') {
     trace.stopReason = 'verifier_not_configured';
@@ -298,6 +305,20 @@ async function enrichEvidence({
       if (!r.ran && trace.stopReason === 'llm_workload_stopped') return;
     }
   };
+  if (resumeExpansion) {
+    // ADR-0039: EXPANSION_PERSISTED. The verification pass and the expansion's
+    // acquisition already committed (the expansion sources are part of
+    // persistedSources). Do NOT re-verify, re-discover or re-acquire: restore
+    // the exact expansion budget state and run only the post-expansion
+    // verification of the same top FACT claim.
+    callsRemaining = Number.isInteger(resumeExpansion.callsRemaining) ? resumeExpansion.callsRemaining : 0;
+    acquisitionResult.attemptsUsed += Number.isInteger(resumeExpansion.expansionAttemptsUsed) ? resumeExpansion.expansionAttemptsUsed : 0;
+    trace.expansionSourcesAcquired = Number.isInteger(resumeExpansion.expansionSourcesAcquired) ? resumeExpansion.expansionSourcesAcquired : 0;
+    const resumedTopFact = persistedClaims.find((c) => c.id === resumeExpansion.topFactClaimId);
+    if (resumedTopFact) await run(plan([resumedTopFact]));
+    trace.stopReason = trace.stopReason ?? 'candidates_exhausted';
+    return;
+  }
   await run(ordered);
   if (hasVerifiedLoadBearingFact()) {
     trace.stopReason = trace.stopReason ?? 'verified_load_bearing_fact';
@@ -345,26 +366,50 @@ async function enrichEvidence({
   });
   // Budget bookkeeping: expansion consumes the same project-level acquisition ceilings.
   acquisitionResult.attemptsUsed += expanded.attemptsUsed;
-  for (const acquired of expanded.acquired) {
-    const roleResult = classifySourceRole(acquired.url, classification);
-    const admissibility = assessEvidenceAdmissibility(acquired.status, roleResult.role, acquired.content);
-    const qualityTier = admissibility.quality;
-    noteAcquiredDiag(diag, acquired, roleResult, admissibility);
-    const sourceId = insertSource(storage, {
-      researchProjectId: project.id, url: acquired.url, sourceType: null, role: roleResult.role, qualityTier,
-      retrievalStatus: acquired.status, content: acquired.content, notes: buildSourceProvenance(acquired)
+  // ADR-0039: the expansion's sources, decision rows and the EXPANSION_PERSISTED
+  // checkpoint (exact expansion budget state) commit atomically. In-memory
+  // state is only updated after the commit, so a rolled-back transaction can
+  // never leave persistedSources referencing sources that do not exist.
+  const newlyPersisted = [];
+  storage.transaction(() => {
+    for (const acquired of expanded.acquired) {
+      const roleResult = classifySourceRole(acquired.url, classification);
+      const admissibility = assessEvidenceAdmissibility(acquired.status, roleResult.role, acquired.content);
+      const qualityTier = admissibility.quality;
+      noteAcquiredDiag(diag, acquired, roleResult, admissibility);
+      const sourceId = insertSource(storage, {
+        researchProjectId: project.id, url: acquired.url, sourceType: null, role: roleResult.role, qualityTier,
+        retrievalStatus: acquired.status, content: acquired.content, notes: buildSourceProvenance(acquired)
+      });
+      logDecision(storage, {
+        runId, stage: RESEARCH_STAGE.SOURCE_ACQUISITION, subjectType: 'source', subjectId: sourceId,
+        decision: acquired.status, reason: acquired.error || 'retrieved_for_evidence_expansion', resultingState: acquired.status
+      });
+      logDecision(storage, {
+        runId, stage: RESEARCH_STAGE.SOURCE_CLASSIFICATION, subjectType: 'source', subjectId: sourceId,
+        decision: roleResult.role, reason: roleResult.ambiguous ? 'ambiguous_deterministic_classification' : 'deterministic_domain_match',
+        resultingState: qualityTier
+      });
+      newlyPersisted.push({
+        acquired,
+        source: { id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString(), notes: buildSourceProvenance(acquired) }
+      });
+    }
+    writeResearchCheckpoint(storage, {
+      researchProjectId: project.id,
+      checkpoint: RESEARCH_CHECKPOINT.EXPANSION_PERSISTED,
+      payload: {
+        topFactClaimId: topFact.claim.id,
+        expansionAttemptsUsed: expanded.attemptsUsed,
+        callsRemaining,
+        expansionSourcesAcquired: expanded.acquired.filter((a) => a.status === RETRIEVAL_STATUS.SUCCESS).length,
+        expansionSourceIds: newlyPersisted.map((n) => n.source.id)
+      }
     });
-    logDecision(storage, {
-      runId, stage: RESEARCH_STAGE.SOURCE_ACQUISITION, subjectType: 'source', subjectId: sourceId,
-      decision: acquired.status, reason: acquired.error || 'retrieved_for_evidence_expansion', resultingState: acquired.status
-    });
-    logDecision(storage, {
-      runId, stage: RESEARCH_STAGE.SOURCE_CLASSIFICATION, subjectType: 'source', subjectId: sourceId,
-      decision: roleResult.role, reason: roleResult.ambiguous ? 'ambiguous_deterministic_classification' : 'deterministic_domain_match',
-      resultingState: qualityTier
-    });
-    contentBySourceId.set(sourceId, acquired.content);
-    persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString(), notes: buildSourceProvenance(acquired) });
+  });
+  for (const { acquired, source } of newlyPersisted) {
+    contentBySourceId.set(source.id, acquired.content);
+    persistedSources.push(source);
     known.add(acquired.url);
     if (acquired.status === RETRIEVAL_STATUS.SUCCESS) trace.expansionSourcesAcquired += 1;
   }
@@ -372,6 +417,41 @@ async function enrichEvidence({
   trace.claimsConsidered = Math.max(trace.claimsConsidered, ordered.length);
   if (await run(replanned)) return;
   trace.stopReason = trace.stopReason ?? 'candidates_exhausted';
+}
+
+/**
+ * ADR-0039 resume helper: rebuilds the in-memory source state of a project
+ * whose SOURCES_PERSISTED checkpoint exists, entirely from committed rows
+ * (including any EXPANSION_PERSISTED sources, which are later rows). Nothing
+ * is re-acquired and nothing is written.
+ */
+function restoreSourcesFromCheckpoint(storage, projectId, cp, { persistedSources, publishedAtBySourceId, contentBySourceId }) {
+  const rows = storage.all('SELECT * FROM sources WHERE research_project_id = ? ORDER BY rowid', [projectId]);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const initialIds = Array.isArray(cp.sourceIds) ? cp.sourceIds : [];
+  for (const id of initialIds) {
+    if (!byId.has(id)) throw new Error(`SOURCES_PERSISTED references missing source ${id}`);
+  }
+  for (const r of rows) {
+    persistedSources.push({
+      id: r.id, url: r.url, retrieval_status: r.retrieval_status, role: r.role,
+      quality_tier: r.quality_tier, retrieved_at: r.retrieved_at, notes: r.notes
+    });
+    contentBySourceId.set(r.id, r.content);
+  }
+  for (const [id, publishedAt] of Object.entries(cp.publishedAt ?? {})) publishedAtBySourceId.set(id, publishedAt ?? null);
+  const initial = new Set(initialIds);
+  const acquisitionResult = {
+    acquired: persistedSources.filter((s) => initial.has(s.id)).map((s) => ({ url: s.url, status: s.retrieval_status })),
+    attemptsUsed: Number.isInteger(cp.attemptsUsed) ? cp.attemptsUsed : 0,
+    candidatesConsidered: Number.isInteger(cp.candidatesConsidered) ? cp.candidatesConsidered : 0,
+    candidatesExhausted: cp.candidatesExhausted === true,
+    discoveryFailed: false,
+    discoveryError: null,
+    resumed: true
+  };
+  const researchDiag = cp.researchDiag && typeof cp.researchDiag === 'object' ? cp.researchDiag : newResearchDiag();
+  return { acquisitionResult, researchDiag };
 }
 
 /**
@@ -396,7 +476,61 @@ async function enrichEvidence({
  * @param {function} [deps.evidenceVerifier] - claim-vs-source-text verifier (see ./evidenceVerification.js verifyClaimAgainstSources); injectable for testing.
  * @param {string} [deps.runId]
  */
-export async function runResearchProject({
+export async function runResearchProject(deps) {
+  try {
+    return await runResearchBody(deps);
+  } catch (err) {
+    // ADR-0039: an attempt abandoned for a provider/infrastructure reason is a
+    // normal, structured result -- never a thrown error, never a research
+    // outcome. Everything else propagates exactly as before.
+    if (err instanceof ResearchAttemptFailure) return handleResearchAttemptFailure(deps.storage, err, deps.runId ?? null);
+    throw err;
+  }
+}
+
+/**
+ * ADR-0039. Persists the disposition of an abandoned attempt and returns the
+ * structured result. No evidence was written by the failed attempt (extraction
+ * is two-phase), so nothing is rolled back and nothing is duplicated on retry.
+ *   TRANSIENT       one RESEARCH attempt is recorded (quarantine at the cap);
+ *                   the project stays RESEARCHING and resumes from its checkpoint.
+ *   INFRASTRUCTURE  no attempt recorded; the project stays RESEARCHING.
+ *   UNCLASSIFIED    fail closed: no attempt, no retry; the project is FAILED.
+ */
+function handleResearchAttemptFailure(storage, failure, runId) {
+  const projectId = failure.projectId;
+  const nature = failure.nature;
+  const stopReason = nature === RESEARCH_FAILURE_NATURE.TRANSIENT ? RESEARCH_STOP_REASON.TRANSIENT_FAILURE
+    : nature === RESEARCH_FAILURE_NATURE.INFRASTRUCTURE ? RESEARCH_STOP_REASON.INFRASTRUCTURE_FAILURE
+      : RESEARCH_STOP_REASON.UNCLASSIFIED_FAILURE;
+  const evidenceNature = nature === RESEARCH_FAILURE_NATURE.TRANSIENT ? FAILURE_NATURE.TRANSIENT
+    : nature === RESEARCH_FAILURE_NATURE.INFRASTRUCTURE ? FAILURE_NATURE.INFRASTRUCTURE
+      : FAILURE_NATURE.UNESTABLISHED;
+  return storage.transaction(() => {
+    logDecision(storage, {
+      runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'research_project', subjectId: projectId,
+      decision: 'RESEARCH_ATTEMPT_FAILED', reason: failure.basis,
+      configSnapshot: { nature, stopReason }
+    });
+    const recorded = recordFailedAttemptIfRetryable(storage, {
+      outcome: 'RESEARCH_TRANSIENT_FAILURE',
+      evidence: { nature: evidenceNature, basis: failure.basis },
+      subjectId: projectId, stage: RETRY_STAGE.RESEARCH, reason: failure.basis, runId
+    });
+    if (nature === RESEARCH_FAILURE_NATURE.UNCLASSIFIED) {
+      storage.run('UPDATE research_projects SET status = ?, stop_reason = ?, completed_at = ? WHERE id = ?',
+        [RESEARCH_PROJECT_STATUS.FAILED, stopReason, new Date().toISOString(), projectId]);
+    }
+    return {
+      project: storage.get('SELECT * FROM research_projects WHERE id = ?', [projectId]),
+      stopReason,
+      attemptFailure: { nature, basis: failure.basis },
+      ...retryFields(recorded)
+    };
+  });
+}
+
+async function runResearchBody({
   storage, opportunityId, sourceProvider, llmRouter: rawLlmRouter, policy, classification = {},
   retrieveImpl, fetchImpl, detectContradiction = null, runId = null, evidenceVerifier = verifyClaimAgainstSources
 }) {
@@ -433,23 +567,15 @@ export async function runResearchProject({
   if (project.status !== RESEARCH_PROJECT_STATUS.RESEARCHING) {
     return { project, alreadyTerminal: true };
   }
-
-  // --- Source discovery + bounded acquisition ---
-  const acquisitionResult = await acquireSources({
-    provider: sourceProvider, query: buildResearchQuery(proposition.subject, coreQuestion), policy, retrieveImpl, fetchImpl
-  });
-
-  if (acquisitionResult.discoveryFailed) {
-    logDecision(storage, {
-      runId, stage: RESEARCH_STAGE.SOURCE_DISCOVERY, subjectType: 'research_project', subjectId: project.id,
-      decision: 'FAILED', reason: acquisitionResult.discoveryError, resultingState: RESEARCH_PROJECT_STATUS.FAILED
-    });
-    storage.run('UPDATE research_projects SET status = ?, stop_reason = ?, completed_at = ? WHERE id = ?',
-      [RESEARCH_PROJECT_STATUS.FAILED, 'SOURCE_DISCOVERY_FAILED', new Date().toISOString(), project.id]);
-    return { project: storage.get('SELECT * FROM research_projects WHERE id = ?', [project.id]), stopReason: 'SOURCE_DISCOVERY_FAILED' };
+  // ADR-0039: a RESEARCH-quarantined project is refused on direct invocation
+  // (the selector also skips it), matching every other bounded-retry stage.
+  if (isQuarantined(storage, project.id, RETRY_STAGE.RESEARCH)) {
+    return { project, quarantined: true, stopReason: 'RESEARCH_QUARANTINED' };
   }
 
-  const researchDiag = newResearchDiag();
+  // --- Source discovery + bounded acquisition (or resume from SOURCES_PERSISTED) ---
+  const checkpoints = readResearchCheckpoints(storage, project.id);
+  const sourcesCheckpoint = checkpoints[RESEARCH_CHECKPOINT.SOURCES_PERSISTED] ?? null;
   const persistedSources = [];
   // source id -> the acquisition candidate's publishedAt (provider metadata,
   // possibly null). Kept beside persistedSources so the returned source shape
@@ -458,28 +584,74 @@ export async function runResearchProject({
   // source id -> retrieved text, kept beside persistedSources (whose returned
   // shape is unchanged) for the evidence verification stage.
   const contentBySourceId = new Map();
-  for (const acquired of acquisitionResult.acquired) {
-    const roleResult = classifySourceRole(acquired.url, classification);
-    const admissibility = assessEvidenceAdmissibility(acquired.status, roleResult.role, acquired.content);
-    const qualityTier = admissibility.quality;
-    noteAcquiredDiag(researchDiag, acquired, roleResult, admissibility);
-    const sourceId = insertSource(storage, {
-      researchProjectId: project.id, url: acquired.url, sourceType: null,
-      role: roleResult.role, qualityTier, retrievalStatus: acquired.status,
-      content: acquired.content, notes: buildSourceProvenance(acquired)
+  let acquisitionResult;
+  let researchDiag;
+
+  if (sourcesCheckpoint) {
+    // Resume: the sources are already committed. Never re-acquire them.
+    ({ acquisitionResult, researchDiag } = restoreSourcesFromCheckpoint(
+      storage, project.id, sourcesCheckpoint, { persistedSources, publishedAtBySourceId, contentBySourceId }
+    ));
+  } else {
+    const existingSources = storage.get('SELECT COUNT(*) AS n FROM sources WHERE research_project_id = ?', [project.id]);
+    if (existingSources.n > 0) {
+      // Pre-ADR-0039 partial state: re-acquiring would duplicate committed evidence. Fail closed.
+      throw new Error(`research project ${project.id} has persisted sources but no SOURCES_PERSISTED checkpoint; refusing to re-acquire`);
+    }
+    acquisitionResult = await acquireSources({
+      provider: sourceProvider, query: buildResearchQuery(proposition.subject, coreQuestion), policy, retrieveImpl, fetchImpl
     });
-    logDecision(storage, {
-      runId, stage: RESEARCH_STAGE.SOURCE_ACQUISITION, subjectType: 'source', subjectId: sourceId,
-      decision: acquired.status, reason: acquired.error || 'retrieved', resultingState: acquired.status
+
+    if (acquisitionResult.discoveryFailed) {
+      logDecision(storage, {
+        runId, stage: RESEARCH_STAGE.SOURCE_DISCOVERY, subjectType: 'research_project', subjectId: project.id,
+        decision: 'FAILED', reason: acquisitionResult.discoveryError, resultingState: RESEARCH_PROJECT_STATUS.FAILED
+      });
+      storage.run('UPDATE research_projects SET status = ?, stop_reason = ?, completed_at = ? WHERE id = ?',
+        [RESEARCH_PROJECT_STATUS.FAILED, 'SOURCE_DISCOVERY_FAILED', new Date().toISOString(), project.id]);
+      return { project: storage.get('SELECT * FROM research_projects WHERE id = ?', [project.id]), stopReason: 'SOURCE_DISCOVERY_FAILED' };
+    }
+
+    researchDiag = newResearchDiag();
+    // ADR-0039: every acquired source, its decision rows and the
+    // SOURCES_PERSISTED checkpoint commit atomically.
+    storage.transaction(() => {
+    for (const acquired of acquisitionResult.acquired) {
+      const roleResult = classifySourceRole(acquired.url, classification);
+      const admissibility = assessEvidenceAdmissibility(acquired.status, roleResult.role, acquired.content);
+      const qualityTier = admissibility.quality;
+      noteAcquiredDiag(researchDiag, acquired, roleResult, admissibility);
+      const sourceId = insertSource(storage, {
+        researchProjectId: project.id, url: acquired.url, sourceType: null,
+        role: roleResult.role, qualityTier, retrievalStatus: acquired.status,
+        content: acquired.content, notes: buildSourceProvenance(acquired)
+      });
+      logDecision(storage, {
+        runId, stage: RESEARCH_STAGE.SOURCE_ACQUISITION, subjectType: 'source', subjectId: sourceId,
+        decision: acquired.status, reason: acquired.error || 'retrieved', resultingState: acquired.status
+      });
+      logDecision(storage, {
+        runId, stage: RESEARCH_STAGE.SOURCE_CLASSIFICATION, subjectType: 'source', subjectId: sourceId,
+        decision: roleResult.role, reason: roleResult.ambiguous ? 'ambiguous_deterministic_classification' : 'deterministic_domain_match',
+        resultingState: qualityTier
+      });
+      publishedAtBySourceId.set(sourceId, acquired.publishedAt ?? null);
+      contentBySourceId.set(sourceId, acquired.content);
+      persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString(), notes: buildSourceProvenance(acquired) });
+    }
+      writeResearchCheckpoint(storage, {
+        researchProjectId: project.id,
+        checkpoint: RESEARCH_CHECKPOINT.SOURCES_PERSISTED,
+        payload: {
+          sourceIds: persistedSources.map((src) => src.id),
+          publishedAt: Object.fromEntries(publishedAtBySourceId),
+          attemptsUsed: acquisitionResult.attemptsUsed ?? 0,
+          candidatesConsidered: acquisitionResult.candidatesConsidered ?? 0,
+          candidatesExhausted: acquisitionResult.candidatesExhausted === true,
+          researchDiag
+        }
+      });
     });
-    logDecision(storage, {
-      runId, stage: RESEARCH_STAGE.SOURCE_CLASSIFICATION, subjectType: 'source', subjectId: sourceId,
-      decision: roleResult.role, reason: roleResult.ambiguous ? 'ambiguous_deterministic_classification' : 'deterministic_domain_match',
-      resultingState: qualityTier
-    });
-    publishedAtBySourceId.set(sourceId, acquired.publishedAt ?? null);
-    contentBySourceId.set(sourceId, acquired.content);
-    persistedSources.push({ id: sourceId, url: acquired.url, retrieval_status: acquired.status, role: roleResult.role, quality_tier: qualityTier, retrieved_at: new Date().toISOString(), notes: buildSourceProvenance(acquired) });
   }
 
   // Failure isolation (v0.4 S12): failed/unparseable sources don't abort
@@ -512,252 +684,297 @@ export async function runResearchProject({
   const convergence = { eligible: 0, skipped: 0, candidates: 0, promoted: 0, ambiguous: 0 };
   const identityTrace = { factClaims: 0, loadBearingFactFingerprinted: 0, reasons: {} };
 
-  for (const source of successfulSources) {
-    const full = persistedSources.find((s) => s.id === source.id);
-    const sourceRow = storage.get('SELECT * FROM sources WHERE id = ?', [source.id]);
-    let extraction;
-    try {
-      extraction = await traceAsync(
-        'research.claimExtraction', { source: source.id },
-        () => extractClaims({ sourceText: sourceRow.content, coreQuestion, sourceRole: sourceRow.role, sourceUrl: sourceRow.url }, llmRouter),
-        (e) => ({ claims: e?.claims?.length })
-      );
-    } catch (err) {
-      // Fail-closed: an extraction that could not establish a valid result
-      // (empty / malformed / truncated / provider failure, after one bounded
-      // retry) is recorded as a FAILURE -- never as a zero-claim EXTRACTED
-      // row. Source-level failure isolation (v0.4 S12): that source
-      // contributes no claims and the project proceeds over the sources that
-      // did extract. Any other error (e.g. a non-extraction provider error)
-      // still propagates through the pipeline's existing failure semantics.
-      if (err instanceof ExtractionFailureError) {
-        logDecision(storage, {
-          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
-          decision: 'EXTRACTION_FAILED', reason: err.parseOutcome, provider: err.providerUsed,
-          configSnapshot: {
-            model: err.model, parseOutcome: err.parseOutcome, finishReason: err.finishReason,
-            attempts: err.attempts, outputTokens: err.outputTokens, contentLength: err.contentLength
-          }
-        });
-        continue;
-      }
-      throw err;
+  const extractionCheckpoint = checkpoints[RESEARCH_CHECKPOINT.EXTRACTION_PERSISTED] ?? null;
+  if (extractionCheckpoint) {
+    // Resume: extraction is already committed. Rebuild the in-memory claim list
+    // in its committed order; never re-call the LLM and never re-insert claims.
+    const rows = new Map(storage.all(
+      'SELECT id, claim, claim_type, is_load_bearing FROM claims WHERE research_project_id = ?', [project.id]
+    ).map((r) => [r.id, r]));
+    for (const claimId of extractionCheckpoint.claimIds ?? []) {
+      const r = rows.get(claimId);
+      if (!r) throw new Error(`EXTRACTION_PERSISTED references missing claim ${claimId}`);
+      persistedClaims.push({ id: r.id, claim: r.claim, claim_type: r.claim_type, is_load_bearing: Boolean(r.is_load_bearing) });
     }
-    // Provider id + the candidate's own publication date. claimIdentity.js
-    // trusts it only for specific providers and only to ground a month-only year.
-    const publicationContext = { providerId: sourceProvider?.id, publishedAt: publishedAtBySourceId.get(source.id) ?? null };
-    logDecision(storage, {
-      runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
-      decision: 'EXTRACTED', reason: `${extraction.claims.length}_claims_proposed`, provider: extraction.providerUsed,
-      configSnapshot: {
-        model: extraction.model, estimatedCost: extraction.estimatedCost, isPaid: extraction.isPaid,
-        identity: summarizeIdentityCoverage(extraction.claims, publicationContext),
-        parseOutcome: extraction.diagnostics.parseOutcome, finishReason: extraction.diagnostics.finishReason, attempts: extraction.diagnostics.attempts
-      }
-    });
-
-    for (const proposed of extraction.claims) {
-      const validation = validateExtractedClaim(proposed);
-      if (!validation.valid) {
-        logDecision(storage, {
-          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
-          decision: 'REJECTED', reason: validation.reason
-        });
-        continue;
-      }
-
-      const normalized = proposed.claim.trim().toLowerCase();
-      const { fingerprint, reason: identityReason, identity: derivedIdentity } = deriveClaimIdentity(proposed, publicationContext);
-      if (proposed.claim_type === CLAIM_TYPE.FACT) {
-        identityTrace.factClaims += 1;
-        if (proposed.is_load_bearing && fingerprint) identityTrace.loadBearingFactFingerprinted += 1;
-        const key = identityReason === null ? 'null' : String(identityReason);
-        identityTrace.reasons[key] = (identityTrace.reasons[key] ?? 0) + 1;
-      }
-      // The identity is only trusted (usable for convergence) when a fingerprint exists.
-      const trustedIdentity = fingerprint ? derivedIdentity : null;
-      // Identity-index trust boundary: a claim may query or populate
-      // claimIdentityIndex only when its normalization exists and is
-      // convergence-trusted (UNCHANGED / NORMALIZED). RETAINED_ORIGINAL,
-      // UNVERIFIED_ORIGIN and missing normalization fail closed, in both
-      // arrival orders.
-      const identityIndexEligible = proposed.normalization?.convergenceTrusted === true;
-      let claimId = null;
-      let isNewClaim = false;
-      let mergedByIdentity = false;
-      let convergenceDiagnostic = null;
-      const sameTextIds = claimTextIndex.get(normalized) ?? [];
-      // Same exact wording, same source: pure deduplication (no new link,
-      // no corroboration -- the source is already linked to that row).
-      const dedupId = sameTextIds.find((id) => claimSourceIds.get(id)?.has(source.id));
-      if (dedupId) {
-        claimId = dedupId;
-        logDecision(storage, {
-          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
-          decision: 'EXACT_TEXT_DEDUPLICATED', reason: 'same_source_same_text',
-          configSnapshot: { sourceId: source.id }
-        });
-      }
-      if (!claimId && fingerprint && identityIndexEligible) {
-        // Conservative: same fingerprint AND same claim_type AND same
-        // is_load_bearing, otherwise the claims stay separate.
-        const existing = claimIdentityIndex.get(fingerprint);
-        if (existing && existing.claimType === proposed.claim_type && existing.isLoadBearing === proposed.is_load_bearing) {
-          claimId = existing.id;
-          mergedByIdentity = true;
-        }
-      }
-      if (mergedByIdentity) {
-        logDecision(storage, {
-          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
-          decision: 'MERGED_BY_IDENTITY', reason: 'identity_fingerprint_match',
-          configSnapshot: { fingerprint, sourceId: source.id, exactTextMatch: sameTextIds.includes(claimId) }
-        });
-      }
-      let convergenceEligibility = null;
-      if (!claimId && trustedIdentity) {
-        convergenceEligibility = isConvergenceEligible(proposed, coreQuestion);
-        if (!convergenceEligibility.eligible) {
-          convergence.skipped += 1;
-        } else {
-          convergence.eligible += 1;
-          // Must precede evaluation and must remain side-effect free.
-          if (diagnosticsEnabled()) try {
-            convergenceDiagnostic = explainConvergence(convergenceIndex, {
-              identity: trustedIdentity, claimType: proposed.claim_type,
-              isLoadBearing: proposed.is_load_bearing, sourceId: source.id
-            });
-            if (!convergenceDiagnostic.error) {
-              convergenceDiagnostic.pairs = convergenceDiagnostic.pairs.map((pair) => ({
-                ...pair,
-                sourceDomains: pair.sourceIds.map((id) => independenceKey(storage.get('SELECT url FROM sources WHERE id = ?', [id])?.url))
-              }));
-            }
-          } catch { convergenceDiagnostic = { error: true }; }
-          const evaluation = evaluateConvergence(convergenceIndex, {
-            identity: trustedIdentity, claimType: proposed.claim_type,
-            isLoadBearing: proposed.is_load_bearing, sourceId: source.id
-          });
-          convergence.candidates += evaluation.candidates.length;
-          if (evaluation.ambiguous) convergence.ambiguous += 1;
-          for (const cand of evaluation.candidates) {
-            const promotedHere = evaluation.promoted?.entry.claimId === cand.entry.claimId;
-            logDecision(storage, {
-              runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: cand.entry.claimId,
-              decision: 'CANDIDATE_SAME_FACT',
-              reason: promotedHere ? 'promoted_deterministic_rule'
-                : (cand.comparison.promotion.eligible ? 'not_promoted_ambiguous_targets' : 'not_promoted_fields_not_deterministic'),
-              configSnapshot: {
-                incomingSourceId: source.id, incomingClaimText: proposed.claim,
-                fields: cand.comparison.fields, promotionEligible: cand.comparison.promotion.eligible,
-                rule: cand.comparison.promotion.rule
-              }
+    Object.assign(convergence, extractionCheckpoint.convergence ?? {});
+    Object.assign(identityTrace, extractionCheckpoint.identityTrace ?? {});
+  } else {
+    // Phase 1 (ADR-0039): the LLM calls only. Nothing is written here, so an
+    // attempt abandoned in this phase leaves no partial extraction behind and a
+    // retry can neither duplicate nor skip evidence. Call order, prompts and
+    // pacing are unchanged.
+    const extractionOutcomes = [];
+    for (const source of successfulSources) {
+      const sourceRow = storage.get('SELECT * FROM sources WHERE id = ?', [source.id]);
+      try {
+        const extraction = await traceAsync(
+          'research.claimExtraction', { source: source.id },
+          () => extractClaims({ sourceText: sourceRow.content, coreQuestion, sourceRole: sourceRow.role, sourceUrl: sourceRow.url }, llmRouter),
+          (e) => ({ claims: e?.claims?.length })
+        );
+        extractionOutcomes.push({ source, sourceRow, extraction });
+      } catch (err) {
+        // Fail-closed: an extraction that could not establish a valid result is
+        // a FAILURE -- never a zero-claim EXTRACTED row. Source-level failure
+        // isolation (v0.4 S12) is preserved for per-source output-quality
+        // conditions. ADR-0039: a provider/transport/infrastructure failure is
+        // NOT a source-level condition -- it abandons the whole attempt, so it
+        // can never masquerade as a completed (or INSUFFICIENT_EVIDENCE) result.
+        if (err instanceof ExtractionFailureError) {
+          const verdict = classifyExtractionFailure(err);
+          if (verdict !== ISOLATE) {
+            throw new ResearchAttemptFailure({
+              nature: verdict, basis: failureBasis(err.cause ?? err, 'extraction'), cause: err, projectId: project.id
             });
           }
-          if (evaluation.promoted) {
-            claimId = evaluation.promoted.entry.claimId;
-            convergence.promoted += 1;
+          extractionOutcomes.push({ source, sourceRow, failure: err });
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    // Phase 2 (ADR-0039): the synchronous persistence, in ONE transaction with
+    // the EXTRACTION_PERSISTED checkpoint. Same logic, same per-source order
+    // (EXTRACTION_FAILED rows stay interleaved in source order).
+    storage.transaction(() => {
+      for (const outcome of extractionOutcomes) {
+        const { source, sourceRow } = outcome;
+        if (outcome.failure) {
+          const err = outcome.failure;
+          logDecision(storage, {
+            runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
+            decision: 'EXTRACTION_FAILED', reason: err.parseOutcome, provider: err.providerUsed,
+            configSnapshot: {
+              model: err.model, parseOutcome: err.parseOutcome, finishReason: err.finishReason,
+              attempts: err.attempts, outputTokens: err.outputTokens, contentLength: err.contentLength
+            }
+          });
+          continue;
+        }
+        const extraction = outcome.extraction;
+        // Provider id + the candidate's own publication date. claimIdentity.js
+        // trusts it only for specific providers and only to ground a month-only year.
+        const publicationContext = { providerId: sourceProvider?.id, publishedAt: publishedAtBySourceId.get(source.id) ?? null };
+        logDecision(storage, {
+          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
+          decision: 'EXTRACTED', reason: `${extraction.claims.length}_claims_proposed`, provider: extraction.providerUsed,
+          configSnapshot: {
+            model: extraction.model, estimatedCost: extraction.estimatedCost, isPaid: extraction.isPaid,
+            identity: summarizeIdentityCoverage(extraction.claims, publicationContext),
+            parseOutcome: extraction.diagnostics.parseOutcome, finishReason: extraction.diagnostics.finishReason, attempts: extraction.diagnostics.attempts
+          }
+        });
+
+        for (const proposed of extraction.claims) {
+          const validation = validateExtractedClaim(proposed);
+          if (!validation.valid) {
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
+              decision: 'REJECTED', reason: validation.reason
+            });
+            continue;
+          }
+
+          const normalized = proposed.claim.trim().toLowerCase();
+          const { fingerprint, reason: identityReason, identity: derivedIdentity } = deriveClaimIdentity(proposed, publicationContext);
+          if (proposed.claim_type === CLAIM_TYPE.FACT) {
+            identityTrace.factClaims += 1;
+            if (proposed.is_load_bearing && fingerprint) identityTrace.loadBearingFactFingerprinted += 1;
+            const key = identityReason === null ? 'null' : String(identityReason);
+            identityTrace.reasons[key] = (identityTrace.reasons[key] ?? 0) + 1;
+          }
+          // The identity is only trusted (usable for convergence) when a fingerprint exists.
+          const trustedIdentity = fingerprint ? derivedIdentity : null;
+          // Identity-index trust boundary: a claim may query or populate
+          // claimIdentityIndex only when its normalization exists and is
+          // convergence-trusted (UNCHANGED / NORMALIZED). RETAINED_ORIGINAL,
+          // UNVERIFIED_ORIGIN and missing normalization fail closed, in both
+          // arrival orders.
+          const identityIndexEligible = proposed.normalization?.convergenceTrusted === true;
+          let claimId = null;
+          let isNewClaim = false;
+          let mergedByIdentity = false;
+          let convergenceDiagnostic = null;
+          const sameTextIds = claimTextIndex.get(normalized) ?? [];
+          // Same exact wording, same source: pure deduplication (no new link,
+          // no corroboration -- the source is already linked to that row).
+          const dedupId = sameTextIds.find((id) => claimSourceIds.get(id)?.has(source.id));
+          if (dedupId) {
+            claimId = dedupId;
             logDecision(storage, {
               runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
-              decision: 'MERGED_BY_CONVERGENCE', reason: evaluation.promoted.comparison.promotion.rule,
-              configSnapshot: {
-                sourceId: source.id, incomingClaimText: proposed.claim,
-                fields: evaluation.promoted.comparison.fields
+              decision: 'EXACT_TEXT_DEDUPLICATED', reason: 'same_source_same_text',
+              configSnapshot: { sourceId: source.id }
+            });
+          }
+          if (!claimId && fingerprint && identityIndexEligible) {
+            // Conservative: same fingerprint AND same claim_type AND same
+            // is_load_bearing, otherwise the claims stay separate.
+            const existing = claimIdentityIndex.get(fingerprint);
+            if (existing && existing.claimType === proposed.claim_type && existing.isLoadBearing === proposed.is_load_bearing) {
+              claimId = existing.id;
+              mergedByIdentity = true;
+            }
+          }
+          if (mergedByIdentity) {
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+              decision: 'MERGED_BY_IDENTITY', reason: 'identity_fingerprint_match',
+              configSnapshot: { fingerprint, sourceId: source.id, exactTextMatch: sameTextIds.includes(claimId) }
+            });
+          }
+          let convergenceEligibility = null;
+          if (!claimId && trustedIdentity) {
+            convergenceEligibility = isConvergenceEligible(proposed, coreQuestion);
+            if (!convergenceEligibility.eligible) {
+              convergence.skipped += 1;
+            } else {
+              convergence.eligible += 1;
+              // Must precede evaluation and must remain side-effect free.
+              if (diagnosticsEnabled()) try {
+                convergenceDiagnostic = explainConvergence(convergenceIndex, {
+                  identity: trustedIdentity, claimType: proposed.claim_type,
+                  isLoadBearing: proposed.is_load_bearing, sourceId: source.id
+                });
+                if (!convergenceDiagnostic.error) {
+                  convergenceDiagnostic.pairs = convergenceDiagnostic.pairs.map((pair) => ({
+                    ...pair,
+                    sourceDomains: pair.sourceIds.map((id) => independenceKey(storage.get('SELECT url FROM sources WHERE id = ?', [id])?.url))
+                  }));
+                }
+              } catch { convergenceDiagnostic = { error: true }; }
+              const evaluation = evaluateConvergence(convergenceIndex, {
+                identity: trustedIdentity, claimType: proposed.claim_type,
+                isLoadBearing: proposed.is_load_bearing, sourceId: source.id
+              });
+              convergence.candidates += evaluation.candidates.length;
+              if (evaluation.ambiguous) convergence.ambiguous += 1;
+              for (const cand of evaluation.candidates) {
+                const promotedHere = evaluation.promoted?.entry.claimId === cand.entry.claimId;
+                logDecision(storage, {
+                  runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: cand.entry.claimId,
+                  decision: 'CANDIDATE_SAME_FACT',
+                  reason: promotedHere ? 'promoted_deterministic_rule'
+                    : (cand.comparison.promotion.eligible ? 'not_promoted_ambiguous_targets' : 'not_promoted_fields_not_deterministic'),
+                  configSnapshot: {
+                    incomingSourceId: source.id, incomingClaimText: proposed.claim,
+                    fields: cand.comparison.fields, promotionEligible: cand.comparison.promotion.eligible,
+                    rule: cand.comparison.promotion.rule
+                  }
+                });
               }
+              if (evaluation.promoted) {
+                claimId = evaluation.promoted.entry.claimId;
+                convergence.promoted += 1;
+                logDecision(storage, {
+                  runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+                  decision: 'MERGED_BY_CONVERGENCE', reason: evaluation.promoted.comparison.promotion.rule,
+                  configSnapshot: {
+                    sourceId: source.id, incomingClaimText: proposed.claim,
+                    fields: evaluation.promoted.comparison.fields
+                  }
+                });
+              }
+            }
+          }
+          if (!claimId) {
+            claimId = insertClaim(storage, {
+              researchProjectId: project.id, claim: proposed.claim,
+              claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing
+            });
+            if (sameTextIds.length > 0) {
+              // Identical wording exists on a row from another source but no
+              // grounded fact-identity path proved it is the same fact: keep a
+              // separate row so it stays visible to contradiction analysis.
+              logDecision(storage, {
+                runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+                decision: 'EXACT_TEXT_REJECTED', reason: fingerprint && identityIndexEligible ? 'identity_not_matching' : 'no_grounded_identity',
+                configSnapshot: { sourceId: source.id, matchingClaimIds: sameTextIds }
+              });
+            }
+            claimTextIndex.set(normalized, [...sameTextIds, claimId]);
+            if (fingerprint && identityIndexEligible) {
+              claimIdentityIndex.set(fingerprint, { id: claimId, claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing });
+            }
+            persistedClaims.push({ id: claimId, claim: proposed.claim, claim_type: proposed.claim_type, is_load_bearing: proposed.is_load_bearing });
+            isNewClaim = true;
+            if (trustedIdentity && convergenceEligibility?.eligible) {
+              convergenceIndex.add({
+                claimId, identity: trustedIdentity, claimType: proposed.claim_type,
+                isLoadBearing: proposed.is_load_bearing, sourceIds: [source.id]
+              });
+            }
+
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.LOAD_BEARING_CLASSIFICATION, subjectType: 'claim', subjectId: claimId,
+              decision: proposed.is_load_bearing ? 'LOAD_BEARING' : 'NOT_LOAD_BEARING', reason: 'llm_proposed_deterministically_validated'
+            });
+          }
+
+          if (!claimSourceIds.get(claimId)?.has(source.id)) {
+            linkClaimSource(storage, { claimId, sourceId: source.id, role: isNewClaim ? 'primary' : 'corroborating' });
+            if (!claimSourceIds.has(claimId)) claimSourceIds.set(claimId, new Set());
+            claimSourceIds.get(claimId).add(source.id);
+          }
+          convergenceIndex.noteSource(claimId, source.id);
+
+          // Diagnostics are strictly best-effort and occur only after the final
+          // claim/source relationship is established.
+          if (diagnosticsEnabled() && proposed.claim_type === CLAIM_TYPE.FACT) {
+            try {
+              const normForTrace = proposed.normalization || {};
+              logDecision(storage, {
+                runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+                decision: 'CLAIM_TRACE', reason: dedupId ? 'DEDUP_SAME_SOURCE' : (mergedByIdentity ? 'MERGED_BY_IDENTITY' : (convergenceDiagnostic?.pairs?.some((p) => p.promotionEligible) && !isNewClaim ? 'MERGED_BY_CONVERGENCE' : 'NEW_CLAIM')),
+                configSnapshot: {
+                  sourceId: source.id, sourceDomain: independenceKey(sourceRow.url), sourceRole: sourceRow.role,
+                  claimText: proposed.claim, claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing,
+                  normalizationStatus: normForTrace.status ?? null, convergenceTrusted: normForTrace.convergenceTrusted === true,
+                  identityDiscarded: normForTrace.identityDiscarded === true, identityPresent: !!proposed.identity,
+                  identityReason, fingerprintPresent: !!fingerprint, fingerprintPrefix: fingerprint ? fingerprint.slice(0, 12) : null,
+                  identityIndexEligible, identity: derivedIdentity ?? null, path: dedupId ? 'DEDUP_SAME_SOURCE' : (mergedByIdentity ? 'MERGED_BY_IDENTITY' : (isNewClaim ? 'NEW_CLAIM' : 'MERGED_BY_CONVERGENCE')),
+                  convergenceEligible: convergenceEligibility?.eligible ?? false, convergenceSkipReason: convergenceEligibility?.reason ?? null,
+                  relevance: convergenceEligibility?.relevance ?? null, convergence: convergenceDiagnostic
+                }
+              });
+            } catch { /* diagnostics must never affect research */ }
+          }
+
+          // Provenance: a reviewer must be able to recover what the source said,
+          // what the model proposed, and what normalization decided. The persisted
+          // claim row holds the final wording; the original and proposed wordings
+          // live here (one row per source representation, even when merged).
+          const norm = proposed.normalization;
+          if (norm && (proposed.original_claim || norm.status === 'RETAINED_ORIGINAL' || norm.status === 'NORMALIZED' || norm.status === 'UNVERIFIED_ORIGIN')) {
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+              decision: norm.status === 'NORMALIZED' ? 'NORMALIZATION_ACCEPTED'
+                : (norm.status === 'RETAINED_ORIGINAL' ? 'NORMALIZATION_REJECTED' : (norm.status === 'UNVERIFIED_ORIGIN' ? 'NORMALIZATION_UNVERIFIED' : 'NORMALIZATION_UNCHANGED')),
+              reason: norm.reason,
+              configSnapshot: {
+                sourceId: source.id, sourceUrl: sourceRow.url, status: norm.status,
+                originalClaim: proposed.original_claim ?? null, proposedClaim: norm.proposedClaim ?? null,
+                finalClaim: proposed.claim, convergenceTrusted: norm.convergenceTrusted === true,
+                identityDiscarded: norm.identityDiscarded === true
+              }
+            });
+          }
+          if (convergenceEligibility && !convergenceEligibility.eligible) {
+            logDecision(storage, {
+              runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
+              decision: 'CONVERGENCE_SKIPPED', reason: convergenceEligibility.reason,
+              configSnapshot: { sourceId: source.id, claimText: proposed.claim }
             });
           }
         }
       }
-      if (!claimId) {
-        claimId = insertClaim(storage, {
-          researchProjectId: project.id, claim: proposed.claim,
-          claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing
-        });
-        if (sameTextIds.length > 0) {
-          // Identical wording exists on a row from another source but no
-          // grounded fact-identity path proved it is the same fact: keep a
-          // separate row so it stays visible to contradiction analysis.
-          logDecision(storage, {
-            runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
-            decision: 'EXACT_TEXT_REJECTED', reason: fingerprint && identityIndexEligible ? 'identity_not_matching' : 'no_grounded_identity',
-            configSnapshot: { sourceId: source.id, matchingClaimIds: sameTextIds }
-          });
-        }
-        claimTextIndex.set(normalized, [...sameTextIds, claimId]);
-        if (fingerprint && identityIndexEligible) {
-          claimIdentityIndex.set(fingerprint, { id: claimId, claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing });
-        }
-        persistedClaims.push({ id: claimId, claim: proposed.claim, claim_type: proposed.claim_type, is_load_bearing: proposed.is_load_bearing });
-        isNewClaim = true;
-        if (trustedIdentity && convergenceEligibility?.eligible) {
-          convergenceIndex.add({
-            claimId, identity: trustedIdentity, claimType: proposed.claim_type,
-            isLoadBearing: proposed.is_load_bearing, sourceIds: [source.id]
-          });
-        }
-
-        logDecision(storage, {
-          runId, stage: RESEARCH_STAGE.LOAD_BEARING_CLASSIFICATION, subjectType: 'claim', subjectId: claimId,
-          decision: proposed.is_load_bearing ? 'LOAD_BEARING' : 'NOT_LOAD_BEARING', reason: 'llm_proposed_deterministically_validated'
-        });
-      }
-
-      if (!claimSourceIds.get(claimId)?.has(source.id)) {
-        linkClaimSource(storage, { claimId, sourceId: source.id, role: isNewClaim ? 'primary' : 'corroborating' });
-        if (!claimSourceIds.has(claimId)) claimSourceIds.set(claimId, new Set());
-        claimSourceIds.get(claimId).add(source.id);
-      }
-      convergenceIndex.noteSource(claimId, source.id);
-
-      // Diagnostics are strictly best-effort and occur only after the final
-      // claim/source relationship is established.
-      if (diagnosticsEnabled() && proposed.claim_type === CLAIM_TYPE.FACT) {
-        try {
-          const normForTrace = proposed.normalization || {};
-          logDecision(storage, {
-            runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
-            decision: 'CLAIM_TRACE', reason: dedupId ? 'DEDUP_SAME_SOURCE' : (mergedByIdentity ? 'MERGED_BY_IDENTITY' : (convergenceDiagnostic?.pairs?.some((p) => p.promotionEligible) && !isNewClaim ? 'MERGED_BY_CONVERGENCE' : 'NEW_CLAIM')),
-            configSnapshot: {
-              sourceId: source.id, sourceDomain: independenceKey(sourceRow.url), sourceRole: sourceRow.role,
-              claimText: proposed.claim, claimType: proposed.claim_type, isLoadBearing: proposed.is_load_bearing,
-              normalizationStatus: normForTrace.status ?? null, convergenceTrusted: normForTrace.convergenceTrusted === true,
-              identityDiscarded: normForTrace.identityDiscarded === true, identityPresent: !!proposed.identity,
-              identityReason, fingerprintPresent: !!fingerprint, fingerprintPrefix: fingerprint ? fingerprint.slice(0, 12) : null,
-              identityIndexEligible, identity: derivedIdentity ?? null, path: dedupId ? 'DEDUP_SAME_SOURCE' : (mergedByIdentity ? 'MERGED_BY_IDENTITY' : (isNewClaim ? 'NEW_CLAIM' : 'MERGED_BY_CONVERGENCE')),
-              convergenceEligible: convergenceEligibility?.eligible ?? false, convergenceSkipReason: convergenceEligibility?.reason ?? null,
-              relevance: convergenceEligibility?.relevance ?? null, convergence: convergenceDiagnostic
-            }
-          });
-        } catch { /* diagnostics must never affect research */ }
-      }
-
-      // Provenance: a reviewer must be able to recover what the source said,
-      // what the model proposed, and what normalization decided. The persisted
-      // claim row holds the final wording; the original and proposed wordings
-      // live here (one row per source representation, even when merged).
-      const norm = proposed.normalization;
-      if (norm && (proposed.original_claim || norm.status === 'RETAINED_ORIGINAL' || norm.status === 'NORMALIZED' || norm.status === 'UNVERIFIED_ORIGIN')) {
-        logDecision(storage, {
-          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
-          decision: norm.status === 'NORMALIZED' ? 'NORMALIZATION_ACCEPTED'
-            : (norm.status === 'RETAINED_ORIGINAL' ? 'NORMALIZATION_REJECTED' : (norm.status === 'UNVERIFIED_ORIGIN' ? 'NORMALIZATION_UNVERIFIED' : 'NORMALIZATION_UNCHANGED')),
-          reason: norm.reason,
-          configSnapshot: {
-            sourceId: source.id, sourceUrl: sourceRow.url, status: norm.status,
-            originalClaim: proposed.original_claim ?? null, proposedClaim: norm.proposedClaim ?? null,
-            finalClaim: proposed.claim, convergenceTrusted: norm.convergenceTrusted === true,
-            identityDiscarded: norm.identityDiscarded === true
-          }
-        });
-      }
-      if (convergenceEligibility && !convergenceEligibility.eligible) {
-        logDecision(storage, {
-          runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'claim', subjectId: claimId,
-          decision: 'CONVERGENCE_SKIPPED', reason: convergenceEligibility.reason,
-          configSnapshot: { sourceId: source.id, claimText: proposed.claim }
-        });
-      }
-    }
+      writeResearchCheckpoint(storage, {
+        researchProjectId: project.id,
+        checkpoint: RESEARCH_CHECKPOINT.EXTRACTION_PERSISTED,
+        payload: { claimIds: persistedClaims.map((c) => c.id), convergence, identityTrace }
+      });
+    });
   }
 
   // --- Contradiction detection (LLM-assisted semantic judgment) ---
@@ -884,7 +1101,8 @@ export async function runResearchProject({
   try {
     await enrichEvidence({
       storage, runId, project, persistedClaims, persistedSources, contentBySourceId, policy, llmRouter,
-      evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace: evidenceVerificationTrace, diag: researchDiag
+      evidenceVerifier, sourceProvider, acquisitionResult, retrieveImpl, fetchImpl, classification, trace: evidenceVerificationTrace, diag: researchDiag,
+      resumeExpansion: checkpoints[RESEARCH_CHECKPOINT.EXPANSION_PERSISTED] ?? null
     });
   } catch (err) {
     evidenceVerificationTrace.stopReason = 'enrichment_error';
