@@ -54,6 +54,12 @@ const INCLUDE_THUMBNAIL = process.env.INCLUDE_THUMBNAIL === 'true';
 const TITLE = process.env.PROOF_TITLE || 'Publication boundary proof (private)';
 const REQUIRED_CREDS = ['YOUTUBE_CLIENT_ID', 'YOUTUBE_CLIENT_SECRET', 'YOUTUBE_REFRESH_TOKEN'];
 const nowISO = () => new Date().toISOString();
+// Best-effort cleanup: close the DB first (Windows cannot delete an open file)
+// and never let a cleanup error hide or replace the report.
+function cleanupWorkspace(storage, dir) {
+  try { storage.close(); } catch { /* already closed */ }
+  try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch (err) { console.error(`cleanup warning (non-fatal): ${err.code ?? err.message}; remove manually: ${dir}`); }
+}
 
 const report = { mode: LIVE ? 'LIVE' : 'PREFLIGHT', checks: {} };
 function check(name, ok, detail) {
@@ -220,9 +226,9 @@ if (!LIVE) {
   const ok = result.outcome === 'AUTHORIZATION_DENIED' && publishCalls === 0 && !pub;
   check('preflight_stopped_at_D-C2', ok, `${result.outcome}, calls=${publishCalls}, publicationRow=${!!pub}`);
   report.verdict = ok ? 'PREFLIGHT OK — no external request was made' : 'PREFLIGHT UNEXPECTED';
-  fs.rmSync(work, { recursive: true, force: true });
   report.workspace = '(deleted)';
   console.log(JSON.stringify(report, null, 2));
+  cleanupWorkspace(storage, work);
   process.exit(ok ? 0 : 5);
 }
 
@@ -242,5 +248,6 @@ report.verdict =
     : result.outcome === 'AMBIGUOUS' ? 'AMBIGUOUS — requires reconciliation (workspace kept; do NOT re-run)'
       : `ATTEMPTED — ${result.outcome}`;
 console.log(JSON.stringify(report, null, 2));
-if (result.outcome === 'PUBLISHED') fs.rmSync(work, { recursive: true, force: true });
+if (result.outcome === 'PUBLISHED') cleanupWorkspace(storage, work);
+else { try { storage.close(); } catch { /* keep workspace for reconciliation */ } }
 process.exit(result.outcome === 'PUBLISHED' ? 0 : 6);
