@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { GeminiProvider, createPacingState, sharedPacingState } from '../../src/providers/llm/GeminiProvider.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
 import { REGISTRY } from '../../src/providers/llm/candidates.js';
+import { createVirtualClock, createPacingRig, gaps } from '../helpers/virtualClock.js';
 import { resetProviderHealth, isProviderCoolingDown, providerCooldownRemainingMs } from '../../src/providers/llm/providerHealth.js';
 
 // Phase 1 (provider cooldown/health-memory) shares process-wide state with
@@ -12,6 +13,21 @@ import { resetProviderHealth, isProviderCoolingDown, providerCooldownRemainingMs
 beforeEach(() => {
   resetProviderHealth();
 });
+
+// Pacing seam for tests that only care about retry/response behavior: a
+// virtual monotonic clock that advances whenever the pacing gate waits, so
+// the gate's post-wake re-check sees consistent time. Retry delays still go
+// through each test's own (recording) sleepImpl.
+function virtualPacing() {
+  const clock = createVirtualClock();
+  return { nowImpl: clock.now, pacingSleepImpl: clock.sleep };
+}
+// A clock that has always advanced past the pacing floor since the previous
+// read: for tests about timeouts, where pacing is irrelevant.
+function farClock() {
+  let t = 0;
+  return () => (t += 10_000);
+}
 
 function jsonResponse(status, body, headers = {}) {
   const text = JSON.stringify(body);
@@ -113,7 +129,7 @@ test('complete(): a persistent 429 is retried exactly once, then throws with dia
   };
   const sleepCalls = [];
   const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, ...virtualPacing() });
 
   let caught;
   try {
@@ -150,7 +166,7 @@ test('complete(): a transient 429 followed by a 200 succeeds on the retry, using
   };
   const sleepCalls = [];
   const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, ...virtualPacing() });
 
   const result = await provider.complete({ prompt: 'hi' });
 
@@ -174,7 +190,7 @@ test('complete(): the 429 retry delay is derived from a present Retry-After head
   };
   const sleepCalls = [];
   const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, ...virtualPacing() });
 
   await provider.complete({ prompt: 'hi' });
 
@@ -195,7 +211,7 @@ test('complete(): a 429 with no Retry-After header falls back to the fixed bound
   };
   const sleepCalls = [];
   const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, ...virtualPacing() });
 
   await provider.complete({ prompt: 'hi' });
 
@@ -233,7 +249,7 @@ test('complete(): a 429 with no Retry-After header uses Gemini\'s own RetryInfo 
   };
   const sleepCalls = [];
   const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, ...virtualPacing() });
 
   await provider.complete({ prompt: 'hi' });
 
@@ -261,7 +277,7 @@ test('complete(): a 429 with no RetryInfo detail falls back to parsing "Please r
   };
   const sleepCalls = [];
   const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, ...virtualPacing() });
 
   await provider.complete({ prompt: 'hi' });
 
@@ -271,7 +287,8 @@ test('complete(): a 429 with no RetryInfo detail falls back to parsing "Please r
 test('complete(): a non-JSON error body is preserved as a bounded text diagnostic, never an enormous exception', async () => {
   const hugeBody = 'x'.repeat(10_000);
   const fetchImpl = async () => textResponse(503, hugeBody);
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
+  // 503 is retried; inject the sleeps (retry delay + pacing) so nothing waits in real time.
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl: async () => {}, ...virtualPacing() });
 
   let caught;
   try {
@@ -331,81 +348,73 @@ test('pacing: the first request is never delayed', async () => {
 });
 
 test('pacing: a second request issued immediately after the first waits out the remainder of the 4.5s floor', async () => {
-  const fetchImpl = async () => okResponse();
-  const sleepCalls = [];
-  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  // Simulates the two complete() calls starting 1000ms apart in real time.
-  let now = 1_000_000;
-  const nowImpl = () => now;
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+  const rig = createPacingRig();
+  const provider = new GeminiProvider({ fetchImpl: rig.wrapFetch(async () => okResponse()), apiKeyProvider: () => 'key123', ...rig.opts });
 
   await provider.complete({ prompt: 'first' });
-  now += 1000; // only 1s has elapsed before the next call starts
+  await rig.clock.sleep(1000); // only 1s elapses before the next call starts
+  rig.pacingCalls.length = 0;
   await provider.complete({ prompt: 'second' });
 
-  assert.equal(sleepCalls.length, 1, 'exactly one pacing delay before the second request');
-  assert.equal(sleepCalls[0], 3500, 'waits the remaining 3.5s of the 4.5s floor (4500 - 1000 elapsed)');
+  assert.deepEqual(rig.pacingCalls, [3500], 'one pacing wait: the remaining 3.5s of the 4.5s floor (4500 - 1000 elapsed)');
+  assert.deepEqual(gaps(rig.starts), [4500], 'actual request starts are exactly the floor apart');
 });
 
 test('pacing: a request issued after the 4.5s floor has already elapsed is not delayed', async () => {
-  const fetchImpl = async () => okResponse();
-  const sleepCalls = [];
-  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  let now = 1_000_000;
-  const nowImpl = () => now;
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+  const rig = createPacingRig();
+  const provider = new GeminiProvider({ fetchImpl: rig.wrapFetch(async () => okResponse()), apiKeyProvider: () => 'key123', ...rig.opts });
 
   await provider.complete({ prompt: 'first' });
-  now += 5000; // 5s elapsed -- already past the 4.5s minimum interval
+  await rig.clock.sleep(5000); // already past the 4.5s minimum interval
   await provider.complete({ prompt: 'second' });
 
-  assert.equal(sleepCalls.length, 0, 'no pacing delay once the minimum interval has already passed');
+  assert.deepEqual(rig.pacingCalls, [], 'no pacing wait once the minimum interval has already passed');
+  assert.deepEqual(gaps(rig.starts), [5000]);
 });
 
 test('pacing: three consecutive requests each respect the 4.5s floor relative to the previous request', async () => {
-  const fetchImpl = async () => okResponse();
-  const sleepCalls = [];
-  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  let now = 0;
-  const nowImpl = () => now;
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+  const rig = createPacingRig();
+  const provider = new GeminiProvider({ fetchImpl: rig.wrapFetch(async () => okResponse()), apiKeyProvider: () => 'key123', ...rig.opts });
 
-  await provider.complete({ prompt: 'a' }); // t=0, no wait
-  now += 2000; // t=2000
-  await provider.complete({ prompt: 'b' }); // must wait 2500 to reach t=4500
-  now += 4500; // simulate that the wait elapsed, then more time passes -- t=9000
-  await provider.complete({ prompt: 'c' }); // already past floor since t=4500, no wait
+  await provider.complete({ prompt: 'a' }); // t0, no wait
+  await rig.clock.sleep(2000);
+  await provider.complete({ prompt: 'b' }); // must wait 2500 to reach the floor
+  await rig.clock.sleep(4500);
+  await provider.complete({ prompt: 'c' }); // already clear of the floor, no wait
 
-  assert.deepEqual(sleepCalls, [2500], 'only the second request needed to wait; the third was already clear of the floor');
+  assert.deepEqual(rig.pacingCalls, [2500], 'only the second request needed to wait');
+  assert.ok(gaps(rig.starts).every((g) => g >= 4500));
 });
 
-test('pacing: does not interfere with the existing 429 retry -- retry delay and pacing delay are both honored', async () => {
+// Contract change (Pass 31). This test used to assert "pacing added no extra
+// wait here" for a retry -- the defect: the retry HTTP attempt bypassed the
+// pacing floor. Every retry attempt is now subject to the global 4500ms
+// request-start floor, on top of (not instead of) its own retry delay.
+test('pacing: every retry HTTP attempt is subject to the global 4500ms request-start floor, in addition to the unchanged retry delay', async () => {
   let fetchCalls = 0;
   const fetchImpl = async () => {
     fetchCalls++;
-    // Call 1 (first complete()) succeeds outright. Call 2 (second
-    // complete()'s first attempt) is a 429; call 3 (its retry) succeeds.
+    // Call 1 (first complete()) succeeds. Call 2 (second complete()'s first
+    // attempt) is a 429 with Retry-After 1s; call 3 (its retry) succeeds.
     if (fetchCalls === 2) {
       return jsonResponse(429, { error: { message: 'RESOURCE_EXHAUSTED' } }, { 'retry-after': '1' });
     }
     return fetchCalls === 1 ? okResponse('ok') : okResponse('Retried successfully.');
   };
-  const sleepCalls = [];
-  const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  let now = 0;
-  const nowImpl = () => now;
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+  const rig = createPacingRig();
+  const provider = new GeminiProvider({ fetchImpl: rig.wrapFetch(fetchImpl), apiKeyProvider: () => 'key123', ...rig.opts });
 
   const first = await provider.complete({ prompt: 'a' });
   assert.equal(first.text, 'ok', 'default okResponse() text');
-  assert.equal(sleepCalls.length, 0, 'first call: no pacing wait, no retry needed');
+  assert.deepEqual(rig.pacingCalls, [], 'first call: no pacing wait, no retry needed');
 
-  now += 4500; // second call starts exactly at the pacing floor -- no pacing wait needed
+  await rig.clock.sleep(4500); // second call's first attempt starts exactly at the floor: no wait
   const second = await provider.complete({ prompt: 'b' });
 
   assert.equal(fetchCalls, 3, 'first call: 1 fetch; second call: 429 then retry = 2 fetches');
-  assert.equal(sleepCalls.length, 1, 'only the 429 retry delay was awaited -- pacing added no extra wait here');
-  assert.equal(sleepCalls[0], 1000, 'the retry delay itself is unchanged: derived from Retry-After, not the pacing floor');
+  assert.deepEqual(rig.sleepCalls, [1000], 'the retry delay itself is unchanged: derived from Retry-After, not the pacing floor');
+  assert.deepEqual(rig.pacingCalls, [3500], 'the retry attempt waited the rest of the floor (4500 - the 1000ms retry delay)');
+  assert.ok(gaps(rig.starts).every((g) => g >= 4500), `all request-start gaps >= 4500, got ${JSON.stringify(gaps(rig.starts))}`);
   assert.equal(second.text, 'Retried successfully.');
 });
 
@@ -426,7 +435,7 @@ test('complete(): a request that never resolves is aborted after GEMINI_REQUEST_
   };
   // A timeout/abort is now retried exactly once (bounded transient retry);
   // sleepImpl is injected so the 1s backoff never waits in real time.
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl: async () => {} });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl: async () => {}, nowImpl: farClock() });
 
   const pending = assert.rejects(() => provider.complete({ prompt: 'hi' }), /aborted/i);
   // Let complete()'s pacing-slot await (a real microtask hop, since this is
@@ -499,8 +508,7 @@ test('Phase 1 / Test A + I: an exhausted 429 retry records a cooldown derived fr
     }
   }); // no Retry-After header -- forces the RetryInfo-detail path, unchanged by Phase 1
   const sleepImpl = async () => {};
-  const nowImpl = () => 0; // disable the pacing-floor sleep so this test is fast/deterministic
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, ...virtualPacing() });
 
   assert.equal(isProviderCoolingDown('gemini-free'), false, 'no cooldown before the call');
   await assert.rejects(() => provider.complete({ prompt: 'hi' }));
@@ -544,8 +552,7 @@ test('Phase 1: existing 429 retry/retryDelay/bounded-attempt behavior is unchang
   };
   const sleepCalls = [];
   const sleepImpl = async (ms) => { sleepCalls.push(ms); };
-  const nowImpl = () => 0;
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, nowImpl });
+  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'key123', sleepImpl, ...virtualPacing() });
 
   await assert.rejects(() => provider.complete({ prompt: 'hi' }), /HTTP 429/);
   assert.equal(fetchCalls, 2, 'still exactly two attempts (MAX_ATTEMPTS_ON_429 unchanged)');
@@ -594,17 +601,15 @@ test('complete(): no finishReason in the response -> no finishReason key, rest o
 // run (the first call of a fresh instance is never delayed). Pacing state
 // must therefore be shareable.
 
-function routerWith(pacingStateFor, sleepCalls) {
-  const now = () => 1_000_000; // frozen clock: every call "starts" at the same instant
+function routerWith(pacingStateFor, rig) {
   return new LLMRouter({
     priority: ['gemini-free'],
     allowPaidProviders: false,
     registry: {
       'gemini-free': () => new GeminiProvider({
-        fetchImpl: async () => okResponse(),
+        fetchImpl: rig.wrapFetch(async () => okResponse()),
         apiKeyProvider: () => 'key123',
-        sleepImpl: async (ms) => { sleepCalls.push(ms); },
-        nowImpl: now,
+        ...rig.opts,
         ...pacingStateFor()
       })
     }
@@ -612,22 +617,23 @@ function routerWith(pacingStateFor, sleepCalls) {
 }
 
 test('pacing: regression -- providers created per call WITHOUT shared state are never paced', async () => {
-  const sleepCalls = [];
-  const router = routerWith(() => ({}), sleepCalls);
+  const rig = createPacingRig();
+  const router = routerWith(() => ({}), rig);
   await router.complete({ prompt: 'a' });
   await router.complete({ prompt: 'b' });
   await router.complete({ prompt: 'c' });
-  assert.deepEqual(sleepCalls, [], 'documents the original defect: every call is a first call on a fresh instance');
+  assert.deepEqual(rig.pacingCalls, [], 'documents the original defect: every call is a first call on a fresh instance');
 });
 
 test('pacing: providers created per call by the router share one pacing state, so back-to-back router calls wait the 4.5s floor', async () => {
-  const sleepCalls = [];
+  const rig = createPacingRig();
   const shared = createPacingState();
-  const router = routerWith(() => ({ pacingState: shared }), sleepCalls);
+  const router = routerWith(() => ({ pacingState: shared }), rig);
   await router.complete({ prompt: 'a' });
   await router.complete({ prompt: 'b' });
   await router.complete({ prompt: 'c' });
-  assert.deepEqual(sleepCalls, [4500, 4500], 'first call free; the next two each wait out the full floor');
+  assert.deepEqual(rig.pacingCalls, [4500, 4500], 'first call free; the next two each wait out the full floor');
+  assert.deepEqual(gaps(rig.starts), [4500, 4500]);
 });
 
 test('pacing: the production registry factory hands every instance the same shared pacing state', () => {

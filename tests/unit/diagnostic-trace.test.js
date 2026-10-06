@@ -4,6 +4,7 @@ import {
   traceEnabled, traceAsync, traceSync, traceEvent, startTrace, setTraceSink, safeHost, safeUrl
 } from '../../src/diagnostics/trace.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
+import { createVirtualClock } from '../helpers/virtualClock.js';
 import { GeminiProvider } from '../../src/providers/llm/GeminiProvider.js';
 
 const SECRET_PROMPT = 'SUPER-SECRET-PROMPT-TEXT with spaces';
@@ -173,7 +174,8 @@ test('GeminiProvider: 429 retry path marks request/status, sleep delay and body;
     const provider = new GeminiProvider({
       fetchImpl: makeFetch(),
       apiKeyProvider: () => SECRET_KEY,
-      sleepImpl: async (ms) => { sleeps.push(ms); }
+      sleepImpl: async (ms) => { sleeps.push(ms); },
+      ...(() => { const c = createVirtualClock(); return { nowImpl: c.now, pacingSleepImpl: c.sleep }; })()
     });
     return provider.complete({ prompt: SECRET_PROMPT, maxTokens: 10 }).then((result) => ({ result, sleeps }));
   };

@@ -1,6 +1,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { GeminiProvider } from '../../src/providers/llm/GeminiProvider.js';
+import { createVirtualClock } from '../helpers/virtualClock.js';
 import { resetProviderHealth } from '../../src/providers/llm/providerHealth.js';
 
 beforeEach(() => resetProviderHealth());
@@ -25,7 +26,13 @@ function make(responses) {
     if (r instanceof Error) throw r;
     return r;
   };
-  const provider = new GeminiProvider({ fetchImpl, apiKeyProvider: () => 'k', sleepImpl: async (ms) => { sleeps.push(ms); } });
+  // Retry delays are recorded via sleepImpl; pacing waits go through their own
+  // seam on a virtual clock, so `sleeps` still holds ONLY retry delays.
+  const clock = createVirtualClock();
+  const provider = new GeminiProvider({
+    fetchImpl, apiKeyProvider: () => 'k', sleepImpl: async (ms) => { sleeps.push(ms); },
+    nowImpl: clock.now, pacingSleepImpl: clock.sleep
+  });
   return { provider, sleeps, calls: () => calls };
 }
 

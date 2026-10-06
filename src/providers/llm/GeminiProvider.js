@@ -76,18 +76,18 @@ const FALLBACK_RETRY_DELAY_MS = 2000;
 // cooldown logic below.
 const GEMINI_REQUEST_TIMEOUT_MS = 120000;
 
-// Provider-local pacing floor, added after a real GitHub Actions run hit
-// Gemini's confirmed free-tier limit of 15 requests/minute for
+// Global request-start pacing floor, added after a real GitHub Actions run
+// hit Gemini's confirmed free-tier limit of 15 requests/minute for
 // gemini-3.5-flash-lite (generate_content_free_tier_requests, HTTP 429
-// RESOURCE_EXHAUSTED). Discovery's LLM calls are already strictly
-// sequential (no concurrency to coordinate here), so a simple minimum
-// gap between the START of one complete() call and the START of the next
-// is sufficient to keep normal, successful traffic under quota. 4.5s
-// targets ~13.3 requests/minute -- under the 15/min limit with a safety
-// margin, without touching Discovery's candidate limits, dedup workload
-// caps, retry count, model, or router priority. This paces the outer
-// complete() call only; the existing bounded 429 retry (and its own,
-// much larger, Gemini-supplied retry delay) is untouched below.
+// RESOURCE_EXHAUSTED). INVARIANT: every actual outbound Gemini HTTP attempt
+// -- first attempts AND retries (429, 5xx, timeout/network), from any
+// GeminiProvider instance sharing the pacing state, and from concurrent
+// callers -- starts at least MIN_REQUEST_INTERVAL_MS after the previous
+// one. 4.5s targets ~13.3 requests/minute, under the 15/min limit with a
+// safety margin. This is an ADDITIONAL constraint on request starts: the
+// existing retry delays (Retry-After / RetryInfo, 1s network backoff,
+// exponential 5xx backoff) and retry counts are unchanged and still run
+// first; the pacing gate then runs again before the retry attempt.
 const MIN_REQUEST_INTERVAL_MS = 4500;
 
 /**
@@ -235,17 +235,21 @@ function buildGeminiRequestError(res, { providerBody, providerMessage }) {
  * or the success/error contract shapes documented above.
  */
 /**
- * Mutable pacing state: when the most recent complete() call started.
- * Kept in its own object so it can be SHARED between GeminiProvider
- * instances. LLMRouter builds a fresh provider for every router.complete()
- * call (its registry holds factories), so state held on the instance is
- * discarded after every request and the pacing floor never fires in a real
- * run. The production registry factory (candidates.js) therefore passes
- * `sharedPacingState`; a provider constructed without one gets its own
- * private state, which is what the unit tests rely on.
+ * Mutable pacing state SHARED between GeminiProvider instances (LLMRouter
+ * builds a fresh provider per router.complete() call, so state held on the
+ * instance would be discarded after every request; the production registry
+ * factory in candidates.js passes `sharedPacingState`). A provider
+ * constructed without one gets its own private state (unit tests).
+ *
+ * - lastRequestStartedAt: monotonic reading (nowImpl, default
+ *   performance.now()) taken at the moment the most recent outbound attempt
+ *   was handed to fetch. null until the first attempt.
+ * - tail: FIFO chain. A caller replaces it synchronously on entry (before any
+ *   await), so concurrent callers pass the gate strictly one at a time, in
+ *   arrival order, each seeing its predecessor's stamped start time.
  */
 export function createPacingState() {
-  return { lastRequestStartedAt: null };
+  return { lastRequestStartedAt: null, tail: null };
 }
 
 /** Process-wide pacing state used by the production registry factory. */
@@ -261,15 +265,17 @@ export class GeminiProvider extends LLMProvider {
    *   its cutoff (confirmed against this project's key via the scheduled workflow's first real run);
    *   Google's own error body names gemini-3.5-flash-lite as the replacement, which is what's used here.
    * @param {(ms: number) => Promise<void>} [opts.sleepImpl] - injectable delay for the 429 retry and the pacing floor, so tests never wait in real time.
-   * @param {() => number} [opts.nowImpl] - injectable clock (ms) for the pacing floor, so tests never wait in real time.
-   * @param {{lastRequestStartedAt: number|null}} [opts.pacingState] - pacing state; defaults to a private one per instance. Pass `sharedPacingState` so instances created per call by the router pace against each other.
+   * @param {(ms: number) => Promise<void>|null} [opts.pacingSleepImpl] - injectable delay used ONLY by the pacing gate; defaults to sleepImpl. Lets tests observe retry delays and pacing waits independently.
+   * @param {() => number} [opts.nowImpl] - injectable MONOTONIC clock (ms) for the pacing floor; defaults to performance.now() (never Date.now(): wall-clock steps must not affect pacing). An injected clock must advance when an injected sleepImpl resolves, as real time does; the gate re-checks the clock after every wait and keeps waiting until the interval has truly elapsed.
+   * @param {{lastRequestStartedAt: number|null, tail: Promise|null}} [opts.pacingState] - pacing state; defaults to a private one per instance. Pass `sharedPacingState` so instances created per call by the router pace against each other.
    */
   constructor({
     fetchImpl = fetch,
     apiKeyProvider = () => process.env.GEMINI_FREE_API_KEY,
     model = 'gemini-3.5-flash-lite',
     sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    nowImpl = () => Date.now(),
+    pacingSleepImpl = null,
+    nowImpl = () => performance.now(),
     pacingState = createPacingState()
   } = {}) {
     super();
@@ -277,30 +283,64 @@ export class GeminiProvider extends LLMProvider {
     this._apiKeyProvider = apiKeyProvider;
     this._model = model;
     this._sleep = sleepImpl;
+    this._pacingSleep = pacingSleepImpl ?? sleepImpl;
     this._now = nowImpl;
-    // Timestamp (per nowImpl) that the most recent complete() call started
-    // its request at. null until the first call. Instance-scoped, so
-    // pacing is per-GeminiProvider-instance (see module docstring).
+    // Pacing state; shared across instances when the caller passes one.
     this._pacing = pacingState;
   }
 
   /**
-   * Blocks (via sleepImpl) only long enough to keep at least
-   * MIN_REQUEST_INTERVAL_MS between the start of consecutive complete()
-   * calls on this instance. The first call is never delayed. Runs once
-   * per complete() call, not per retry attempt -- the 429 retry's own,
-   * larger, Gemini-supplied delay already covers the retry sub-request.
+   * Pacing gate. Called before EVERY outbound HTTP attempt. Resolves to a
+   * ticket once at least MIN_REQUEST_INTERVAL_MS has elapsed since the
+   * previous attempt's recorded start. The ticket still HOLDS the FIFO slot:
+   * the caller must call `ticket.markStart()` immediately before invoking
+   * fetch (which stamps the start time and lets the next caller proceed) and
+   * `ticket.release()` in a finally block (a no-op once started) so that an
+   * attempt that never reaches fetch cannot block the queue.
+   *
+   * Properties relied on for the invariant:
+   * - Joining is synchronous: the tail swap happens before the first await,
+   *   so two callers can never reserve the same slot.
+   * - A successor only inspects lastRequestStartedAt after the predecessor
+   *   has stamped it (the predecessor releases the chain inside markStart).
+   * - After every sleep the elapsed time is re-read from the clock and the
+   *   wait repeats until it has truly passed; timers are never trusted to
+   *   fire on time.
+   * - The stamp is taken after the final check, so it can only be later
+   *   than the instant the interval was verified.
    */
-  async _waitForPacingSlot() {
-    const now = this._now();
-    if (this._pacing.lastRequestStartedAt !== null) {
-      const elapsed = now - this._pacing.lastRequestStartedAt;
-      const remaining = MIN_REQUEST_INTERVAL_MS - elapsed;
-      if (remaining > 0) {
-        await this._sleep(remaining);
+  async _acquirePacingSlot() {
+    const state = this._pacing;
+    const previous = state.tail;
+    let releaseTail;
+    state.tail = new Promise((resolve) => { releaseTail = resolve; });
+    let released = false;
+    const ticket = {
+      markStart: () => {
+        if (released) return;
+        state.lastRequestStartedAt = this._now();
+        released = true;
+        releaseTail();
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        releaseTail();
       }
+    };
+    try {
+      if (previous) await previous;
+      for (;;) {
+        const last = state.lastRequestStartedAt;
+        const remaining = last === null ? 0 : last + MIN_REQUEST_INTERVAL_MS - this._now();
+        if (!(remaining > 0)) break;
+        await this._pacingSleep(Math.ceil(remaining));
+      }
+    } catch (err) {
+      ticket.release();
+      throw err;
     }
-    this._pacing.lastRequestStartedAt = this._now();
+    return ticket;
   }
 
   get id() {
@@ -330,7 +370,8 @@ export class GeminiProvider extends LLMProvider {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this._model}:generateContent`;
 
-    await this._waitForPacingSlot();
+    // Serialized once; every attempt reuses it (identical bytes per attempt).
+    const bodyJson = JSON.stringify(body);
 
     let res;
     // Independent, bounded retry budgets. The 429 budget is unchanged
@@ -340,18 +381,36 @@ export class GeminiProvider extends LLMProvider {
     let retriesStatus = 0;
     let retriesNetwork = 0;
     for (let attempt = 1; ; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
+      // Global pacing gate: runs before EVERY attempt, retries included.
+      // Any retry delay (below, from the previous iteration) has already
+      // elapsed by now; this only adds whatever extra wait the 4.5s
+      // request-start floor still requires.
+      const ticket = await this._acquirePacingSlot();
+      // The try opens immediately after the slot is acquired, so ANY throw
+      // between here and fetch still frees the FIFO slot in the finally.
+      let timer;
       try {
-        res = await traceAsync('llm.http.request', { provider: 'gemini-free', model: this._model, attempt }, () => this._fetch(url, {
+        const controller = new AbortController();
+        timer = setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
+        const init = {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'x-goog-api-key': apiKey
           },
-          body: JSON.stringify(body),
+          body: bodyJson,
           signal: controller.signal
-        }), (r) => ({ status: r?.status }));
+        };
+        res = await traceAsync('llm.http.request', { provider: 'gemini-free', model: this._model, attempt }, () => {
+          // Request-start boundary: the start is stamped on the line
+          // immediately before fetch is invoked. The only work between the
+          // stamp and the call is one function return (no I/O, no
+          // serialization, no await), i.e. well under a millisecond; the
+          // 500ms margin of 4500ms over Gemini's nominal 4000ms interval
+          // dwarfs it.
+          ticket.markStart();
+          return this._fetch(url, init);
+        }, (r) => ({ status: r?.status }));
       } catch (err) {
         // Timeout / abort / network interruption: no response was received.
         if (isTransientNetworkError(err) && retriesNetwork < MAX_RETRIES_ON_NETWORK_FAILURE) {
@@ -364,6 +423,7 @@ export class GeminiProvider extends LLMProvider {
         throw err;
       } finally {
         clearTimeout(timer);
+        ticket.release(); // no-op once markStart() ran; frees the slot if fetch was never reached
       }
 
       if (res.ok) break;

@@ -6,7 +6,11 @@ import {
 } from '../../src/diagnostics/runWorkloadDiagnostics.js';
 import { checkDuplicate, createDedupWorkloadBudget, DEDUP_RESULT } from '../../src/discovery/dedup.js';
 import { LLMRouter } from '../../src/providers/llm/router.js';
+import { createVirtualClock } from '../helpers/virtualClock.js';
 import { GeminiProvider } from '../../src/providers/llm/GeminiProvider.js';
+
+// Virtual monotonic clock for the pacing gate; retry delays stay on sleepImpl.
+function vp() { const c = createVirtualClock(); return { nowImpl: c.now, pacingSleepImpl: c.sleep }; }
 
 const thresholds = { candidate_threshold: 0.3, confident_duplicate_threshold: 0.8 };
 
@@ -141,7 +145,7 @@ test('Gemini: 429 then success counts one 429 and the requested retry delay', as
   const responses = [jsonResponse(429, { error: { code: 429, status: 'RESOURCE_EXHAUSTED' } }, { 'retry-after': '4' }), geminiOk()];
   const sleeps = [];
   const provider = new GeminiProvider({
-    fetchImpl: async () => responses.shift(), apiKeyProvider: () => 'k', sleepImpl: async (ms) => { sleeps.push(ms); }
+    fetchImpl: async () => responses.shift(), apiKeyProvider: () => 'k', sleepImpl: async (ms) => { sleeps.push(ms); }, ...vp()
   });
   await provider.complete({ prompt: 'p' });
   const snap = snapshotRunDiagnostics();
@@ -152,9 +156,10 @@ test('Gemini: 429 then success counts one 429 and the requested retry delay', as
 
 test('Gemini: pacing-floor sleeps are NOT counted as retry sleep', async () => {
   const sleeps = [];
+  const clock = createVirtualClock();
   const provider = new GeminiProvider({
     fetchImpl: async () => geminiOk(), apiKeyProvider: () => 'k',
-    sleepImpl: async (ms) => { sleeps.push(ms); }, nowImpl: () => 1000
+    sleepImpl: async () => {}, pacingSleepImpl: async (ms) => { sleeps.push(ms); await clock.sleep(ms); }, nowImpl: clock.now
   });
   await provider.complete({ prompt: 'a' });
   await provider.complete({ prompt: 'b' });
@@ -168,7 +173,7 @@ test('Gemini: an exhausted 429 counts both 429s and a single retry sleep', async
   const sleeps = [];
   const provider = new GeminiProvider({
     fetchImpl: async () => jsonResponse(429, { error: { code: 429, status: 'RESOURCE_EXHAUSTED' } }),
-    apiKeyProvider: () => 'k', sleepImpl: async (ms) => { sleeps.push(ms); }
+    apiKeyProvider: () => 'k', sleepImpl: async (ms) => { sleeps.push(ms); }, ...vp()
   });
   await assert.rejects(() => provider.complete({ prompt: 'p' }), /429/);
   const snap = snapshotRunDiagnostics();
@@ -188,7 +193,7 @@ test('timeDiscovery: records elapsed, returns the wrapped result, and still reco
 
 test('formatRunDiagnostics emits one numeric-only line: no prompt text, no key material', async () => {
   const provider = new GeminiProvider({
-    fetchImpl: async () => jsonResponse(429, { error: { message: 'SECRET-BODY' } }), apiKeyProvider: () => 'SECRET-KEY', sleepImpl: async () => {}
+    fetchImpl: async () => jsonResponse(429, { error: { message: 'SECRET-BODY' } }), apiKeyProvider: () => 'SECRET-KEY', sleepImpl: async () => {}, ...vp()
   });
   await assert.rejects(() => provider.complete({ prompt: 'SECRET-PROMPT' }));
   const line = formatRunDiagnostics();
