@@ -526,8 +526,10 @@ export async function runResearchProject({
       // Fail-closed: an extraction that could not establish a valid result
       // (empty / malformed / truncated / provider failure, after one bounded
       // retry) is recorded as a FAILURE -- never as a zero-claim EXTRACTED
-      // row -- and the error propagates through the pipeline's existing
-      // failure semantics, exactly as any other provider error does.
+      // row. Source-level failure isolation (v0.4 S12): that source
+      // contributes no claims and the project proceeds over the sources that
+      // did extract. Any other error (e.g. a non-extraction provider error)
+      // still propagates through the pipeline's existing failure semantics.
       if (err instanceof ExtractionFailureError) {
         logDecision(storage, {
           runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'source', subjectId: source.id,
@@ -537,6 +539,7 @@ export async function runResearchProject({
             attempts: err.attempts, outputTokens: err.outputTokens, contentLength: err.contentLength
           }
         });
+        continue;
       }
       throw err;
     }
