@@ -234,6 +234,23 @@ function buildGeminiRequestError(res, { providerBody, providerMessage }) {
  * change provider selection (LLMRouter is untouched), request semantics,
  * or the success/error contract shapes documented above.
  */
+/**
+ * Mutable pacing state: when the most recent complete() call started.
+ * Kept in its own object so it can be SHARED between GeminiProvider
+ * instances. LLMRouter builds a fresh provider for every router.complete()
+ * call (its registry holds factories), so state held on the instance is
+ * discarded after every request and the pacing floor never fires in a real
+ * run. The production registry factory (candidates.js) therefore passes
+ * `sharedPacingState`; a provider constructed without one gets its own
+ * private state, which is what the unit tests rely on.
+ */
+export function createPacingState() {
+  return { lastRequestStartedAt: null };
+}
+
+/** Process-wide pacing state used by the production registry factory. */
+export const sharedPacingState = createPacingState();
+
 export class GeminiProvider extends LLMProvider {
   /**
    * @param {object} [opts]
@@ -245,13 +262,15 @@ export class GeminiProvider extends LLMProvider {
    *   Google's own error body names gemini-3.5-flash-lite as the replacement, which is what's used here.
    * @param {(ms: number) => Promise<void>} [opts.sleepImpl] - injectable delay for the 429 retry and the pacing floor, so tests never wait in real time.
    * @param {() => number} [opts.nowImpl] - injectable clock (ms) for the pacing floor, so tests never wait in real time.
+   * @param {{lastRequestStartedAt: number|null}} [opts.pacingState] - pacing state; defaults to a private one per instance. Pass `sharedPacingState` so instances created per call by the router pace against each other.
    */
   constructor({
     fetchImpl = fetch,
     apiKeyProvider = () => process.env.GEMINI_FREE_API_KEY,
     model = 'gemini-3.5-flash-lite',
     sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    nowImpl = () => Date.now()
+    nowImpl = () => Date.now(),
+    pacingState = createPacingState()
   } = {}) {
     super();
     this._fetch = fetchImpl;
@@ -262,7 +281,7 @@ export class GeminiProvider extends LLMProvider {
     // Timestamp (per nowImpl) that the most recent complete() call started
     // its request at. null until the first call. Instance-scoped, so
     // pacing is per-GeminiProvider-instance (see module docstring).
-    this._lastRequestStartedAt = null;
+    this._pacing = pacingState;
   }
 
   /**
@@ -274,14 +293,14 @@ export class GeminiProvider extends LLMProvider {
    */
   async _waitForPacingSlot() {
     const now = this._now();
-    if (this._lastRequestStartedAt !== null) {
-      const elapsed = now - this._lastRequestStartedAt;
+    if (this._pacing.lastRequestStartedAt !== null) {
+      const elapsed = now - this._pacing.lastRequestStartedAt;
       const remaining = MIN_REQUEST_INTERVAL_MS - elapsed;
       if (remaining > 0) {
         await this._sleep(remaining);
       }
     }
-    this._lastRequestStartedAt = this._now();
+    this._pacing.lastRequestStartedAt = this._now();
   }
 
   get id() {

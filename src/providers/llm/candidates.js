@@ -9,7 +9,7 @@
 // them now via the LocalStubProvider below.
 
 import { LLMProvider } from './LLMProvider.js';
-import { GeminiProvider } from './GeminiProvider.js';
+import { GeminiProvider, sharedPacingState } from './GeminiProvider.js';
 
 class UnconfiguredProvider extends LLMProvider {
   constructor(id, { isPaid = false } = {}) {
@@ -42,7 +42,9 @@ class UnconfiguredProvider extends LLMProvider {
   }
 }
 
-export const GeminiFreeProvider = () => new GeminiProvider();
+// LLMRouter calls this factory for every complete() call, so the pacing
+// state must outlive the instance: all instances share one pacing state.
+export const GeminiFreeProvider = () => new GeminiProvider({ pacingState: sharedPacingState });
 export const OpenRouterFreeProvider = () => new UnconfiguredProvider('openrouter-free', { isPaid: false });
 export const DeepSeekPaidProvider = () => new UnconfiguredProvider('deepseek-paid', { isPaid: true });
 

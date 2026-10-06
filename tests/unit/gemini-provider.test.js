@@ -1,6 +1,8 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { GeminiProvider } from '../../src/providers/llm/GeminiProvider.js';
+import { GeminiProvider, createPacingState, sharedPacingState } from '../../src/providers/llm/GeminiProvider.js';
+import { LLMRouter } from '../../src/providers/llm/router.js';
+import { REGISTRY } from '../../src/providers/llm/candidates.js';
 import { resetProviderHealth, isProviderCoolingDown, providerCooldownRemainingMs } from '../../src/providers/llm/providerHealth.js';
 
 // Phase 1 (provider cooldown/health-memory) shares process-wide state with
@@ -584,4 +586,61 @@ test('complete(): no finishReason in the response -> no finishReason key, rest o
     text: 'ok', model: 'gemini-3.5-flash-lite', requestId: 'req-nofr',
     inputTokens: 1, outputTokens: 1, estimatedCost: 0, isPaid: false
   });
+});
+
+// --- Pacing across per-call provider instances (LLMRouter) ----------------
+// LLMRouter builds a NEW provider from its registry factory for every
+// complete() call, so pacing held on the instance never applied in a real
+// run (the first call of a fresh instance is never delayed). Pacing state
+// must therefore be shareable.
+
+function routerWith(pacingStateFor, sleepCalls) {
+  const now = () => 1_000_000; // frozen clock: every call "starts" at the same instant
+  return new LLMRouter({
+    priority: ['gemini-free'],
+    allowPaidProviders: false,
+    registry: {
+      'gemini-free': () => new GeminiProvider({
+        fetchImpl: async () => okResponse(),
+        apiKeyProvider: () => 'key123',
+        sleepImpl: async (ms) => { sleepCalls.push(ms); },
+        nowImpl: now,
+        ...pacingStateFor()
+      })
+    }
+  });
+}
+
+test('pacing: regression -- providers created per call WITHOUT shared state are never paced', async () => {
+  const sleepCalls = [];
+  const router = routerWith(() => ({}), sleepCalls);
+  await router.complete({ prompt: 'a' });
+  await router.complete({ prompt: 'b' });
+  await router.complete({ prompt: 'c' });
+  assert.deepEqual(sleepCalls, [], 'documents the original defect: every call is a first call on a fresh instance');
+});
+
+test('pacing: providers created per call by the router share one pacing state, so back-to-back router calls wait the 4.5s floor', async () => {
+  const sleepCalls = [];
+  const shared = createPacingState();
+  const router = routerWith(() => ({ pacingState: shared }), sleepCalls);
+  await router.complete({ prompt: 'a' });
+  await router.complete({ prompt: 'b' });
+  await router.complete({ prompt: 'c' });
+  assert.deepEqual(sleepCalls, [4500, 4500], 'first call free; the next two each wait out the full floor');
+});
+
+test('pacing: the production registry factory hands every instance the same shared pacing state', () => {
+  const a = REGISTRY['gemini-free']();
+  const b = REGISTRY['gemini-free']();
+  assert.notEqual(a, b, 'the router really does get distinct instances');
+  assert.equal(a._pacing, sharedPacingState);
+  assert.equal(b._pacing, sharedPacingState);
+});
+
+test('pacing: a provider constructed without pacingState keeps private state (no cross-instance leakage in unit tests)', () => {
+  const a = new GeminiProvider({ apiKeyProvider: () => 'k' });
+  const b = new GeminiProvider({ apiKeyProvider: () => 'k' });
+  assert.notEqual(a._pacing, b._pacing);
+  assert.notEqual(a._pacing, sharedPacingState);
 });

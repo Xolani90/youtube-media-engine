@@ -55,3 +55,11 @@ test('scheduled-run.yml uses the free-tier profile: one daily cron and a fresh-e
   assert.match(yaml, /^\s*PUBLICATION_PROVIDER_PRIORITY:\s*'youtube_shorts,facebook_reels'\s*$/m);
   assert.match(yaml, /group:\s*autonomous-scheduled-run/);
 });
+
+test('scheduled-run.yml bounds the job with a timeout so a hung run cannot hold the concurrency group', () => {
+  const yaml = readFileSync(workflowPath, 'utf8');
+  const m = yaml.match(/^\s*timeout-minutes:\s*(\d+)\s*$/m);
+  assert.ok(m, 'job must declare timeout-minutes');
+  const minutes = Number(m[1]);
+  assert.ok(minutes >= 30 && minutes <= 120, `timeout-minutes (${minutes}) must leave room for a throttled run but stay bounded`);
+});

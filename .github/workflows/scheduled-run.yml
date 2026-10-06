@@ -49,6 +49,13 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    # Bound a hung run (e.g. a retrieval body that never completes) so it
+    # cannot hold the concurrency group for GitHub's 6-hour default. A
+    # timeout is a cancellation: it can leave a RUNNING guard row that makes
+    # later runs refuse with exit 3 until it is reclaimed (ADR-0024); see the
+    # "Reclaim Orphaned Autonomous Guard" workflow. A healthy free-tier run
+    # takes ~20 minutes.
+    timeout-minutes: 60
     # ADR-0035 §4.1: execution is explicitly pinned to the safe operating
     # configuration. These are set here, not left to defaults, so the safe
     # configuration is visible in the workflow file itself.
