@@ -10,12 +10,16 @@
 //
 // Usage:  node scripts/inspect-research-db.js "<path to fresh.db>" [sampleSize]
 import Database from 'better-sqlite3';
+import fs from 'node:fs';
 
 const dbPath = process.argv[2];
 const sampleSize = Number(process.argv[3] || 8);
 if (!dbPath) { console.error('usage: node scripts/inspect-research-db.js <path-to-db> [sampleSize]'); process.exit(2); }
 
 const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+// Read the configured threshold from the policy file (never hard-coded here, never changed here).
+const policy = JSON.parse(fs.readFileSync(new URL('../config/research_policy.json', import.meta.url), 'utf8'));
+const resolutionThreshold = policy.completeness.overall_resolution_threshold;
 const clip = (s, n = 160) => String(s ?? '').replace(/\s+/g, ' ').slice(0, n);
 
 const projects = db.prepare(
@@ -28,6 +32,9 @@ for (const p of projects) {
   const total = db.prepare('SELECT COUNT(*) n FROM claims WHERE research_project_id = ?').get(p.id).n;
   const lb = db.prepare('SELECT COUNT(*) n FROM claims WHERE research_project_id = ? AND is_load_bearing = 1').get(p.id).n;
   console.log(`   claims=${total} load_bearing=${lb} (${total ? Math.round((100 * lb) / total) : 0}%)`);
+  const resolved = db.prepare("SELECT COUNT(*) n FROM claims WHERE research_project_id = ? AND evidence_status != 'UNSUPPORTED'").get(p.id).n;
+  const ratio = total ? resolved / total : 0;
+  console.log(`   resolution: total=${total} non_UNSUPPORTED=${resolved} ratio=${ratio.toFixed(3)} overall_resolution_threshold=${resolutionThreshold} passes=${ratio >= resolutionThreshold}`);
   console.log('   load-bearing by type/evidence_status:');
   for (const r of db.prepare(
     `SELECT claim_type, evidence_status, COUNT(*) n FROM claims

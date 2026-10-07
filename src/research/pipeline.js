@@ -15,6 +15,7 @@ import {
 } from './evidenceVerification.js';
 import { canonicalizePair, recordContradiction, hasUnresolvedContradiction } from './contradictions.js';
 import { evaluateCompleteness } from './completeness.js';
+import { downgradeSocialOnlyLoadBearing } from './socialOnlyLoadBearing.js';
 import { traceAsync } from '../diagnostics/trace.js';
 import { RESEARCH_CHECKPOINT, readResearchCheckpoints, writeResearchCheckpoint } from './researchCheckpoints.js';
 import {
@@ -1153,6 +1154,24 @@ async function runResearchBody({
 
   // --- Deterministic evidence grading (never LLM self-certified) ---
   const sourcesById = new Map(persistedSources.map((s) => [s.id, s]));
+
+  // --- Load-bearing correction: social-only claims ---
+  // A load-bearing claim whose only supporting sources are social_media can
+  // never be admissibly supported (social never verifies/corroborates), so it
+  // would block completeness permanently. Run after enrichment (which may add
+  // admissible links) and before grading/completeness. Classification only:
+  // no threshold, grading, admissibility or completeness rule is changed.
+  downgradeSocialOnlyLoadBearing({
+    claims: persistedClaims,
+    getLinks: (claimId) => storage.all('SELECT * FROM claim_sources WHERE claim_id = ?', [claimId]),
+    sourcesById,
+    setNotLoadBearing: (claimId) => storage.run('UPDATE claims SET is_load_bearing = 0 WHERE id = ?', [claimId]),
+    logDowngrade: (claim, verdict) => logDecision(storage, {
+      runId, stage: RESEARCH_STAGE.LOAD_BEARING_CLASSIFICATION, subjectType: 'claim', subjectId: claim.id,
+      decision: 'NOT_LOAD_BEARING', reason: 'social_only_sources_downgrade',
+      configSnapshot: { previous: 'LOAD_BEARING', basis: verdict.reason, linkedSources: verdict.sources }
+    })
+  });
   for (const claimRow of persistedClaims) {
     const links = storage.all('SELECT * FROM claim_sources WHERE claim_id = ?', [claimRow.id]);
     const contested = hasUnresolvedContradiction(storage, claimRow.id);
