@@ -36,11 +36,26 @@ for (const p of projects) {
     console.log(`     ${r.claim_type.padEnd(10)} ${r.evidence_status.padEnd(20)} ${r.n}`);
   }
   console.log(`   sample load-bearing UNSUPPORTED claims (up to ${sampleSize}):`);
+  const linkedSources = db.prepare(
+    `SELECT cs.role link_role, s.role, s.quality_tier, s.retrieval_status, s.url
+     FROM claim_sources cs JOIN sources s ON s.id = cs.source_id WHERE cs.claim_id = ?`);
   for (const r of db.prepare(
-    `SELECT claim_type, claim FROM claims
+    `SELECT id, claim_type, claim FROM claims
      WHERE research_project_id = ? AND is_load_bearing = 1 AND evidence_status = 'UNSUPPORTED'
      ORDER BY created_at LIMIT ?`).all(p.id, sampleSize)) {
     console.log(`     [${r.claim_type}] ${clip(r.claim)}`);
+    const links = linkedSources.all(r.id);
+    if (links.length === 0) console.log('         linked sources: none');
+    for (const l of links) {
+      let host = l.url; try { host = new URL(l.url).host + new URL(l.url).pathname.slice(0, 40); } catch {}
+      console.log(`         <- ${l.link_role} | role=${l.role} quality=${l.quality_tier} retrieval=${l.retrieval_status} | ${clip(host, 90)}`);
+    }
+  }
+  console.log('   sources for this project (role / quality / retrieval):');
+  for (const r of db.prepare(
+    `SELECT role, quality_tier, retrieval_status, url FROM sources WHERE research_project_id = ? ORDER BY role, url`).all(p.id)) {
+    let host = r.url; try { host = new URL(r.url).host + new URL(r.url).pathname.slice(0, 40); } catch {}
+    console.log(`     ${String(r.role).padEnd(22)} ${String(r.quality_tier).padEnd(7)} ${String(r.retrieval_status).padEnd(10)} ${clip(host, 90)}`);
   }
   console.log('   VERIFIED claims (up to 5):');
   for (const r of db.prepare(
