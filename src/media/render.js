@@ -123,6 +123,9 @@ export function writeSrtFile(captionTiming, srtPath) {
   return srtPath;
 }
 
+export const LOUDNORM_TARGETS = Object.freeze({ I: -16, TP: -1.5, LRA: 11 });
+export const LOUDNORM_OUTPUT_SAMPLE_RATE = 48000;
+
 /**
  * Muxes narration audio onto the (already-rendered, video-only) silent
  * video, producing the final container. `-shortest` bounds the output to
@@ -130,7 +133,16 @@ export function writeSrtFile(captionTiming, srtPath) {
  * to sum exactly to the narration duration, this is a safety bound, not
  * the mechanism that aligns them.
  */
-export function muxNarration({ silentVideoPath, narrationPath, audioEncoder, outputPath }) {
+export function muxNarration({ silentVideoPath, narrationPath, audioEncoder, outputPath, normalizeLoudness = true }) {
+  // Single-pass EBU R128 loudness normalization (FFmpeg `loudnorm`, the
+  // established approach for consistent voice level). loudnorm internally
+  // resamples to 192 kHz, so the output rate is pinned explicitly to 48 kHz.
+  // Targets: -16 LUFS integrated, -1.5 dBTP true peak, LRA 11 (common
+  // online-video spoken-word targets). Pass normalizeLoudness: false to keep
+  // the previous pass-through audio.
+  const audioFilterArgs = normalizeLoudness
+    ? ['-af', `loudnorm=I=${LOUDNORM_TARGETS.I}:TP=${LOUDNORM_TARGETS.TP}:LRA=${LOUDNORM_TARGETS.LRA}`, '-ar', String(LOUDNORM_OUTPUT_SAMPLE_RATE)]
+    : [];
   execFileSync(
     'ffmpeg',
     [
@@ -138,6 +150,7 @@ export function muxNarration({ silentVideoPath, narrationPath, audioEncoder, out
       '-i', silentVideoPath,
       '-i', narrationPath,
       '-c:v', 'copy',
+      ...audioFilterArgs,
       '-c:a', audioEncoder,
       '-shortest',
       '-movflags', '+faststart',
