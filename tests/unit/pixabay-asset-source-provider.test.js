@@ -80,23 +80,23 @@ test('acquireVisualAsset: missing query throws (request validation)', async () =
   );
 });
 
-test('acquireVisualAsset: missing API key returns null, never throws, never calls the network', async () => {
+test('acquireVisualAsset: missing API key returns a MISSING_API_KEY failure, never throws, never calls the network', async () => {
   let fetchCalls = 0;
   const fetchImpl = async () => { fetchCalls++; throw new Error('should not be called'); };
   const provider = new PixabayAssetSourceProvider({ fetchImpl, apiKeyProvider: () => undefined });
 
   const result = await provider.acquireVisualAsset({ query: 'a lighthouse', assetTypes: ['image'] });
-  assert.equal(result, null);
+  assert.equal(result.failure.kind, 'MISSING_API_KEY');
   assert.equal(fetchCalls, 0);
 });
 
-test('acquireVisualAsset: unsupported asset type returns null without calling the network', async () => {
+test('acquireVisualAsset: unsupported asset type returns an UNSUPPORTED_ASSET_TYPE failure without calling the network', async () => {
   let fetchCalls = 0;
   const fetchImpl = async () => { fetchCalls++; throw new Error('should not be called'); };
   const provider = new PixabayAssetSourceProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
 
   const result = await provider.acquireVisualAsset({ query: 'a lighthouse', assetTypes: ['audio_clip'] });
-  assert.equal(result, null);
+  assert.equal(result.failure.kind, 'UNSUPPORTED_ASSET_TYPE');
   assert.equal(fetchCalls, 0);
 });
 
@@ -199,31 +199,33 @@ test('acquireVisualAsset: video candidate selection prefers the medium rendition
   }
 });
 
-test('acquireVisualAsset: no results returns null', async () => {
+test('acquireVisualAsset: no results returns an EMPTY_RESULT failure', async () => {
   const fetchImpl = async () => jsonResponse(200, { total: 0, totalHits: 0, hits: [] });
   const provider = new PixabayAssetSourceProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
 
   const result = await provider.acquireVisualAsset({ query: 'a very obscure thing', assetTypes: ['image'] });
-  assert.equal(result, null);
+  assert.equal(result.failure.kind, 'EMPTY_RESULT');
+  assert.equal(result.failure.hitCount, 0);
 });
 
-test('acquireVisualAsset: malformed API response (no hits array) returns null', async () => {
+test('acquireVisualAsset: malformed API response (no hits array) returns a MALFORMED_RESPONSE failure', async () => {
   const fetchImpl = async () => jsonResponse(200, { total: 0 });
   const provider = new PixabayAssetSourceProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
 
   const result = await provider.acquireVisualAsset({ query: 'anything', assetTypes: ['image'] });
-  assert.equal(result, null);
+  assert.equal(result.failure.kind, 'MALFORMED_RESPONSE');
 });
 
-test('acquireVisualAsset: a non-OK search HTTP response (e.g. 429 rate limit) returns null, never throws', async () => {
+test('acquireVisualAsset: a non-OK search HTTP response (e.g. 429 rate limit) returns a RATE_LIMIT failure, never throws', async () => {
   const fetchImpl = async () => jsonResponse(429, 'API rate limit exceeded');
   const provider = new PixabayAssetSourceProvider({ fetchImpl, apiKeyProvider: () => 'key123' });
 
   const result = await provider.acquireVisualAsset({ query: 'anything', assetTypes: ['image'] });
-  assert.equal(result, null);
+  assert.equal(result.failure.kind, 'RATE_LIMIT');
+  assert.equal(result.failure.status, 429);
 });
 
-test('acquireVisualAsset: download failure (non-OK download response) cleans up and returns null', async () => {
+test('acquireVisualAsset: download failure (non-OK download response) cleans up and returns a DOWNLOAD_FAILURE failure', async () => {
   const downloadDir = freshDownloadDir();
   const fetchImpl = async (url) => {
     if (url.startsWith('https://pixabay.com/api/?')) {
@@ -235,7 +237,8 @@ test('acquireVisualAsset: download failure (non-OK download response) cleans up 
 
   try {
     const result = await provider.acquireVisualAsset({ query: 'yellow flowers', assetTypes: ['image'] });
-    assert.equal(result, null);
+    assert.equal(result.failure.kind, 'DOWNLOAD_FAILURE');
+    assert.equal(result.failure.status, 500);
     // No partial files should be left behind.
     if (fs.existsSync(downloadDir)) {
       assert.deepEqual(fs.readdirSync(downloadDir), []);
@@ -257,7 +260,7 @@ test('acquireVisualAsset: an empty downloaded file is treated as a failure, clea
 
   try {
     const result = await provider.acquireVisualAsset({ query: 'yellow flowers', assetTypes: ['image'] });
-    assert.equal(result, null);
+    assert.equal(result.failure.kind, 'DOWNLOAD_FAILURE');
     if (fs.existsSync(downloadDir)) {
       assert.deepEqual(fs.readdirSync(downloadDir), []);
     }

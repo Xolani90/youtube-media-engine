@@ -2,12 +2,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { AssetSourceProvider } from './AssetSourceProvider.js';
+import { AssetSourceProvider, ASSET_FAILURE_KIND, assetAcquisitionFailure } from './AssetSourceProvider.js';
 
 // Pixabay rejects a search term longer than 100 characters with HTTP 400
 // (measured live: 100 chars -> 200, 101 chars -> 400). The provider returns
 // null on any non-OK response, so an over-long query would otherwise surface
-// only as a silent "no asset".
+// only as a silent "no asset" (it is now reported as a BAD_REQUEST failure).
 export const PIXABAY_MAX_QUERY_LENGTH = 100;
 
 /**
@@ -117,28 +117,40 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
     return Boolean(this._apiKeyProvider());
   }
 
+  /**
+   * Returns the acquired asset, or a structured failure
+   * ({ failure: { kind, provider, query, status, hitCount, retryable, cause } },
+   * see assetAcquisitionFailure) -- never a bare null. In particular a
+   * successful search with zero hits (EMPTY_RESULT) is distinct from every
+   * way Pixabay could fail to answer (HTTP 400/401/403/429/5xx, transport
+   * failure, malformed body) and from a download failure after a good
+   * search. The API key is never placed in a failure.
+   */
   async acquireVisualAsset({ query, assetTypes } = {}) {
     if (!query || typeof query !== 'string' || !query.trim()) {
       throw new Error('PixabayAssetSourceProvider.acquireVisualAsset requires a non-empty query');
     }
+
+    const apiKey = this._apiKeyProvider();
+    const secrets = [apiKey];
+    const boundedQuery = boundPixabayQuery(query);
+    const fail = (kind, extra = {}) =>
+      assetAcquisitionFailure({ kind, provider: this.id, query: boundedQuery, secrets, ...extra });
 
     const requestedTypes =
       Array.isArray(assetTypes) && assetTypes.length > 0 ? assetTypes : ['image', 'video_clip'];
     const assetType = requestedTypes.find((t) => t === 'image' || t === 'video_clip');
     if (!assetType) {
       // Neither requested type is something Pixabay can provide.
-      return null;
+      return fail(ASSET_FAILURE_KIND.UNSUPPORTED_ASSET_TYPE, { cause: `requested=${requestedTypes.join(',')}` });
     }
 
-    const apiKey = this._apiKeyProvider();
     if (!apiKey) {
-      // Predictable, non-throwing behavior when no key is configured --
-      // an absent key is an expected "can't acquire right now" outcome,
-      // not a programmer error.
-      return null;
+      // An absent key is a configuration failure, not "no results". Nothing
+      // is sent to Pixabay.
+      return fail(ASSET_FAILURE_KIND.MISSING_API_KEY);
     }
 
-    const boundedQuery = boundPixabayQuery(query);
     const searchUrl =
       assetType === 'image'
         ? this._buildImageSearchUrl(apiKey, boundedQuery)
@@ -147,39 +159,58 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
     let res;
     try {
       res = await this._fetch(searchUrl);
-    } catch {
-      // Network-level failure reaching Pixabay -- treat as "could not acquire".
-      return null;
+    } catch (err) {
+      // Transport-level failure reaching Pixabay (timeout, DNS, connection).
+      return fail(ASSET_FAILURE_KIND.NETWORK_FAILURE, { cause: `${err?.name ?? 'Error'}: ${err?.message ?? String(err)}` });
     }
 
     if (!res.ok) {
-      // HTTP error (including 429 rate-limit) -- explicit non-acquisition,
-      // never a fabricated result, and never retried here.
-      return null;
+      // HTTP error: never a fabricated result, never retried here, and never
+      // an empty result.
+      const status = res.status;
+      let kind;
+      if (status === 401 || status === 403) kind = ASSET_FAILURE_KIND.AUTH_FAILURE;
+      else if (status === 429) kind = ASSET_FAILURE_KIND.RATE_LIMIT;
+      else if (status >= 500) kind = ASSET_FAILURE_KIND.PROVIDER_SERVER_FAILURE;
+      else kind = ASSET_FAILURE_KIND.BAD_REQUEST; // 400 and any other 4xx
+      return fail(kind, { status, providerMessage: await this._readErrorBody(res) });
     }
 
     let data;
     try {
       data = await res.json();
-    } catch {
-      // Malformed API response.
-      return null;
+    } catch (err) {
+      return fail(ASSET_FAILURE_KIND.MALFORMED_RESPONSE, { status: res.status, cause: 'response body is not valid JSON' });
     }
 
-    if (!data || !Array.isArray(data.hits) || data.hits.length === 0) {
-      return null;
+    if (!data || !Array.isArray(data.hits)) {
+      return fail(ASSET_FAILURE_KIND.MALFORMED_RESPONSE, { status: res.status, cause: 'response has no hits array' });
+    }
+
+    if (data.hits.length === 0) {
+      // The ONLY case that means "Pixabay answered and has nothing".
+      return fail(ASSET_FAILURE_KIND.EMPTY_RESULT, { status: res.status, hitCount: 0 });
     }
 
     const hit = data.hits[0];
     const candidate =
       assetType === 'image' ? this._selectImageCandidate(hit) : this._selectVideoCandidate(hit);
     if (!candidate) {
-      return null;
+      // Hits exist but the selected one carries no usable download URL.
+      return fail(ASSET_FAILURE_KIND.EMPTY_RESULT, {
+        status: res.status,
+        hitCount: data.hits.length,
+        cause: 'first hit has no usable download URL'
+      });
     }
 
     const download = await this._downloadAsset(candidate.url, assetType);
-    if (!download) {
-      return null;
+    if (download.failure) {
+      return fail(ASSET_FAILURE_KIND.DOWNLOAD_FAILURE, {
+        status: download.status ?? null,
+        hitCount: data.hits.length,
+        cause: download.failure
+      });
     }
 
     return {
@@ -194,6 +225,20 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
       provenanceNotes: this._buildProvenanceNotes({ hit, assetType, candidate }),
       verificationStatus: 'UNVERIFIED'
     };
+  }
+
+  /** Short, best-effort excerpt of a non-OK response body (Pixabay explains 400s in plain text). */
+  async _readErrorBody(res) {
+    try {
+      if (typeof res.text === 'function') return String(await res.text()).slice(0, 200);
+      if (typeof res.json === 'function') {
+        const body = await res.json();
+        return typeof body === 'string' ? body.slice(0, 200) : JSON.stringify(body).slice(0, 200);
+      }
+    } catch {
+      // Body is optional diagnostic detail only.
+    }
+    return null;
   }
 
   _buildImageSearchUrl(apiKey, query) {
@@ -237,15 +282,16 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
     return { url: rendition.url, pageURL: hit.pageURL ?? null };
   }
 
+  /** Returns { location, checksum } or { failure: '<reason>', status? } -- never null. */
   async _downloadAsset(url, assetType) {
     let res;
     try {
       res = await this._fetch(url);
-    } catch {
-      return null;
+    } catch (err) {
+      return { failure: `download request failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(err)}` };
     }
     if (!res.ok) {
-      return null;
+      return { failure: `download returned HTTP ${res.status}`, status: res.status };
     }
 
     let buffer;
@@ -253,15 +299,14 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
       const arrayBuffer = await res.arrayBuffer();
       buffer = Buffer.from(arrayBuffer);
     } catch {
-      return null;
+      return { failure: 'download body could not be read', status: res.status };
     }
 
     if (!buffer || buffer.length === 0) {
       // Never leave an empty/corrupt file behind, and never return one.
-      return null;
+      return { failure: 'downloaded body was empty', status: res.status };
     }
 
-    this._fs.mkdirSync(this._downloadDir, { recursive: true });
     const ext = assetType === 'image' ? 'jpg' : 'mp4';
     const filePath = path.join(
       this._downloadDir,
@@ -269,10 +314,11 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
     );
 
     try {
+      this._fs.mkdirSync(this._downloadDir, { recursive: true });
       this._fs.writeFileSync(filePath, buffer);
     } catch {
       this._safeCleanup(filePath);
-      return null;
+      return { failure: 'downloaded asset could not be written to disk' };
     }
 
     let stat;
@@ -280,11 +326,11 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
       stat = this._fs.statSync(filePath);
     } catch {
       this._safeCleanup(filePath);
-      return null;
+      return { failure: 'downloaded asset could not be stat-ed after write' };
     }
     if (!stat || stat.size === 0) {
       this._safeCleanup(filePath);
-      return null;
+      return { failure: 'downloaded asset is empty on disk' };
     }
 
     const checksum = crypto.createHash('sha256').update(buffer).digest('hex');

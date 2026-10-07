@@ -50,6 +50,13 @@ async function main() {
     return;
   }
 
+  if (result?.failure) {
+    const f = result.failure;
+    console.error(`acquireVisualAsset() returned a structured failure: kind=${f.kind} status=${f.status} hitCount=${f.hitCount} retryable=${f.retryable} queryLength=${f.query?.length ?? 'n/a'} cause=${f.cause ?? f.providerMessage ?? 'n/a'}`);
+    process.exitCode = 1;
+    return;
+  }
+
   if (!result) {
     console.error('acquireVisualAsset() returned null -- no asset was acquired.');
     process.exitCode = 1;

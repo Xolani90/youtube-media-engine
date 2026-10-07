@@ -5,6 +5,7 @@ import { deriveVisualQuery } from './visualQuery.js';
 import { validateAcquiredAsset } from './validate.js';
 import { VISUAL_ASSET_TYPES } from '../media/constants.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
+import { ASSET_FAILURE_KIND, isAssetAcquisitionFailure, redactSecrets } from '../providers/asset/AssetSourceProvider.js';
 import { isQuarantined, recordFailedAttemptIfRetryable, retryFields, FAILURE_NATURE, RETRY_STAGE } from '../state/StageRetryPolicy.js';
 
 /** Same shape/discipline as every other stage's local logDecision helper. Asset Provisioning never transitions content_versions.state (mirrors Media Production's own discipline), so resultingState is always null here. */
@@ -20,6 +21,36 @@ function logDecision(storage, { runId = null, subjectType, subjectId, decision, 
     [id, runId, subjectType, subjectId, decision, reason, evidence ? JSON.stringify(evidence) : null, nowISO(), ASSET_PROVISIONING_STAGE]
   );
   return id;
+}
+
+// Retry disposition per structured provider failure kind. Only a failure
+// established as item-specific and recoverable (TRANSIENT) may consume the
+// shared A4 item budget; a permanent configuration/authentication/request
+// fault is DETERMINISTIC or INFRASTRUCTURE and records no attempt, so it can
+// never quarantine content. A kind this table does not know is treated as
+// INFRASTRUCTURE (fail closed: no budget, no quarantine, still logged).
+const PROVIDER_FAILURE_DISPOSITION = Object.freeze({
+  [ASSET_FAILURE_KIND.EMPTY_RESULT]: { nature: FAILURE_NATURE.TRANSIENT, basis: 'provider_returned_no_asset_for_item_query' },
+  [ASSET_FAILURE_KIND.DOWNLOAD_FAILURE]: { nature: FAILURE_NATURE.TRANSIENT, basis: 'asset_download_failed_after_successful_search' },
+  [ASSET_FAILURE_KIND.RATE_LIMIT]: { nature: FAILURE_NATURE.TRANSIENT, basis: 'provider_rate_limited' },
+  [ASSET_FAILURE_KIND.PROVIDER_SERVER_FAILURE]: { nature: FAILURE_NATURE.TRANSIENT, basis: 'provider_server_failure' },
+  [ASSET_FAILURE_KIND.NETWORK_FAILURE]: { nature: FAILURE_NATURE.TRANSIENT, basis: 'provider_network_failure' },
+  [ASSET_FAILURE_KIND.BAD_REQUEST]: { nature: FAILURE_NATURE.DETERMINISTIC, basis: 'provider_rejected_request' },
+  [ASSET_FAILURE_KIND.UNSUPPORTED_ASSET_TYPE]: { nature: FAILURE_NATURE.DETERMINISTIC, basis: 'provider_does_not_offer_requested_asset_types' },
+  [ASSET_FAILURE_KIND.MISSING_API_KEY]: { nature: FAILURE_NATURE.INFRASTRUCTURE, basis: 'provider_api_key_missing' },
+  [ASSET_FAILURE_KIND.AUTH_FAILURE]: { nature: FAILURE_NATURE.INFRASTRUCTURE, basis: 'provider_authentication_failed' },
+  [ASSET_FAILURE_KIND.MALFORMED_RESPONSE]: { nature: FAILURE_NATURE.INFRASTRUCTURE, basis: 'provider_response_malformed' }
+});
+
+/** Copies only the known, non-secret fields of a provider failure, re-redacting free text as defense in depth. */
+function sanitizeProviderFailure(f) {
+  const text = (v) => (v == null ? null : redactSecrets(String(v)).slice(0, 200));
+  return {
+    kind: f.kind, provider: text(f.provider), query: text(f.query),
+    status: Number.isInteger(f.status) ? f.status : null,
+    hitCount: Number.isInteger(f.hitCount) ? f.hitCount : null,
+    retryable: Boolean(f.retryable), cause: text(f.cause), providerMessage: text(f.providerMessage)
+  };
 }
 
 /**
@@ -161,8 +192,21 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
     );
   }
 
+  if (isAssetAcquisitionFailure(result)) {
+    // Structured failure: EMPTY_RESULT (the provider answered with nothing)
+    // is kept distinct from every way the provider could fail to answer.
+    const providerFailure = sanitizeProviderFailure(result.failure);
+    const known = PROVIDER_FAILURE_DISPOSITION[providerFailure.kind];
+    const evidence = known ?? { nature: FAILURE_NATURE.INFRASTRUCTURE, basis: 'unrecognized_provider_failure_kind' };
+    return failWith(
+      OUTCOME.NO_ASSET_ACQUIRED, DECISION_LOG_DECISION.NO_ASSET_ACQUIRED, `provider_failure_${providerFailure.kind}`, providerFailure.kind,
+      evidence,
+      { failureKind: providerFailure.kind, providerFailure }
+    );
+  }
+
   if (!result) {
-    // A genuine provider result of "no asset" for this item's query.
+    // A bare null from a legacy provider: an unclassified "no asset" for this item's query.
     return failWith(
       OUTCOME.NO_ASSET_ACQUIRED, DECISION_LOG_DECISION.NO_ASSET_ACQUIRED, 'provider_returned_null', undefined,
       { nature: FAILURE_NATURE.TRANSIENT, basis: 'provider_returned_no_asset_for_item_query' },
