@@ -95,17 +95,29 @@ export function classifyExtractionFailure(err) {
 }
 
 /**
+ * Decides what the pipeline does with a contradiction-detector failure.
+ * A contradiction pair can never be silently skipped: the ISOLATE verdict
+ * (the local workload budget) is mapped to UNCLASSIFIED, which fails the
+ * contradiction check closed instead of dropping a pair.
+ */
+export function classifyContradictionFailure(err) {
+  const verdict = classifyProviderError(err);
+  return verdict === ISOLATE ? RESEARCH_FAILURE_NATURE.UNCLASSIFIED : verdict;
+}
+
+/**
  * Thrown inside runResearchProject to abandon the current attempt. It is
  * always caught by runResearchProject itself and converted to a normal,
  * structured result; it never escapes to the runner.
  */
 export class ResearchAttemptFailure extends Error {
-  constructor({ nature, basis, cause = null, projectId = null }) {
+  constructor({ nature, basis, cause = null, projectId = null, stage = null }) {
     super(`Research attempt failed (${nature}): ${basis}`);
     this.name = 'ResearchAttemptFailure';
     this.nature = nature;
     this.basis = basis;
     this.projectId = projectId;
+    this.stage = stage;
     if (cause) this.cause = cause;
   }
 }

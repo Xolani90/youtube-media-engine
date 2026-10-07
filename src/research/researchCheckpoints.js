@@ -10,6 +10,9 @@ import crypto from 'node:crypto';
 //   SOURCES_PERSISTED     the initial acquired sources + their decision rows
 //   EXTRACTION_PERSISTED  every claim / claim_source link / identity /
 //                         convergence / decision row of the extraction phase
+//   CONTRADICTION_PERSISTED  every contradiction relation and pair decision row
+//                         of a completed contradiction pass (detector calls
+//                         are never repeated once this exists)
 //   EXPANSION_PERSISTED   the optional evidence-expansion sources, plus the
 //                         exact expansion budget state (topFactClaimId,
 //                         expansionAttemptsUsed, remaining verifier calls)
@@ -20,6 +23,7 @@ import crypto from 'node:crypto';
 export const RESEARCH_CHECKPOINT = Object.freeze({
   SOURCES_PERSISTED: 'SOURCES_PERSISTED',
   EXTRACTION_PERSISTED: 'EXTRACTION_PERSISTED',
+  CONTRADICTION_PERSISTED: 'CONTRADICTION_PERSISTED',
   EXPANSION_PERSISTED: 'EXPANSION_PERSISTED'
 });
 

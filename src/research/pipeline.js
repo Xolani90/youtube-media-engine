@@ -19,7 +19,7 @@ import { traceAsync } from '../diagnostics/trace.js';
 import { RESEARCH_CHECKPOINT, readResearchCheckpoints, writeResearchCheckpoint } from './researchCheckpoints.js';
 import {
   ISOLATE, RESEARCH_FAILURE_NATURE, RESEARCH_STOP_REASON, ResearchAttemptFailure,
-  classifyExtractionFailure, failureBasis
+  classifyExtractionFailure, classifyContradictionFailure, failureBasis
 } from './researchFailure.js';
 import { RETRY_STAGE, FAILURE_NATURE, isQuarantined, recordFailedAttemptIfRetryable, retryFields } from '../state/StageRetryPolicy.js';
 
@@ -491,7 +491,8 @@ export async function runResearchProject(deps) {
 /**
  * ADR-0039. Persists the disposition of an abandoned attempt and returns the
  * structured result. No evidence was written by the failed attempt (extraction
- * is two-phase), so nothing is rolled back and nothing is duplicated on retry.
+ * and contradiction detection are both two-phase: detector/LLM calls first, then one
+ * synchronous transaction), so nothing is rolled back and nothing is duplicated on retry.
  *   TRANSIENT       one RESEARCH attempt is recorded (quarantine at the cap);
  *                   the project stays RESEARCHING and resumes from its checkpoint.
  *   INFRASTRUCTURE  no attempt recorded; the project stays RESEARCHING.
@@ -508,7 +509,7 @@ function handleResearchAttemptFailure(storage, failure, runId) {
       : FAILURE_NATURE.UNESTABLISHED;
   return storage.transaction(() => {
     logDecision(storage, {
-      runId, stage: RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'research_project', subjectId: projectId,
+      runId, stage: failure.stage ?? RESEARCH_STAGE.CLAIM_EXTRACTION, subjectType: 'research_project', subjectId: projectId,
       decision: 'RESEARCH_ATTEMPT_FAILED', reason: failure.basis,
       configSnapshot: { nature, stopReason }
     });
@@ -987,7 +988,13 @@ async function runResearchBody({
   // silently downgraded to NO_CONTRADICTION.
   let contradictionCheckFailed = false;
   let contradictionCheckFailureReason = null;
-  if (!detectContradiction) {
+  // Pass 40: CONTRADICTION_PERSISTED is written in the SAME transaction as the
+  // relations and pair decision rows it covers, so on resume the detector is
+  // never called again for a pass that already committed.
+  const contradictionCheckpoint = checkpoints[RESEARCH_CHECKPOINT.CONTRADICTION_PERSISTED] ?? null;
+  if (contradictionCheckpoint) {
+    // Resume: contradiction results are already committed. Skip the stage.
+  } else if (!detectContradiction) {
     logDecision(storage, {
       runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
       decision: CONTRADICTION_EXECUTION_STATE.NOT_CHECKED, reason: 'detector_not_configured'
@@ -1008,8 +1015,10 @@ async function runResearchBody({
         decision: CONTRADICTION_EXECUTION_STATE.NOT_CHECKED, reason: 'insufficient_eligible_claim_pairs'
       });
     } else {
-      let anyContradiction = false;
-      let anyUncertain = false;
+      // Phase 1 (Pass 39): detector calls only. Results are buffered in memory;
+      // nothing is written, so a transient/infrastructure failure leaves no
+      // partial contradiction evidence behind.
+      const pairResults = [];
       outer: for (let i = 0; i < eligibleClaims.length; i++) {
         for (let j = i + 1; j < eligibleClaims.length; j++) {
           const a = eligibleClaims[i];
@@ -1025,10 +1034,36 @@ async function runResearchBody({
               (o) => ({ outcome: typeof o === 'string' ? o : undefined })
             );
           } catch (err) {
+            // A transport/provider failure abandons the whole attempt (retryable
+            // or infrastructure); anything else fails the check closed.
+            const verdict = classifyContradictionFailure(err);
+            if (verdict === RESEARCH_FAILURE_NATURE.TRANSIENT || verdict === RESEARCH_FAILURE_NATURE.INFRASTRUCTURE) {
+              throw new ResearchAttemptFailure({
+                nature: verdict, basis: failureBasis(err, 'contradiction'), cause: err,
+                projectId: project.id, stage: RESEARCH_STAGE.CONTRADICTION_CHECK
+              });
+            }
             outcome = CONTRADICTION_RESULT.ERROR;
             errorReason = err?.message || 'detector threw';
           }
+          pairResults.push({ canonA, canonB, outcome, errorReason });
+          if (outcome === CONTRADICTION_RESULT.ERROR) {
+            contradictionCheckFailed = true;
+            contradictionCheckFailureReason = errorReason || 'detector_error';
+            break outer;
+          }
+        }
+      }
 
+      // Phase 2: synchronous persistence in ONE transaction. Same rows, same
+      // pair order as before. On success the CONTRADICTION_PERSISTED
+      // checkpoint commits with them; on a failed check the ERROR row, the
+      // FAILED row and the project update commit with them instead (no
+      // checkpoint, the project is terminal).
+      storage.transaction(() => {
+        let anyContradiction = false;
+        let anyUncertain = false;
+        for (const { canonA, canonB, outcome, errorReason } of pairResults) {
           if (outcome === CONTRADICTION_RESULT.CONTRADICTS) {
             recordContradiction(storage, { claimId: canonA, relatedClaimId: canonB });
             anyContradiction = true;
@@ -1045,14 +1080,11 @@ async function runResearchBody({
               resultingState: CONTRADICTION_EXECUTION_STATE.UNCERTAIN
             });
           } else if (outcome === CONTRADICTION_RESULT.ERROR) {
-            contradictionCheckFailed = true;
-            contradictionCheckFailureReason = errorReason || 'detector_error';
             logDecision(storage, {
               runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'claim', subjectId: canonA,
-              decision: CONTRADICTION_RESULT.ERROR, reason: contradictionCheckFailureReason,
+              decision: CONTRADICTION_RESULT.ERROR, reason: errorReason || 'detector_error',
               resultingState: CONTRADICTION_EXECUTION_STATE.ERROR
             });
-            break outer;
           } else {
             // NO_CONTRADICTION: do not persist a relation.
             logDecision(storage, {
@@ -1062,29 +1094,36 @@ async function runResearchBody({
             });
           }
         }
-      }
 
-      if (!contradictionCheckFailed && !anyContradiction && !anyUncertain) {
-        logDecision(storage, {
-          runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
-          decision: CONTRADICTION_EXECUTION_STATE.NO_CONTRADICTION, reason: 'all_eligible_pairs_checked_no_contradiction'
+        if (contradictionCheckFailed) {
+          // Fail-closed (§5): a detector ERROR must not let Research proceed as
+          // though contradiction checking succeeded. Evidence grading and
+          // completeness are never evaluated on a project whose contradiction
+          // check did not complete.
+          logDecision(storage, {
+            runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
+            decision: 'FAILED', reason: contradictionCheckFailureReason, resultingState: RESEARCH_PROJECT_STATUS.FAILED
+          });
+          storage.run('UPDATE research_projects SET status = ?, stop_reason = ?, completed_at = ? WHERE id = ?',
+            [RESEARCH_PROJECT_STATUS.FAILED, 'CONTRADICTION_CHECK_FAILED', new Date().toISOString(), project.id]);
+          return;
+        }
+        if (!anyContradiction && !anyUncertain) {
+          logDecision(storage, {
+            runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
+            decision: CONTRADICTION_EXECUTION_STATE.NO_CONTRADICTION, reason: 'all_eligible_pairs_checked_no_contradiction'
+          });
+        }
+        writeResearchCheckpoint(storage, {
+          researchProjectId: project.id,
+          checkpoint: RESEARCH_CHECKPOINT.CONTRADICTION_PERSISTED,
+          payload: { pairsChecked: pairResults.length, contradicts: anyContradiction, uncertain: anyUncertain }
         });
-      }
+      });
     }
   }
 
-  // Fail-closed (§5): a detector ERROR must not let Research proceed as
-  // though contradiction checking succeeded. Evidence grading and
-  // completeness are never evaluated on a project whose contradiction
-  // check did not complete — mirrors the existing SOURCE_DISCOVERY_FAILED
-  // early-return pattern above.
   if (contradictionCheckFailed) {
-    logDecision(storage, {
-      runId, stage: RESEARCH_STAGE.CONTRADICTION_CHECK, subjectType: 'research_project', subjectId: project.id,
-      decision: 'FAILED', reason: contradictionCheckFailureReason, resultingState: RESEARCH_PROJECT_STATUS.FAILED
-    });
-    storage.run('UPDATE research_projects SET status = ?, stop_reason = ?, completed_at = ? WHERE id = ?',
-      [RESEARCH_PROJECT_STATUS.FAILED, 'CONTRADICTION_CHECK_FAILED', new Date().toISOString(), project.id]);
     return {
       project: storage.get('SELECT * FROM research_projects WHERE id = ?', [project.id]),
       stopReason: 'CONTRADICTION_CHECK_FAILED',
