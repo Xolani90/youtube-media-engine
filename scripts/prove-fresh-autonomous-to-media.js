@@ -205,7 +205,12 @@ async function main() {
       const artSha = exists ? sha256File(art.artifact_path) : null;
       log(`  artifact path=${art.artifact_path} exists=${exists} size=${size}`);
       log(`  artifact checksum recorded=${art.artifact_checksum} disk=${artSha}`);
-      log(`  narration tool=espeak-ng duration=${art.narration_duration_seconds}s`);
+      const narrationProvider = JSON.parse(art.render_spec_json)?.narration?.provider ?? 'unrecorded';
+      const narrationMode = process.env.NARRATION_PROVIDER || 'espeak-ng';
+      const narrationExists = Boolean(art.narration_path) && fs.existsSync(art.narration_path);
+      const fallbacks = storage.all("SELECT reason FROM decision_log WHERE decision = 'NARRATION_PROVIDER_FALLBACK'").map((r) => r.reason);
+      log(`  narration provider=${narrationProvider} (NARRATION_PROVIDER mode=${narrationMode}) audio exists=${narrationExists} duration=${art.narration_duration_seconds}s`);
+      if (fallbacks.length) log(`  narration fallbacks: ${fallbacks.join(' || ')}`);
       let probeOk = false; let streams = [];
       try {
         const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', art.artifact_path]).toString());
@@ -226,6 +231,8 @@ async function main() {
       check('media artifact render spec references that same asset id and location', Boolean(asset) && specText.includes(asset.id) && specText.includes(JSON.stringify(asset.location).slice(1, -1)));
       check('artifact exists, non-empty, checksum matches record', exists && size > 0 && artSha === art.artifact_checksum);
       check('ffprobe sees a video and an audio stream', probeOk);
+      check('narration audio artifact exists with a positive measured duration', narrationExists && art.narration_duration_seconds > 0);
+      if (narrationMode === 'kokoro') check('narration provider that produced the MP4 is kokoro', narrationProvider === 'kokoro', `provider=${narrationProvider}`);
       check('publications = 0', pubs === 0);
     } else {
       log('  no media_artifacts row: the chain did NOT reach a rendered artifact.');

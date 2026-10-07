@@ -139,7 +139,7 @@ async function main() {
     const diskSha = exists ? sha256File(art.artifact_path) : null;
     console.log(`Artifact path=${art.artifact_path}`);
     console.log(`Artifact exists=${exists} size=${size} sha256(recorded)=${art.artifact_checksum} sha256(disk)=${diskSha}`);
-    console.log(`Narration: tool=espeak-ng path=${art.narration_path} duration=${art.narration_duration_seconds}s`);
+    console.log(`Narration: provider=${JSON.parse(art.render_spec_json)?.narration?.provider ?? 'unrecorded'} path=${art.narration_path} duration=${art.narration_duration_seconds}s`);
 
     const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', art.artifact_path]).toString());
     const streams = probe.streams.map((s) => `${s.codec_type}:${s.codec_name}${s.width ? `@${s.width}x${s.height}` : ''}`);

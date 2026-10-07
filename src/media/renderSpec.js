@@ -29,6 +29,7 @@ export function buildRenderSpec({
   contentVersion,
   narrationPath,
   narrationDurationSeconds,
+  narrationProvider = null,
   visualTiming,
   captions = [],
   width = RENDER_DEFAULTS.WIDTH,
@@ -43,7 +44,9 @@ export function buildRenderSpec({
     content_version_id: contentVersion.id,
     narration: {
       path: narrationPath,
-      duration_seconds: narrationDurationSeconds
+      duration_seconds: narrationDurationSeconds,
+      // Which engine actually produced the audio; omitted when not supplied.
+      ...(narrationProvider ? { provider: narrationProvider } : {})
     },
     visual_timing: visualTiming,
     // Media Production v1.1: deterministic burned-in captions, derived

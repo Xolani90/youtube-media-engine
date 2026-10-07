@@ -202,8 +202,16 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   const narrationPath = path.join(dir, 'narration.wav');
   const narrationTmpPath = path.join(dir, `.narration.wav.tmp-${process.pid}-${Date.now()}`);
   let narrationDurationSeconds;
+  let narrationProvider;
   try {
-    traceSync('child.espeak-ng', { textChars: narrationText?.length }, () => synthesizeNarration(narrationText, narrationTmpPath));
+    const narrationResult = traceSync('child.narration', { textChars: narrationText?.length }, () => synthesizeNarration(narrationText, narrationTmpPath));
+    narrationProvider = narrationResult?.provider ?? null;
+    if (narrationResult?.fallbackReason) {
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersion.id,
+        decision: DECISION_LOG_DECISION.NARRATION_PROVIDER_FALLBACK, reason: `kokoro_failed_used_${narrationProvider}: ${narrationResult.fallbackReason}`
+      }, nowISO);
+    }
     fs.renameSync(narrationTmpPath, narrationPath);
     narrationDurationSeconds = traceSync('child.ffprobe.narration', {}, () => probeDurationSeconds(narrationPath));
   } catch (err) {
@@ -242,7 +250,7 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   const visualTiming = computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds);
 
   // --- Render spec ---
-  const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, visualTiming, captions: captionTiming });
+  const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, narrationProvider, visualTiming, captions: captionTiming });
   const { json: renderSpecJson, checksum: renderSpecChecksumValue } = renderSpecChecksum(renderSpec);
 
   // --- Render (temporary paths; only promoted to final paths after validation) ---
@@ -460,6 +468,7 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
     contentVersion,
     narrationPath: longFormArtifact.narration_path,
     narrationDurationSeconds: endSeconds,
+    narrationProvider: sourceRenderSpec.narration?.provider ?? null,
     visualTiming: shortVisualTiming,
     captions: shortCaptionTiming,
     width: SHORT_FORM_RENDER_DEFAULTS.WIDTH,

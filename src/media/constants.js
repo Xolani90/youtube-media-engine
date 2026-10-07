@@ -25,6 +25,7 @@ export const OUTCOME = Object.freeze({
   ASSET_CHECKSUM_MISMATCH: 'ASSET_CHECKSUM_MISMATCH',
   NO_VISUAL_ASSETS: 'NO_VISUAL_ASSETS',
   NARRATION_FAILED: 'NARRATION_FAILED',
+  NARRATION_PROVIDER_FALLBACK: 'NARRATION_PROVIDER_FALLBACK',
   RENDER_FAILED: 'RENDER_FAILED',
   VALIDATION_FAILED: 'VALIDATION_FAILED',
   ALREADY_RENDERED: 'ALREADY_RENDERED',
@@ -44,6 +45,7 @@ export const DECISION_LOG_DECISION = Object.freeze({
   ASSET_CHECKSUM_MISMATCH: 'ASSET_CHECKSUM_MISMATCH',
   NO_VISUAL_ASSETS: 'NO_VISUAL_ASSETS',
   NARRATION_FAILED: 'NARRATION_FAILED',
+  NARRATION_PROVIDER_FALLBACK: 'NARRATION_PROVIDER_FALLBACK',
   RENDER_FAILED: 'RENDER_FAILED',
   VALIDATION_FAILED: 'VALIDATION_FAILED',
   RENDERED: 'RENDERED',
@@ -88,6 +90,11 @@ export const RENDER_DEFAULTS = Object.freeze({
 // engine, not assumed of TTS in general — a future neural engine would
 // NOT get this same claim without separately verifying it.
 export const NARRATION_ENGINE = 'espeak-ng';
+
+// Narration provider modes / recorded provider names. Kokoro (neural,
+// hexgrad/kokoro-js) is the preferred worker; espeak-ng stays the fallback.
+// NOTE: the bit-for-bit determinism claim above applies to espeak-ng ONLY.
+export const NARRATION_PROVIDER = Object.freeze({ ESPEAK: 'espeak-ng', KOKORO: 'kokoro', AUTO: 'auto' });
 
 // Caption/subtitle defaults for deterministic burned-in captions (Media
 // Production v1.1). A small, fixed styling configuration — not a theme

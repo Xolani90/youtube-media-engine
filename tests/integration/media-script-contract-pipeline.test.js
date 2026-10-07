@@ -211,3 +211,28 @@ test('a malformed stored script fails explicitly: nothing is narrated, captioned
     espeak.restore();
   }
 });
+// Kokoro donor pass: with NARRATION_PROVIDER=auto and a Kokoro model id that cannot
+// resolve (a genuine failure of the REAL Kokoro worker, not an injected one), the pipeline
+// must fall back to espeak-ng, still render, record which engine produced the audio in the
+// render spec, and log the fallback.
+test('Kokoro failure in auto mode: pipeline falls back to espeak-ng, renders, records provider + fallback decision', { skip: skipReason }, () => {
+  const espeak = installEspeakStandIn();
+  const prev = { p: process.env.NARRATION_PROVIDER, m: process.env.KOKORO_MODEL_ID };
+  process.env.NARRATION_PROVIDER = 'auto';
+  process.env.KOKORO_MODEL_ID = 'no-such-owner/no-such-kokoro-model';
+  try {
+    const prose = 'Fallback narration for the Kokoro pass.';
+    const storage = makeFakeStorage({ body: prose, imagePath: makeFixtureImage(tmpDir('assets')) });
+    const result = runMediaProduction({ storage, contentBriefId: 'brief-1', artifactsDir: tmpDir('media') });
+    assert.equal(result.outcome, 'RENDERED', `unexpected outcome ${result.outcome} (${result.reason ?? ''})`);
+    assert.equal(espeak.captured(), prose);
+    assert.equal(JSON.parse(result.mediaArtifact.render_spec_json).narration.provider, 'espeak-ng');
+    const fb = storage.decisions.find((d) => d.decision === 'NARRATION_PROVIDER_FALLBACK');
+    assert.ok(fb, 'fallback decision logged');
+    assert.match(fb.reason, /^kokoro_failed_used_espeak-ng: kokoro failed:/);
+  } finally {
+    if (prev.p === undefined) delete process.env.NARRATION_PROVIDER; else process.env.NARRATION_PROVIDER = prev.p;
+    if (prev.m === undefined) delete process.env.KOKORO_MODEL_ID; else process.env.KOKORO_MODEL_ID = prev.m;
+    espeak.restore();
+  }
+});
