@@ -58,6 +58,25 @@ export function hashMediaFile(artifactPath) {
   }
 }
 
+/**
+ * Short-form artifact binding. Returns the reference to bind into the PASS
+ * evidence ({short_form_media_artifact_id, artifact_checksum}) ONLY when a
+ * short-form row exists for this content_version, derives from this
+ * content_version's long-form row, and its actual file currently hashes to
+ * its persisted checksum. Otherwise null: nothing is bound, so SHORT_FORM
+ * publication is non-authorizing. This never changes any GC-00x result, so
+ * long-form authorization does not depend on the short-form artifact.
+ * @returns {{short_form_media_artifact_id: string, artifact_checksum: string} | null}
+ */
+export function collectShortFormBinding(storage, { contentVersion, media }) {
+  if (!contentVersion || !media) return null;
+  const row = storage.get('SELECT * FROM short_form_media_artifacts WHERE content_version_id = ?', [contentVersion.id]) ?? null;
+  if (!row || !nonEmptyString(row.id) || row.media_artifact_id !== media.id || !nonEmptyString(row.artifact_checksum)) return null;
+  const file = hashMediaFile(row.artifact_path);
+  if (file.status !== 'OK' || file.checksum !== row.artifact_checksum) return null;
+  return { short_form_media_artifact_id: row.id, artifact_checksum: row.artifact_checksum };
+}
+
 // ------------------------------------------------------------ GC-001
 
 export function evaluateFinalMediaIntegrity(media) {
@@ -320,14 +339,17 @@ export function buildBinding({ contentVersion, script, production, media, brief 
 }
 
 /** References only -- never copies of the referenced rows. */
-export function buildEvidence({ assets, provenance, media }) {
+export function buildEvidence({ assets, provenance, media, shortForm = null }) {
   return {
     asset_verifications: assets.map((a) => ({ asset_id: a.asset_id, asset_verification_id: a.asset_verification_id })),
     decision_log: provenance.refs,
     media: {
       media_artifact_id: media?.id ?? null,
       artifact_checksum: nonEmptyString(media?.artifact_checksum) ? media.artifact_checksum : null
-    }
+    },
+    // Present only when a verified short-form artifact is bound; absent
+    // otherwise so existing long-form evidence is byte-for-byte unchanged.
+    ...(shortForm ? { short_form: shortForm } : {})
   };
 }
 
@@ -355,6 +377,6 @@ export function evaluateGate2(storage, contentVersionId) {
     overall: aggregateGate2Results(ruleResults),
     ruleResults,
     binding: buildBinding(ctx),
-    evidence: buildEvidence({ assets, provenance, media: ctx.media })
+    evidence: buildEvidence({ assets, provenance, media: ctx.media, shortForm: collectShortFormBinding(storage, ctx) })
   };
 }

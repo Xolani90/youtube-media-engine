@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { FINAL_COMPLIANCE_STAGE, OUTCOME, DECISION_LOG_DECISION, RESULT } from './constants.js';
 import { loadGate2Policy, Gate2PolicyLoadError } from './policy.js';
 import { evaluateGate2 } from './evaluator.js';
-import { verifyGate2Pass } from './verify.js';
+import { verifyGate2Pass, isShortFormBindingCurrent } from './verify.js';
 import { Gate2ComplianceRepository } from './repository.js';
 import { canTransition, transition } from '../state/ContentStateMachine.js';
 
@@ -112,7 +112,7 @@ export function runFinalCompliance({ storage, contentBriefId, runId = null }) {
       }, nowISO);
       return { outcome: OUTCOME.POLICY_LOAD_FAILURE, reason: err.code, message: err.message };
     }
-    if (verification.authorizing) {
+    if (verification.authorizing && isShortFormBindingCurrent(storage, contentVersion.id, verification.record)) {
       return { outcome: OUTCOME.ALREADY_VALID, transitioned: false, resultingState: 'FINAL_COMPLIANCE', record: verification.record };
     }
   }

@@ -9,7 +9,7 @@ import { buildPublicationRequest } from './PublicationRequest.js';
 import { resolveProvider } from './providerRegistry.js';
 import { assertExternalActionAllowed, SideEffectDeniedError } from '../state/SideEffectAuthorization.js';
 import { canTransition, transition } from '../state/ContentStateMachine.js';
-import { verifyGate2Pass } from '../compliance/verify.js';
+import { verifyGate2Pass, verifyShortFormBinding } from '../compliance/verify.js';
 import { Gate2PolicyLoadError } from '../compliance/policy.js';
 import { InvalidPublicationMetadataError } from './metadataValidation.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
@@ -480,6 +480,28 @@ export async function runPublication({
       decision: DECISION_LOG_DECISION.STRUCTURAL_FAILURE, reason: err.message
     }, nowISO);
     return { outcome: OUTCOME.STRUCTURAL_FAILURE, reason: err.message, publication: null };
+  }
+  // --- 6.0. SHORT_FORM artifact binding. Gate 2 PASS verification above covers
+  // the long-form artifact; a SHORT_FORM provider uploads a different file, so
+  // that exact file (request.mediaFilePath, the path the adapter will receive)
+  // must be the artifact bound into the PASS and must re-hash to the bound
+  // checksum. Runs before any claim, thumbnail work or adapter call; failure
+  // leaves nothing claimed and the adapter is never reached. ---
+  if (target === 'SHORT_FORM') {
+    const sfBinding = verifyShortFormBinding(storage, {
+      contentVersionId: contentVersion.id,
+      record: gate2.record,
+      resolvedShortFormId: mediaArtifact.short_form_media_artifact_id ?? null,
+      mediaFilePath: request.mediaFilePath
+    });
+    if (!sfBinding.authorizing) {
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersion.id,
+        decision: DECISION_LOG_DECISION.GATE2_NOT_AUTHORIZING,
+        reason: `gate2_short_form_binding_non_authorizing_${sfBinding.reason}`
+      }, nowISO);
+      return { outcome: OUTCOME.GATE2_NOT_AUTHORIZING, reason: sfBinding.reason, publication: null };
+    }
   }
   // Phase 2B: best-effort thumbnail generation, from the SAME
   // already-normalized title just placed on `request` -- never a

@@ -82,6 +82,8 @@ export function resolveMediaForPublication(storage, contentBriefId, { target = '
 
   const shortFormMediaArtifact = {
     ...mediaArtifact,
+    // Identity of the short-form row actually resolved (id stays the long-form id).
+    short_form_media_artifact_id: shortFormArtifact.id,
     artifact_path: shortFormArtifact.artifact_path,
     artifact_checksum: shortFormArtifact.artifact_checksum,
     duration_seconds: shortFormArtifact.duration_seconds,

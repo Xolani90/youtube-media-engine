@@ -1,8 +1,10 @@
+import path from 'node:path';
 import { Gate2ComplianceRepository } from './repository.js';
 import { loadGate2Policy } from './policy.js';
 import { NON_AUTHORIZING, RESULT } from './constants.js';
 import {
-  resolveGate2Context, hashMediaFile, collectAssetVerifications, collectProvenance, metadataRepresentation
+  resolveGate2Context, hashMediaFile, collectAssetVerifications, collectProvenance, metadataRepresentation,
+  collectShortFormBinding
 } from './evaluator.js';
 
 /**
@@ -156,6 +158,75 @@ export function verifyGate2Pass(storage, contentVersionId) {
   }
 
   return { authorizing: true, record };
+}
+
+function parseBoundShortForm(record) {
+  try {
+    const sf = JSON.parse(record.evidence_json)?.short_form;
+    if (sf && typeof sf.short_form_media_artifact_id === 'string' && sf.short_form_media_artifact_id
+        && typeof sf.artifact_checksum === 'string' && sf.artifact_checksum) return sf;
+  } catch { /* unparseable evidence is simply "not bound" */ }
+  return null;
+}
+
+/**
+ * Publication-boundary check for SHORT_FORM providers: the file about to be
+ * uploaded must be exactly the short-form artifact bound into the Gate 2 PASS.
+ * Call AFTER verifyGate2Pass() returned authorizing, passing its `record`.
+ * Read-only. Checks, in order: a binding exists; the bound row still exists
+ * under the same id for this content_version and derives from this
+ * content_version's long-form row; it is the artifact publication resolved;
+ * its persisted checksum equals the bound checksum; the path to upload IS that
+ * row's path; the actual file at that path exists and re-hashes to the bound
+ * checksum.
+ *
+ * @param {object} storage
+ * @param {object} args
+ * @param {string} args.contentVersionId
+ * @param {object} args.record - the authorizing Gate 2 record from verifyGate2Pass
+ * @param {string|null} args.resolvedShortFormId - short-form row id publication resolved
+ * @param {string} args.mediaFilePath - the exact path the adapter will receive
+ * @returns {{authorizing: true} | {authorizing: false, reason: string, detail?: string}}
+ */
+export function verifyShortFormBinding(storage, { contentVersionId, record, resolvedShortFormId, mediaFilePath }) {
+  const fail = (reason, detail) => ({ authorizing: false, reason, detail });
+  const bound = parseBoundShortForm(record);
+  if (!bound) return fail(NON_AUTHORIZING.SHORT_FORM_BINDING_ABSENT);
+
+  const row = storage.get('SELECT * FROM short_form_media_artifacts WHERE content_version_id = ?', [contentVersionId]);
+  if (!row) return fail(NON_AUTHORIZING.SHORT_FORM_ARTIFACT_MISSING);
+  const longForm = storage.get('SELECT id FROM media_artifacts WHERE content_version_id = ?', [contentVersionId]);
+  if (row.id !== bound.short_form_media_artifact_id || resolvedShortFormId !== bound.short_form_media_artifact_id
+      || !longForm || row.media_artifact_id !== longForm.id) {
+    return fail(NON_AUTHORIZING.SHORT_FORM_IDENTITY_MISMATCH);
+  }
+  if (typeof row.artifact_checksum !== 'string' || row.artifact_checksum !== bound.artifact_checksum) {
+    return fail(NON_AUTHORIZING.SHORT_FORM_CHECKSUM_MISMATCH);
+  }
+  if (typeof mediaFilePath !== 'string' || !mediaFilePath || typeof row.artifact_path !== 'string'
+      || path.resolve(mediaFilePath) !== path.resolve(row.artifact_path)) {
+    return fail(NON_AUTHORIZING.SHORT_FORM_PATH_MISMATCH);
+  }
+  const file = hashMediaFile(mediaFilePath);
+  if (file.status === 'MISSING') return fail(NON_AUTHORIZING.SHORT_FORM_FILE_MISSING);
+  if (file.status === 'UNREADABLE') return fail(NON_AUTHORIZING.SHORT_FORM_FILE_UNREADABLE);
+  if (file.checksum !== bound.artifact_checksum) return fail(NON_AUTHORIZING.SHORT_FORM_FILE_CHECKSUM_MISMATCH);
+  return { authorizing: true };
+}
+
+/**
+ * True when the PASS record's short-form binding equals what Gate 2 would bind
+ * right now (both absent counts as equal). The final-compliance stage uses this
+ * so a PASS made before the short-form existed (or before it changed) is
+ * re-evaluated instead of reported ALREADY_VALID. Read-only.
+ */
+export function isShortFormBindingCurrent(storage, contentVersionId, record) {
+  const ctx = resolveGate2Context(storage, contentVersionId);
+  const current = collectShortFormBinding(storage, ctx);
+  const bound = parseBoundShortForm(record);
+  return JSON.stringify(current ?? null) === JSON.stringify(bound ? {
+    short_form_media_artifact_id: bound.short_form_media_artifact_id, artifact_checksum: bound.artifact_checksum
+  } : null);
 }
 
 export default verifyGate2Pass;
