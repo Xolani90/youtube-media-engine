@@ -96,3 +96,49 @@ test('C. transcript that does not correspond to the narration is rejected', () =
   assert.ok(textCorrespondence('this is a short narration script', narration) >= 0.6);
   assert.ok(textCorrespondence('minor asr slip: This is a short narration scripts for the test video', narration) >= 0.8);
 });
+
+test('D. misheard words: script text is shown, ASR timing is kept', () => {
+  const script = 'Welcome to the rehearsal. Rights verified today.';
+  const segs = [seg(0.2, 3, 'Welcome to the reversal.'), seg(3.5, 6, 'Right, verified today.')];
+  const caps = buildCaptionsFromAsr(segs, DUR, { narrationText: script });
+  assert.equal(caps.map((c) => c.text).join(' '), script);
+  assert.ok(!caps.some((c) => /reversal/.test(c.text)));
+  assert.equal(caps[0].start_seconds, 0.2);
+  const last = caps.at(-1);
+  assert.equal(Math.round((last.start_seconds + last.duration_seconds) * 1000), 6000);
+});
+
+test('E. dropped and added words: captions stay in-window, ordered, non-overlapping', () => {
+  const script = 'One two three four five. Six seven eight nine ten.';
+  const segs = [seg(0, 2, 'One two three four five extra words added.'), seg(2.5, 5, 'Six seven.')];
+  const caps = buildCaptionsFromAsr(segs, DUR, { narrationText: script });
+  let prevEnd = 0;
+  for (const c of caps) {
+    const end = c.start_seconds + c.duration_seconds;
+    assert.ok(c.start_seconds >= prevEnd - 1e-9);
+    assert.ok((c.start_seconds >= 0 && end <= 2 + 1e-9) || (c.start_seconds >= 2.5 - 1e-9 && end <= 5 + 1e-9));
+    prevEnd = end;
+  }
+  assert.equal(caps.map((c) => c.text).join(' '), script);
+});
+
+test('F. silence gaps stay gaps with script text', () => {
+  const caps = buildCaptionsFromAsr([seg(0, 2, 'First.'), seg(6, 8, 'Second.')], DUR, { narrationText: 'First. Second.' });
+  for (const c of caps) {
+    const end = c.start_seconds + c.duration_seconds;
+    assert.ok(end <= 2 + 1e-9 || c.start_seconds >= 6 - 1e-9, 'no caption inside the 2-6s silence');
+  }
+});
+
+test('G. correspondence is judged on whisper output, not the script', () => {
+  assert.throws(
+    () => buildCaptionsFromAsr([seg(0, 3, 'Completely unrelated words here.')], DUR, { narrationText: 'This is a short narration script for the test video.' }),
+    (e) => e instanceof CaptionWorkerError && e.reason === 'CAPTION_TEXT_MISMATCH');
+});
+
+test('H. textSource "asr" keeps whisper text', () => {
+  const script = 'The rights verified report is ready for review today.';
+  const heard = 'The right, verified report is ready for review today.';
+  const caps = buildCaptionsFromAsr([seg(0, 3, heard)], DUR, { narrationText: script, textSource: 'asr' });
+  assert.equal(caps.map((c) => c.text).join(' '), heard);
+});

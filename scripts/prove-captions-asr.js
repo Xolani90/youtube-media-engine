@@ -61,19 +61,23 @@ async function main() {
   const ordered = parsed.every((c, i) => c.end >= c.start && c.start >= (i ? parsed[i - 1].end - 0.001 : 0));
   const inside = parsed.every((c) => c.start >= 0 && c.end <= duration + 0.001);
   const roundTrip = parsed.length === captions.length && parsed.every((c, i) => c.text === captions[i].text && Math.abs(c.start - captions[i].start_seconds) < 0.002);
-  const recovery = textCorrespondence(captions.map((c) => c.text).join(' '), TEXT);
+  const asrJoined = asr.segments.map((s) => s.text).join(' ').trim();
+  const captionJoined = captions.map((c) => c.text).join(' ');
+  const recovery = textCorrespondence(asrJoined, TEXT);
 
   log('--- evidence ---');
   log(`narration provider: ${narration.provider}; audio duration: ${duration.toFixed(3)}s`);
   log(`ASR provider: ${asr.provider} (model ${asr.model}, language ${asr.language})`);
   log(`transcript: ${JSON.stringify(asr.segments.map((s) => s.text).join(' '))}`);
   log(`ASR segments: ${asr.segments.length}; captions: ${captions.length}`);
+  log(`ASR text differs from script (whisper mis-transcribed): ${asrJoined.replace(/\s+/g, ' ') !== TEXT ? 'YES' : 'NO'}`);
+  log(`caption text equals script: ${captionJoined === TEXT ? 'YES' : 'NO'}`);
   log(`transcript artifact: ${transcript.path} sha256 ${transcript.checksum}`);
   log(`caption artifact: ${srtPath} sha256 ${srtSum}`);
   captions.forEach((c, i) => log(`  #${i + 1} ${c.start_seconds.toFixed(3)} -> ${(c.start_seconds + c.duration_seconds).toFixed(3)}  ${c.text}`));
   log(`timestamps ordered, end>=start: ${ordered ? 'YES' : 'NO'}; inside audio duration: ${inside ? 'YES' : 'NO'}`);
   log(`SRT round-trips to the caption timing: ${roundTrip ? 'YES' : 'NO'}`);
-  log(`spoken-text recovery: ${(recovery * 100).toFixed(0)}% of narration words`);
+  log(`ASR recovery of script words: ${(recovery * 100).toFixed(0)}% of narration words`);
   log('production-path consumption: the same {text,start_seconds,duration_seconds} array is what runMediaProduction puts in render_spec.captions and burns in via writeSrtFile; proven end-to-end by tests/integration/media-asr-pipeline.test.js ("Captions: corresponding ASR segments...") and by the rehearsal below.');
 
   if (!ordered || !inside || !roundTrip || recovery < 0.6) { log('RESULT: FAIL'); return 1; }

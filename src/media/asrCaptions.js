@@ -7,11 +7,13 @@ import { CAPTION_DEFAULTS } from './constants.js';
  * ({ text, start_seconds, duration_seconds }), so render spec, SRT burn-in,
  * visual sequencing and short-form trimming consume it unchanged.
  *
- * Timestamps are the real segment timestamps. A segment longer than
- * maxLength is split at word boundaries (segmentCaptions) and its
- * [start, end] window is shared out by character count -- the only
- * estimated part, and only inside one real segment. Silence between
- * segments stays a gap (no caption shown), it is never papered over.
+ * Timing comes from the real ASR segment windows. Caption TEXT is the
+ * narration script when opts.narrationText is given (default), so misheard
+ * words never reach the subtitles; with opts.textSource === 'asr' (or no
+ * narrationText) the text is whisper's own. Script chunks are assigned to
+ * windows by character position and tiled inside each window by character
+ * share -- the only estimated part, and only inside one real segment.
+ * Silence between segments stays a gap, it is never papered over.
  *
  * Pure and deterministic. Throws CaptionWorkerError on any integrity
  * problem; the pipeline then keeps the text-estimated fallback.
@@ -54,7 +56,8 @@ export function textCorrespondence(transcriptText, expectedText) {
  * @param {Array<{start:number,end:number,text:string}>} segments
  * @param {number} durationSeconds real narration duration
  * @param {object} [opts]
- * @param {string} [opts.narrationText] text the narrator was given; when set, transcript must correspond to it
+ * @param {string} [opts.narrationText] text the narrator was given; transcript must correspond to it, and it is the caption text unless textSource is 'asr'
+ * @param {'script'|'asr'} [opts.textSource] which words to show (default 'script' when narrationText is given)
  * @param {number} [opts.maxLength]
  * @returns {Array<{text:string,start_seconds:number,duration_seconds:number}>}
  */
@@ -80,26 +83,70 @@ export function buildCaptionsFromAsr(segments, durationSeconds, opts = {}) {
     prevEnd = s.end;
   });
 
-  const captions = [];
+  // Segments that actually carry speech (blank ones leave a gap).
+  const windows = [];
   segments.forEach((s, i) => {
-    const chunks = segmentCaptions(s.text, maxLength);
-    if (chunks.length === 0) return; // silent / blank segment: nothing to show
+    if (segmentCaptions(s.text, maxLength).length === 0) return;
     // Clamp the small rounding overshoot whisper.cpp may leave past the real end.
     const start = Math.min(s.start, durationSeconds);
     const end = Math.min(s.end, durationSeconds);
-    const span = end - start;
-    if (!(span > 0)) bad(`segment ${i} has text but no duration`);
+    if (!(end - start > 0)) bad(`segment ${i} has text but no duration`);
+    windows.push({ start, end, weight: s.text.trim().length, asrText: s.text });
+  });
+  if (windows.length === 0) bad('transcript text is empty');
+
+  // Correspondence is always judged on what whisper heard vs the script.
+  if (typeof opts.narrationText === 'string') {
+    const score = textCorrespondence(windows.map((w) => w.asrText).join(' '), opts.narrationText);
+    if (score < MIN_TEXT_CORRESPONDENCE) {
+      throw new CaptionWorkerError('CAPTION_TEXT_MISMATCH', `transcript matches only ${(score * 100).toFixed(0)}% of narration words`);
+    }
+  }
+
+  // Which text to show: the script (default when given) or whisper's own words.
+  const scriptChunks = typeof opts.narrationText === 'string' && opts.textSource !== 'asr'
+    ? segmentCaptions(opts.narrationText, maxLength)
+    : [];
+  const useScript = scriptChunks.length > 0;
+
+  // Tile one window with chunks, sharing the window by character count.
+  const captions = [];
+  const tile = (win, chunks) => {
     const totalChars = chunks.reduce((n, c) => n + c.length, 0);
-    let cursor = start;
+    const span = win.end - win.start;
+    let cursor = win.start;
     chunks.forEach((text, j) => {
       const isLast = j === chunks.length - 1;
       const chunkStart = round3(cursor);
-      const chunkEnd = isLast ? round3(end) : round3(cursor + span * (text.length / totalChars));
+      const chunkEnd = isLast ? round3(win.end) : round3(cursor + span * (text.length / totalChars));
       const dur = Math.max(MIN_CAPTION_DURATION_SECONDS, round3(chunkEnd - chunkStart));
       captions.push({ text, start_seconds: chunkStart, duration_seconds: dur });
       cursor = chunkStart + dur;
     });
-  });
+  };
+
+  if (!useScript) {
+    windows.forEach((w) => tile(w, segmentCaptions(w.asrText, maxLength)));
+  } else {
+    // Assign each script chunk to a window by character position: the chunk's
+    // midpoint in the script, scaled onto whisper's cumulative character axis.
+    const totalAsr = windows.reduce((n, w) => n + w.weight, 0);
+    const totalScript = scriptChunks.reduce((n, c) => n + c.length, 0);
+    const groups = windows.map(() => []);
+    let before = 0;
+    for (const chunk of scriptChunks) {
+      const mid = ((before + chunk.length / 2) / totalScript) * totalAsr;
+      before += chunk.length;
+      let acc = 0;
+      let idx = windows.length - 1;
+      for (let k = 0; k < windows.length; k++) {
+        acc += windows[k].weight;
+        if (mid < acc) { idx = k; break; }
+      }
+      groups[idx].push(chunk);
+    }
+    windows.forEach((w, k) => { if (groups[k].length) tile(w, groups[k]); });
+  }
 
   if (captions.length === 0) bad('transcript text is empty');
 
@@ -110,13 +157,6 @@ export function buildCaptionsFromAsr(segments, durationSeconds, opts = {}) {
     if (c.start_seconds < lastEnd - 0.001) bad('caption output overlaps');
     if (end > durationSeconds + 0.001) bad('caption output beyond audio duration');
     lastEnd = end;
-  }
-
-  if (typeof opts.narrationText === 'string') {
-    const score = textCorrespondence(captions.map((c) => c.text).join(' '), opts.narrationText);
-    if (score < MIN_TEXT_CORRESPONDENCE) {
-      throw new CaptionWorkerError('CAPTION_TEXT_MISMATCH', `transcript matches only ${(score * 100).toFixed(0)}% of narration words`);
-    }
   }
   return captions;
 }
