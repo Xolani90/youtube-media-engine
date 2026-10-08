@@ -9,7 +9,7 @@ import { runQualityGate } from '../quality-gate/pipeline.js';
 import { runProduction } from '../production/pipeline.js';
 import { runAssetProvisioning } from '../asset-provisioning/pipeline.js';
 import { runRightsVerification } from '../rights-verification/pipeline.js';
-import { runMediaProduction } from '../media/pipeline.js';
+import { runMediaProduction, runShortFormProduction } from '../media/pipeline.js';
 import { runFinalCompliance } from '../compliance/pipeline.js';
 import { runPublication } from '../publication/pipeline.js';
 import { PROVIDER_REGISTRY } from '../publication/providerRegistry.js';
@@ -34,6 +34,7 @@ import {
   selectEligibleAssetProvisioning,
   selectEligibleRightsVerification,
   selectEligibleMediaProductions,
+  selectEligibleShortFormProductions,
   selectEligibleFinalCompliance,
   selectEligiblePublications
 } from './workSelection.js';
@@ -237,6 +238,27 @@ function buildStages(deps, startedMode) {
         })
     },
     {
+      name: 'short-form-production',
+      // Derives the SHORT_FORM artifact that youtube_shorts / tiktok /
+      // facebook_reels publication requires (resolveMediaForPublication,
+      // target SHORT_FORM). Calls the existing, unmodified
+      // runShortFormProduction; never transitions content_versions.state.
+      select: selectEligibleShortFormProductions,
+      isSuccess: (result) =>
+        result?.outcome === MEDIA_OUTCOME.RENDERED || result?.outcome === MEDIA_OUTCOME.ALREADY_RENDERED,
+      // Run-local pacing only (in-memory, this invocation): a failed render or
+      // validation is not repeated on every sweep. Records no durable attempt.
+      consumedRetryAttempt: (result) =>
+        result?.outcome === MEDIA_OUTCOME.RENDER_FAILED || result?.outcome === MEDIA_OUTCOME.VALIDATION_FAILED,
+      run: (item, runId) =>
+        (fn['short-form-production'] ?? runShortFormProduction)({
+          storage: deps.storage,
+          contentBriefId: item.contentBriefId,
+          artifactsDir: deps.media?.artifactsDir,
+          runId
+        })
+    },
+    {
       name: 'final-compliance',
       // ADR-0032 (Gate 2). Never publishes and never touches authorization:
       // it only evaluates Gate 2, persists the compliance record and performs
@@ -422,7 +444,7 @@ function eligibilitySignature(sweepEligible) {
  * @param {string} [deps.mode] - 'SIMULATION' | 'LIVE', forwarded to SystemRunRecorder.start(); defaults to config.runMode there
  * @param {SystemRunRecorder} [deps.systemRunRecorder] - injectable for tests; defaults to `new SystemRunRecorder(deps.storage)`
  * @param {(stageName: string, item: object, error: Error) => void} [deps.onStageError] - if provided, a thrown stage error is reported here and swallowed so the sweep continues with the next item; without it, a thrown error aborts the whole run (the system_runs record is marked FAILED) and is rethrown to the caller
- * @param {object} [deps.stageFns] - test-only per-stage function substitutes, keyed by stage name ('research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production', 'asset-provisioning', 'rights-verification', 'media-production', 'final-compliance', 'publication'). `stageFns.publication` substitutes runPublication for every publication sub-stage: with a single resolved provider the one stage is literally named 'publication'; with a multi-provider fan-out each dynamically-named sub-stage (`publication:<provider>`) still resolves its run function through this same `stageFns.publication` key (not a per-provider key) and is called with that sub-stage's own `provider` argument, so a substitute needing per-provider behavior must branch on the `provider` it receives. Never used in normal operation.
+ * @param {object} [deps.stageFns] - test-only per-stage function substitutes, keyed by stage name ('research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production', 'asset-provisioning', 'rights-verification', 'media-production', 'short-form-production', 'final-compliance', 'publication'). `stageFns.publication` substitutes runPublication for every publication sub-stage: with a single resolved provider the one stage is literally named 'publication'; with a multi-provider fan-out each dynamically-named sub-stage (`publication:<provider>`) still resolves its run function through this same `stageFns.publication` key (not a per-provider key) and is called with that sub-stage's own `provider` argument, so a substitute needing per-provider behavior must branch on the `provider` it receives. Never used in normal operation.
  * @returns {Promise<{ runId: string, mode: string, sweeps: number, processed: Array<{ stage: string, count: number }>, stopReason: 'no_work' | 'no_progress' }>}
  */
 export async function runAutonomousOperation(deps) {

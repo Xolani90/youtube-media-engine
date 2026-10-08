@@ -1413,3 +1413,52 @@ test('WS2-A: Rights Verification PROCESSED is success; its normal non-success ou
     cleanup(storage, dbPath);
   }
 });
+
+test('short-form-production: dispatched after media-production for a long-form artifact with no short-form row, and not re-selected once the row exists', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+
+  const seeded = seedChainAtState(storage, 'PRODUCED');
+  const productionId = crypto.randomUUID();
+  const mediaArtifactId = crypto.randomUUID();
+  storage.run(
+    `INSERT INTO productions (id, content_version_id, script_id, artifact_type, artifact_path, artifact_checksum, manifest_json, created_at)
+     VALUES (?, ?, ?, 'production_manifest_v1', '/tmp/manifest.json', 'deadbeef', '{}', ?)`,
+    [productionId, seeded.contentVersionId, seeded.scriptId, nowISO()]
+  );
+  storage.run(
+    `INSERT INTO media_artifacts (id, production_id, content_version_id, render_spec_json, render_spec_checksum, narration_path,
+       narration_duration_seconds, artifact_path, artifact_checksum, duration_seconds, width, height, video_codec, audio_codec, created_at)
+     VALUES (?, ?, ?, '{}', 'c', '/tmp/n.wav', 1, '/tmp/a.mp4', 'c', 1, 1920, 1080, 'h264', 'aac', ?)`,
+    [mediaArtifactId, productionId, seeded.contentVersionId, nowISO()]
+  );
+
+  const shortFormCalls = [];
+  await runAutonomousOperation({
+    storage,
+    stageFns: {
+      'asset-provisioning': async () => ({}),
+      'rights-verification': async () => ({}),
+      'media-production': async () => ({ outcome: 'ALREADY_RENDERED' }),
+      'final-compliance': async () => ({}),
+      publication: async () => ({}),
+      'short-form-production': async ({ storage: s, contentBriefId }) => {
+        shortFormCalls.push(contentBriefId);
+        const cv = s.get('SELECT * FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+        s.run(
+          `INSERT INTO short_form_media_artifacts (id, media_artifact_id, content_version_id, segment_start_seconds, segment_end_seconds,
+             render_spec_json, render_spec_checksum, artifact_path, artifact_checksum, duration_seconds, width, height, video_codec, audio_codec, created_at)
+           VALUES (?, ?, ?, 0, 1, '{}', 'c', '/tmp/s.mp4', 'c', 1, 1080, 1920, 'h264', 'aac', ?)`,
+          [crypto.randomUUID(), mediaArtifactId, cv.id, nowISO()]
+        );
+        return { outcome: 'RENDERED' };
+      }
+    }
+  });
+
+  assert.deepEqual(shortFormCalls, [seeded.contentBriefId], 'dispatched exactly once; not re-selected after its short-form row exists');
+  const cv = storage.get('SELECT * FROM content_versions WHERE id = ?', [seeded.contentVersionId]);
+  assert.equal(cv.state, 'PRODUCED', 'short-form-production never transitions content_versions.state');
+
+  cleanup(storage, dbPath);
+});

@@ -275,6 +275,23 @@ export function selectEligibleRightsVerification(storage) {
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
 
+// Short-form derivative production: the selection domain is PRODUCED or
+// FINAL_COMPLIANCE items that already have a long-form media artifact but no
+// short-form derivative yet. This is an efficiency pre-filter ONLY;
+// runShortFormProduction (src/media/pipeline.js) is the sole authority and
+// is itself idempotent (ALREADY_RENDERED when the row exists). It never
+// transitions content_versions.state.
+export function selectEligibleShortFormProductions(storage) {
+  return storage
+    .all(
+      `SELECT content_brief_id FROM content_versions
+       WHERE state IN ('PRODUCED', 'FINAL_COMPLIANCE')
+       AND id IN (SELECT content_version_id FROM media_artifacts)
+       AND id NOT IN (SELECT content_version_id FROM short_form_media_artifacts)`
+    )
+    .map((row) => ({ contentBriefId: row.content_brief_id }));
+}
+
 // ADR-0032 (Gate 2 / FINAL_COMPLIANCE): the final-compliance stage's selection
 // domain -- (A) PRODUCED items that have a media artifact, and (B)
 // FINAL_COMPLIANCE items (whose PASS may have gone stale). This is an

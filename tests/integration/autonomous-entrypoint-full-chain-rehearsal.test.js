@@ -69,11 +69,13 @@ const SOURCE_URL = 'https://acme.com/press-release';
 const CLAIM_TEXT = 'Acme reported one billion dollars in Q3 revenue.';
 const WORKING_TITLE = 'Entrypoint Rehearsal Title';
 const ACTION = (contentVersionId) => `publish:youtube:${contentVersionId}`;
-// ADR-0032: the canonical stage sequence is twelve stages -- final-compliance
-// (Gate 2) sits between media-production and publication.
+// ADR-0032: final-compliance (Gate 2) sits between media-production and
+// publication. short-form-production (derives the SHORT_FORM artifact that
+// youtube_shorts/tiktok/facebook_reels publication requires) sits between
+// media-production and final-compliance: thirteen stages.
 const STAGES = ['research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate',
   'production', 'asset-provisioning', 'rights-verification', 'media-production',
-  'final-compliance', 'publication'];
+  'short-form-production', 'final-compliance', 'publication'];
 
 // ---------------------------------------------------------------- narrator
 let restoreNarrator = () => {};
@@ -351,8 +353,8 @@ function assertDiscoveryExecuted(h, result) {
 
 function assertAllTwelveStagesReachedPublicationBoundary(h, result) {
   const p = processedOf(result.runner);
-  assert.deepEqual(Object.keys(p).sort(), [...STAGES].sort(), 'all twelve real stages were dispatched');
-  assert.equal(STAGES.length, 12, 'the canonical ADR-0032 sequence is twelve stages');
+  assert.deepEqual(Object.keys(p).sort(), [...STAGES].sort(), 'all thirteen real stages were dispatched');
+  assert.equal(STAGES.length, 13, 'the canonical stage sequence is thirteen stages');
   for (const stage of ['research', 'brief', 'script', 'fact-check', 'originality', 'quality-gate', 'production']) {
     assert.equal(p[stage], 1, `${stage} ran exactly once`);
   }
