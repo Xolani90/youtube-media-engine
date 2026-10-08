@@ -142,3 +142,22 @@ test('H. textSource "asr" keeps whisper text', () => {
   const caps = buildCaptionsFromAsr([seg(0, 3, heard)], DUR, { narrationText: script, textSource: 'asr' });
   assert.equal(caps.map((c) => c.text).join(' '), heard);
 });
+
+test('I. one script sentence split across two whisper segments: each window keeps its real timing', () => {
+  const script = 'This is a short narration script for the test video.';
+  const caps = buildCaptionsFromAsr(
+    [{ start: 0.3, end: 1.5, text: 'This is a short narration' }, { start: 1.7, end: 2.5, text: 'script for the test video.' }],
+    3, { narrationText: script });
+  assert.deepEqual(caps.map((c) => [c.text, c.start_seconds, c.duration_seconds]),
+    [['This is a short narration', 0.3, 1.2], ['script for the test video.', 1.7, 0.8]]);
+  assert.equal(caps.map((c) => c.text).join(' '), script);
+});
+
+test('J. a script sentence spanning segments never loses or reorders words', () => {
+  const script = 'Alpha beta gamma delta epsilon zeta eta theta.';
+  const caps = buildCaptionsFromAsr(
+    [{ start: 0, end: 1, text: 'Alpha beta gamma' }, { start: 1, end: 2, text: 'delta epsilon' }, { start: 2.5, end: 3, text: 'zeta eta theta.' }],
+    3, { narrationText: script });
+  assert.equal(caps.map((c) => c.text).join(' '), script);
+  assert.equal(caps[0].start_seconds, 0);
+});

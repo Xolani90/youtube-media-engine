@@ -128,24 +128,32 @@ export function buildCaptionsFromAsr(segments, durationSeconds, opts = {}) {
   if (!useScript) {
     windows.forEach((w) => tile(w, segmentCaptions(w.asrText, maxLength)));
   } else {
-    // Assign each script chunk to a window by character position: the chunk's
-    // midpoint in the script, scaled onto whisper's cumulative character axis.
+    // Assign each script WORD to a window by character position (word midpoint
+    // in the script, scaled onto whisper's cumulative character axis). Word-level
+    // assignment means a script sentence that whisper split across several
+    // segments is spread over all of those windows instead of landing in one.
+    // Each window's slice is re-chunked and tiled inside that real window.
+    const scriptWords = opts.narrationText.split(/\s+/).filter(Boolean);
     const totalAsr = windows.reduce((n, w) => n + w.weight, 0);
-    const totalScript = scriptChunks.reduce((n, c) => n + c.length, 0);
+    const totalScript = scriptWords.reduce((n, w) => n + w.length + 1, 0);
     const groups = windows.map(() => []);
     let before = 0;
-    for (const chunk of scriptChunks) {
-      const mid = ((before + chunk.length / 2) / totalScript) * totalAsr;
-      before += chunk.length;
+    for (const word of scriptWords) {
+      const mid = ((before + word.length / 2) / totalScript) * totalAsr;
+      before += word.length + 1;
       let acc = 0;
       let idx = windows.length - 1;
       for (let k = 0; k < windows.length; k++) {
         acc += windows[k].weight;
         if (mid < acc) { idx = k; break; }
       }
-      groups[idx].push(chunk);
+      groups[idx].push(word);
     }
-    windows.forEach((w, k) => { if (groups[k].length) tile(w, groups[k]); });
+    windows.forEach((w, k) => {
+      if (groups[k].length === 0) return;
+      const chunks = segmentCaptions(groups[k].join(' '), maxLength);
+      if (chunks.length) tile(w, chunks);
+    });
   }
 
   if (captions.length === 0) bad('transcript text is empty');
