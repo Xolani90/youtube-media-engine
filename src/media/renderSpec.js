@@ -30,6 +30,7 @@ export function buildRenderSpec({
   narrationPath,
   narrationDurationSeconds,
   narrationProvider = null,
+  music = null,
   visualTiming,
   captions = [],
   width = RENDER_DEFAULTS.WIDTH,
@@ -48,6 +49,10 @@ export function buildRenderSpec({
       // Which engine actually produced the audio; omitted when not supplied.
       ...(narrationProvider ? { provider: narrationProvider } : {})
     },
+    // Background music + ducking parameters (audioMix.js). Present ONLY when a
+    // rights-cleared music asset is mixed, so a narration-only spec (and its
+    // checksum) is byte-identical to before. Covered by render_spec_checksum.
+    ...(music ? { music } : {}),
     visual_timing: visualTiming,
     // Media Production v1.1: deterministic burned-in captions, derived
     // from script.body. Additive to the render_spec_type shape — an

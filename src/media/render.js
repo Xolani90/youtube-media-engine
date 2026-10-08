@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CAPTION_DEFAULTS } from './constants.js';
+import { buildMusicMixFilter } from './audioMix.js';
 
 /**
  * Renders a silent slideslow video from an ordered visual timeline
@@ -136,7 +137,39 @@ export const LOUDNORM_OUTPUT_SAMPLE_RATE = 48000;
  * to sum exactly to the narration duration, this is a safety bound, not
  * the mechanism that aligns them.
  */
-export function muxNarration({ silentVideoPath, narrationPath, audioEncoder, outputPath, normalizeLoudness = true }) {
+export function muxNarration({ silentVideoPath, narrationPath, audioEncoder, outputPath, normalizeLoudness = true, music = null }) {
+  // Optional background music (audioMix.js): `music` is
+  // { path, narrationDurationSeconds, params }. Absent -> the code below is
+  // exactly the original narration-only command. Present -> ONE filter graph
+  // ducks the music under the narration, mixes, and then applies the SAME
+  // loudnorm targets to the mix (normalization stays the last audio step).
+  if (music) {
+    const filter = buildMusicMixFilter({
+      params: music.params,
+      narrationDurationSeconds: music.narrationDurationSeconds,
+      sampleRate: LOUDNORM_OUTPUT_SAMPLE_RATE,
+      loudnorm: normalizeLoudness ? LOUDNORM_TARGETS : null
+    });
+    execFileSync(
+      'ffmpeg',
+      [
+        '-y',
+        '-i', silentVideoPath,
+        '-i', narrationPath,
+        '-stream_loop', '-1', '-i', music.path,
+        '-filter_complex', filter,
+        '-map', '0:v:0', '-map', '[aout]',
+        '-c:v', 'copy',
+        '-ar', String(LOUDNORM_OUTPUT_SAMPLE_RATE),
+        '-c:a', audioEncoder,
+        '-shortest',
+        '-movflags', '+faststart',
+        outputPath
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    return;
+  }
   // Single-pass EBU R128 loudness normalization (FFmpeg `loudnorm`, the
   // established approach for consistent voice level). loudnorm internally
   // resamples to 192 kHz, so the output rate is pinned explicitly to 48 kHz.

@@ -12,6 +12,7 @@ import { buildCaptionsFromAsr } from './asrCaptions.js';
 import { resolveAsrMode, transcribeAudio, writeTranscriptArtifact } from './asrWorker.js';
 import { scriptBodyToNarrationText, ScriptBodyContractError } from './scriptText.js';
 import { renderSilentVideo, muxNarration, writeSrtFile } from './render.js';
+import { selectMusicAsset, resolveMusicMixEnabled, resolveMixParams, probeMusicFile } from './audioMix.js';
 import { resolveMotionEnabled, annotateTimingWithMotion, prepareMotionClips } from './motion.js';
 import { validateMediaArtifact } from './validate.js';
 import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
@@ -328,8 +329,41 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     );
   }
 
+  // --- Background music (worker capability; src/media/audioMix.js) ---
+  // Only an ATTACHED asset of type 'music' is ever used, and only after the
+  // all-assets rights re-check and checksum gates above have passed for it (an
+  // UNVERIFIED/DISPUTED music asset already returned ASSET_RIGHTS_BLOCKED
+  // before reaching this point). Nothing here selects, acquires or authorizes
+  // music. Absent / switched off / file missing -> the unchanged narration-only
+  // path, with the reason recorded. A present-but-undecodable file is a
+  // RENDER_FAILED (never a silently degraded artifact).
+  let musicMix = null;
+  const musicAsset = selectMusicAsset(assets);
+  if (musicAsset) {
+    try {
+      if (!resolveMusicMixEnabled()) {
+        logDecision(storage, { runId, subjectType: 'content_version', subjectId: contentVersion.id, decision: DECISION_LOG_DECISION.MUSIC_UNAVAILABLE, reason: `music_${musicAsset.id}_mixing_disabled` }, nowISO);
+      } else if (!fs.existsSync(musicAsset.location)) {
+        logDecision(storage, { runId, subjectType: 'content_version', subjectId: contentVersion.id, decision: DECISION_LOG_DECISION.MUSIC_UNAVAILABLE, reason: `music_${musicAsset.id}_file_missing` }, nowISO);
+      } else {
+        const info = probeMusicFile(musicAsset.location);
+        musicMix = {
+          asset_id: musicAsset.id,
+          sha256: sha256File(musicAsset.location),
+          duration_seconds: info.duration_seconds,
+          params: resolveMixParams()
+        };
+      }
+    } catch (err) {
+      return failWith(
+        OUTCOME.RENDER_FAILED, DECISION_LOG_DECISION.RENDER_FAILED,
+        `music_mix_failed_${err.message}`, err.message
+      );
+    }
+  }
+
   // --- Render spec ---
-  const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, narrationProvider, visualTiming, captions: captionTiming });
+  const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, narrationProvider, music: musicMix, visualTiming, captions: captionTiming });
   const { json: renderSpecJson, checksum: renderSpecChecksumValue } = renderSpecChecksum(renderSpec);
 
   // --- Render (temporary paths; only promoted to final paths after validation) ---
@@ -374,7 +408,8 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
       silentVideoPath: silentVideoTmpPath,
       narrationPath,
       audioEncoder: RENDER_DEFAULTS.AUDIO_ENCODER,
-      outputPath: finalVideoTmpPath
+      outputPath: finalVideoTmpPath,
+      music: musicMix ? { path: musicAsset.location, narrationDurationSeconds, params: musicMix.params } : null
     }));
   } catch (err) {
     fs.rmSync(silentVideoTmpPath, { force: true });

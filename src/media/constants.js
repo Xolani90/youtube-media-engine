@@ -56,7 +56,9 @@ export const DECISION_LOG_DECISION = Object.freeze({
   ASR_FAILED: 'ASR_FAILED',
   // Caption worker: ASR-timed captions used, or rejected in favour of the text-estimated fallback.
   CAPTIONS_FROM_ASR: 'CAPTIONS_FROM_ASR',
-  CAPTIONS_ASR_FALLBACK: 'CAPTIONS_ASR_FALLBACK'
+  CAPTIONS_ASR_FALLBACK: 'CAPTIONS_ASR_FALLBACK',
+  // Background music: attached music file absent or mixing disabled -> narration-only render, recorded (never silent).
+  MUSIC_UNAVAILABLE: 'MUSIC_UNAVAILABLE'
 });
 
 // Asset types the renderer will display as a visual frame. Deliberately
