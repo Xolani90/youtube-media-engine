@@ -463,6 +463,15 @@ export class GeminiProvider extends LLMProvider {
         ?? errorBody.retryDelayMs
         ?? FALLBACK_RETRY_DELAY_MS;
 
+      // A server-requested wait beyond the cap (e.g. a daily-quota reset, which
+      // Gemini reports as hours) is never slept on: record the cooldown and fail
+      // fast so the caller sees the 429 instead of the run idling.
+      if (delayMs > MAX_TRANSIENT_RETRY_DELAY_MS) {
+        recordProviderRateLimit('gemini-free', delayMs);
+        traceEvent('llm.provider.cooldown.recorded', { provider: 'gemini-free', cooldownMs: delayMs, reason: 'retry_delay_exceeds_cap' });
+        throw buildGeminiRequestError(res, errorBody);
+      }
+
       // An exhausted 429 retry records a cooldown (the same delay the retry
       // itself would have slept for) before throwing, so LLMRouter can skip
       // this provider on the next, independent complete() call.
