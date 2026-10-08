@@ -1,4 +1,4 @@
-import { normalizeTitle, normalizeDescription } from './metadataValidation.js';
+import { normalizeTitle, buildDescriptionWithAttribution } from './metadataValidation.js';
 
 /**
  * Builds the provider-neutral publication request from the existing
@@ -41,16 +41,20 @@ import { normalizeTitle, normalizeDescription } from './metadataValidation.js';
  * `contentVersion`, `script`, `contentBrief` or `mediaArtifact`: a content
  * item cannot request or override visibility.
  *
+ * @param {Array<object>} [args.assets] - persisted assets rows for this content_version (AssetProvenanceRepository.getAssetsForContent)
  * @param {string|null} [args.requestedPublishAt] - ISO 8601 timestamp, or null for "publish now"
  * @param {string|null} [args.requestedVisibility] - authorization-derived visibility ('public'), or null
  */
-export function buildPublicationRequest({ contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt = null, requestedVisibility = null }) {
+export function buildPublicationRequest({ contentVersion, script, contentBrief, mediaArtifact, assets = [], requestedPublishAt = null, requestedVisibility = null }) {
   const title = normalizeTitle(contentBrief.working_title ?? `Untitled (${contentVersion.id})`);
   // No separate "video description" field exists on content_briefs yet;
   // viewer_promise is the closest existing authoritative field
   // describing what the video delivers to a viewer. Falls back to an
   // empty string rather than fabricating copy.
-  const description = normalizeDescription(contentBrief.viewer_promise ?? '');
+  // Mandatory asset credits (assets.attribution_required/attribution_text for
+  // THIS content_version) are appended and the complete final description is
+  // validated; see buildDescriptionWithAttribution().
+  const description = buildDescriptionWithAttribution(contentBrief.viewer_promise ?? '', assets);
 
   return {
     contentVersionId: contentVersion.id,

@@ -470,7 +470,7 @@ export async function runPublication({
   let request;
   try {
     request = buildPublicationRequest({
-      contentVersion, script, contentBrief, mediaArtifact, requestedPublishAt,
+      contentVersion, script, contentBrief, mediaArtifact, assets, requestedPublishAt,
       requestedVisibility: grant.requestedVisibility
     });
   } catch (err) {
