@@ -24,23 +24,19 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install espeak-ng
+      - name: Install ffmpeg and espeak-ng
         run: |
           sudo apt-get update
-          sudo apt-get install -y espeak-ng
+          sudo apt-get install -y ffmpeg espeak-ng
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Confirm ffmpeg/ffprobe are present
+      - name: Confirm required tools (fails if any is missing)
         run: |
-          ffmpeg -version | head -1
-          ffprobe -version | head -1
-
-      - name: Diagnose thumbnail generation
-        run: |
-          ffmpeg -hide_banner -filters | grep -i drawtext || echo "NO drawtext filter in this ffmpeg"
-          node -e "import('./src/media/thumbnail.js').then(m=>{try{m.generateThumbnail('Test Title','/tmp/t.png');console.log('thumbnail OK')}catch(e){console.log('THUMBNAIL FAIL:',e.message);console.log(String(e.stderr||''))}})"
+          set -eo pipefail
+          command -v ffmpeg ffprobe espeak-ng
+          ffmpeg -hide_banner -filters | grep -i drawtext
 
       - name: Run tests
         run: npm test
