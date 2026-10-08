@@ -56,7 +56,10 @@ jobs:
         id: sqlite_cache_restore
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.SQLITE_PATH }}
+          path: |
+            ${{ github.workspace }}/data/media-engine.db
+            ${{ github.workspace }}/data/media_artifacts
+            ${{ github.workspace }}/data/asset_downloads
           key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             media-engine-sqlite-
@@ -161,7 +164,10 @@ jobs:
         if: always() && steps.sqlite_checkpoint.outputs.saveable == 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.SQLITE_PATH }}
+          path: |
+            ${{ github.workspace }}/data/media-engine.db
+            ${{ github.workspace }}/data/media_artifacts
+            ${{ github.workspace }}/data/asset_downloads
           key: media-engine-sqlite-${{ github.run_id }}-${{ github.run_attempt }}
         env:
           SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
