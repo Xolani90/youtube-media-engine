@@ -6,7 +6,18 @@ import { fileURLToPath } from 'node:url';
 import { NARRATION_ENGINE, NARRATION_PROVIDER } from './constants.js';
 
 const KOKORO_WORKER = fileURLToPath(new URL('./kokoroWorker.js', import.meta.url));
-const DEFAULT_KOKORO_TIMEOUT_MS = 10 * 60 * 1000; // first run may download the model
+// Kokoro q8 on a 2-core CPU measured ~4.5x slower than real time (about 11.4 min
+// for a 2,300-character script), and the first run may also download the model.
+const DEFAULT_KOKORO_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** KOKORO_TIMEOUT_MS (ms) overrides the default; an invalid value throws. */
+export function resolveKokoroTimeoutMs(env = process.env) {
+  const raw = env.KOKORO_TIMEOUT_MS;
+  if (raw === undefined || String(raw).trim() === "") return DEFAULT_KOKORO_TIMEOUT_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`KOKORO_TIMEOUT_MS must be a positive number of milliseconds (got "${raw}")`);
+  return n;
+}
 
 /** espeak-ng: local, free, deterministic CLI synthesis (the original v1 engine). */
 function runEspeak(text, outputWavPath) {
@@ -18,7 +29,7 @@ function runEspeak(text, outputWavPath) {
  * process so this module's interface stays synchronous. Kokoro synthesizes
  * the exact text it is given and nothing else.
  */
-function runKokoro(text, outputWavPath, { timeoutMs = DEFAULT_KOKORO_TIMEOUT_MS } = {}) {
+function runKokoro(text, outputWavPath, { timeoutMs = resolveKokoroTimeoutMs() } = {}) {
   const textFile = path.join(os.tmpdir(), `kokoro-in-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
   fs.writeFileSync(textFile, text, 'utf8');
   try {
@@ -29,7 +40,8 @@ function runKokoro(text, outputWavPath, { timeoutMs = DEFAULT_KOKORO_TIMEOUT_MS 
   } catch (err) {
     const lines = String(err.stderr || '').split('\n').map((l) => l.trim()).filter(Boolean);
     const marked = lines.reverse().find((l) => l.startsWith('KOKORO_ERROR:'));
-    const detail = marked ? marked.slice('KOKORO_ERROR:'.length).trim() : String(err.message || err).split('\n')[0].slice(0, 300);
+    const timedOut = err.code === "ETIMEDOUT" || err.killed === true;
+    const detail = timedOut ? `timed out after ${timeoutMs}ms (raise KOKORO_TIMEOUT_MS)` : marked ? marked.slice('KOKORO_ERROR:'.length).trim() : String(err.message || err).split('\n')[0].slice(0, 300);
     throw new Error(`kokoro failed: ${detail}`);
   } finally {
     fs.rmSync(textFile, { force: true });
