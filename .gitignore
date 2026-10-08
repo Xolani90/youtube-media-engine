@@ -10,3 +10,6 @@ run*-db/
 fresh-db/
 tmp/
 run.json
+
+.env.*
+!.env.example
