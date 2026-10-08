@@ -8,6 +8,7 @@ import { computeVisualSequencing } from './visualSequencing.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
 import { synthesizeNarration, probeDurationSeconds } from './narration.js';
+import { buildCaptionsFromAsr } from './asrCaptions.js';
 import { resolveAsrMode, transcribeAudio, writeTranscriptArtifact } from './asrWorker.js';
 import { scriptBodyToNarrationText, ScriptBodyContractError } from './scriptText.js';
 import { renderSilentVideo, muxNarration, writeSrtFile } from './render.js';
@@ -277,6 +278,28 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
         OUTCOME.RENDER_FAILED, DECISION_LOG_DECISION.RENDER_FAILED,
         `caption_timing_failed_${err.message}`, err.message
       );
+    }
+  }
+
+  // --- Caption worker: real ASR timestamps replace the text-estimated timing ---
+  // Only when ASR succeeded AND its captions pass every integrity check and
+  // correspond to the narration text. Any rejection keeps the text-estimated
+  // timing computed above (the safe fallback) -- never a failure.
+  if (asr?.status === 'TIMESTAMPS_RECORDED') {
+    try {
+      captionTiming = buildCaptionsFromAsr(asr.segments, narrationDurationSeconds, { narrationText });
+      asr.captionTimingSource = TIMING_SOURCE.ASR;
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersion.id,
+        decision: DECISION_LOG_DECISION.CAPTIONS_FROM_ASR, reason: `captions_asr_${captionTiming.length}_segments_${asr.transcriptChecksum}`
+      }, nowISO);
+    } catch (err) {
+      asr.captionTimingSource = TIMING_SOURCE.TEXT_ESTIMATED;
+      asr.captionFallbackReason = err?.reason ?? 'CAPTION_ASR_UNEXPECTED_ERROR';
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersion.id,
+        decision: DECISION_LOG_DECISION.CAPTIONS_ASR_FALLBACK, reason: `captions_asr_fallback_${String(err?.message ?? err).split('\n')[0].slice(0, 300)}`
+      }, nowISO);
     }
   }
 

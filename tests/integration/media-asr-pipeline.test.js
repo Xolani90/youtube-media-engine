@@ -181,3 +181,68 @@ test('ASR failure: controlled, recorded, never labelled as ASR; text-estimated t
     assert.equal(s.storage.get("SELECT id FROM decision_log WHERE decision = 'ASR_TIMESTAMPS_RECORDED'"), undefined);
   } finally { cleanup(s.storage, s.dbPath, ...s.dirs); }
 });
+
+
+// --- Caption worker: ASR timestamps drive captions (with safe fallback) ---
+
+function makeScriptedWhisper(dir, segments) {
+  const bin = path.join(dir, 'scripted-whisper');
+  const json = JSON.stringify({ result: { language: 'en' }, transcription: segments.map((g) => ({ offsets: { from: g.from, to: g.to }, text: ` ${g.text}` })) });
+  fs.writeFileSync(bin, `#!/bin/sh\nPREFIX=""\nwhile [ $# -gt 0 ]; do if [ "$1" = "-of" ]; then PREFIX="$2"; fi; shift; done\nprintf '%s' '${json}' > "$PREFIX.json"\n`, { mode: 0o755 });
+  const model = path.join(dir, 'ggml-stand-in.bin');
+  fs.writeFileSync(model, 'm');
+  return { bin, model };
+}
+
+test('Captions: corresponding ASR segments become the real caption timing, consumed by render spec', { skip: skip || posixSkip }, async () => {
+  const s = await setup();
+  const w = freshDir('asr-caps');
+  try {
+    // Script body: "This is a short narration script for the test video."
+    const stand = makeScriptedWhisper(w, [{ from: 300, to: 1500, text: 'This is a short narration' }, { from: 1700, to: 2500, text: 'script for the test video.' }]);
+    const r = withEnv({ ASR_PROVIDER: 'whisper.cpp', WHISPER_CPP_BIN: stand.bin, WHISPER_CPP_MODEL: stand.model },
+      () => runMediaProduction({ storage: s.storage, contentBriefId: s.contentBriefId, artifactsDir: s.mediaArtifactsDir }));
+    assert.equal(r.outcome, 'RENDERED');
+    assert.equal(r.asr.captionTimingSource, 'asr');
+    const caps = JSON.parse(r.mediaArtifact.render_spec_json).captions;
+    assert.deepEqual(caps.map((c) => [c.text, c.start_seconds, c.duration_seconds]),
+      [['This is a short narration', 0.3, 1.2], ['script for the test video.', 1.7, 0.8]]);
+    assert.equal(caps.map((c) => c.text).join(' '), 'This is a short narration script for the test video.');
+    assert.ok(s.storage.get("SELECT id FROM decision_log WHERE decision = 'CAPTIONS_FROM_ASR'"));
+    assert.ok(fs.existsSync(r.mediaArtifact.artifact_path), 'video rendered with ASR-timed captions');
+  } finally { cleanup(s.storage, s.dbPath, ...s.dirs, w); }
+});
+
+test('Captions: ASR transcript that does not match the narration falls back to text-estimated timing', { skip: skip || posixSkip }, async () => {
+  const s = await setup();
+  const w = freshDir('asr-caps-mismatch');
+  try {
+    const stand = makeScriptedWhisper(w, [{ from: 0, to: 1000, text: 'Stand in.' }]);
+    const r = withEnv({ ASR_PROVIDER: 'whisper.cpp', WHISPER_CPP_BIN: stand.bin, WHISPER_CPP_MODEL: stand.model },
+      () => runMediaProduction({ storage: s.storage, contentBriefId: s.contentBriefId, artifactsDir: s.mediaArtifactsDir }));
+    assert.equal(r.outcome, 'RENDERED');
+    assert.equal(r.asr.status, 'TIMESTAMPS_RECORDED');
+    assert.equal(r.asr.captionTimingSource, 'text-estimated');
+    assert.equal(r.asr.captionFallbackReason, 'CAPTION_TEXT_MISMATCH');
+    const caps = JSON.parse(r.mediaArtifact.render_spec_json).captions;
+    assert.equal(caps[0].start_seconds, 0);
+    assert.equal(caps.map((c) => c.text).join(' '), 'This is a short narration script for the test video.');
+    assert.ok(s.storage.get("SELECT id FROM decision_log WHERE decision = 'CAPTIONS_ASR_FALLBACK'"));
+    assert.equal(s.storage.get("SELECT id FROM decision_log WHERE decision = 'CAPTIONS_FROM_ASR'"), undefined);
+  } finally { cleanup(s.storage, s.dbPath, ...s.dirs, w); }
+});
+
+test('Captions: ASR disabled (default) -> render spec captions identical to the text-estimated path', { skip }, async () => {
+  const s = await setup();
+  try {
+    const r = withEnv({ ASR_PROVIDER: undefined },
+      () => runMediaProduction({ storage: s.storage, contentBriefId: s.contentBriefId, artifactsDir: s.mediaArtifactsDir }));
+    assert.equal(r.outcome, 'RENDERED');
+    assert.equal(r.asr, undefined);
+    const caps = JSON.parse(r.mediaArtifact.render_spec_json).captions;
+    const spec = JSON.parse(r.mediaArtifact.render_spec_json);
+    assert.equal(caps[0].start_seconds, 0);
+    assert.ok(Math.abs(caps.at(-1).start_seconds + caps.at(-1).duration_seconds - spec.narration.duration_seconds) < 0.001, 'gap-free text-estimated timing spans the narration');
+    assert.equal(s.storage.get("SELECT id FROM decision_log WHERE decision IN ('CAPTIONS_FROM_ASR','CAPTIONS_ASR_FALLBACK')"), undefined);
+  } finally { cleanup(s.storage, s.dbPath, ...s.dirs); }
+});

@@ -53,7 +53,10 @@ export const DECISION_LOG_DECISION = Object.freeze({
   // Optional local ASR (whisper.cpp) outcomes. Neither changes the media
   // outcome: ASR is an additive timing source (see asrWorker.js).
   ASR_TIMESTAMPS_RECORDED: 'ASR_TIMESTAMPS_RECORDED',
-  ASR_FAILED: 'ASR_FAILED'
+  ASR_FAILED: 'ASR_FAILED',
+  // Caption worker: ASR-timed captions used, or rejected in favour of the text-estimated fallback.
+  CAPTIONS_FROM_ASR: 'CAPTIONS_FROM_ASR',
+  CAPTIONS_ASR_FALLBACK: 'CAPTIONS_ASR_FALLBACK'
 });
 
 // Asset types the renderer will display as a visual frame. Deliberately
