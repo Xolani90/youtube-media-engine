@@ -102,9 +102,9 @@ jobs:
           SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
         run: |
           node scripts/reclaim-autonomous-run.js \
-            --run-id 5ed395a4-f386-4896-9869-bef7c1d23c96 \
+            --run-id 4c05126c-aeda-4658-9ae5-a1b67299c1d6 \
             --actor OWNER \
-            --reason "orphaned guard from workflow run 36483385581 (acquired 2026-09-28T21:02:51Z, never released; run no longer visible in GitHub)"
+            --reason "orphaned guard 4c05126c (SIMULATION, acquired 2026-10-07T12:34:58.792Z, never released; far past the 60-minute job timeout; sole RUNNING row per diagnose-guard)"
 
       - name: List RUNNING autonomous runs AFTER reclaim (verify cleared)
         env:
@@ -113,11 +113,11 @@ jobs:
           echo "Running: node scripts/reclaim-autonomous-run.js --list"
           OUTPUT="$(node scripts/reclaim-autonomous-run.js --list)"
           echo "$OUTPUT"
-          if echo "$OUTPUT" | grep -q "5ed395a4-f386-4896-9869-bef7c1d23c96"; then
-            echo "::error::Reclaimed UUID 5ed395a4-f386-4896-9869-bef7c1d23c96 is still reported as RUNNING after reclaim."
+          if echo "$OUTPUT" | grep -q "4c05126c-aeda-4658-9ae5-a1b67299c1d6"; then
+            echo "::error::Reclaimed UUID 4c05126c-aeda-4658-9ae5-a1b67299c1d6 is still reported as RUNNING after reclaim."
             exit 1
           fi
-          echo "Confirmed: 5ed395a4-f386-4896-9869-bef7c1d23c96 is no longer reported as RUNNING."
+          echo "Confirmed: 4c05126c-aeda-4658-9ae5-a1b67299c1d6 is no longer reported as RUNNING."
 
       - name: Checkpoint SQLite WAL before saving
         # Same convention as scheduled-run.yml: fold the WAL into the main
