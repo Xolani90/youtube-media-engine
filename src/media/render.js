@@ -28,7 +28,10 @@ export function renderSilentVideo({ visualTiming, width, height, fps, videoEncod
     lines.push(`duration ${seg.duration_seconds}`);
   }
   const last = visualTiming[visualTiming.length - 1];
-  lines.push(`file '${escape(last.location)}'`);
+  // The repeat-last-file quirk workaround only applies to still images. A
+  // pre-rendered motion clip (motion.js) is a real video file whose `duration`
+  // is honored, and repeating it would replay the whole clip.
+  if (!last.pre_rendered) lines.push(`file '${escape(last.location)}'`);
   fs.writeFileSync(listPath, lines.join('\n') + '\n', 'utf8');
 
   // Media Production v1.1: captions are burned in by extending this same

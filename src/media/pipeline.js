@@ -12,6 +12,7 @@ import { buildCaptionsFromAsr } from './asrCaptions.js';
 import { resolveAsrMode, transcribeAudio, writeTranscriptArtifact } from './asrWorker.js';
 import { scriptBodyToNarrationText, ScriptBodyContractError } from './scriptText.js';
 import { renderSilentVideo, muxNarration, writeSrtFile } from './render.js';
+import { resolveMotionEnabled, annotateTimingWithMotion, prepareMotionClips } from './motion.js';
 import { validateMediaArtifact } from './validate.js';
 import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
 import { selectShortFormSegment, trimVisualTiming, trimCaptionTiming } from './shortFormSelection.js';
@@ -308,7 +309,24 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   // (computed just above) as scene-cut candidates instead of a flat
   // equal-share division. Falls back to the plain equal-division
   // timeline unchanged when there's no caption structure to key off of.
-  const visualTiming = computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds);
+  const sequencedTiming = computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds);
+
+  // --- Ken Burns motion (worker capability; src/media/motion.js) ---
+  // Runs strictly AFTER the rights/checksum/existence gates above and AFTER
+  // the existing timing contract has fixed every segment's slot. It only
+  // annotates still-image segments with a deterministic motion descriptor
+  // (a pure function of asset_id + segment index); slots are never altered.
+  // The descriptor is recorded in render_spec, so it is covered by
+  // render_spec_checksum. KEN_BURNS_MOTION=off restores the plain stills.
+  let visualTiming;
+  try {
+    visualTiming = resolveMotionEnabled() ? annotateTimingWithMotion(sequencedTiming) : sequencedTiming;
+  } catch (err) {
+    return failWith(
+      OUTCOME.RENDER_FAILED, DECISION_LOG_DECISION.RENDER_FAILED,
+      `motion_planning_failed_${err.message}`, err.message
+    );
+  }
 
   // --- Render spec ---
   const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, narrationProvider, visualTiming, captions: captionTiming });
@@ -324,12 +342,26 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     ? path.join(dir, `.captions.tmp-${process.pid}-${Date.now()}.srt`)
     : null;
 
+  let motionClips = null;
   try {
     if (captionsSrtTmpPath) {
       writeSrtFile(captionTiming, captionsSrtTmpPath);
     }
-    traceSync('child.ffmpeg.render', { segments: visualTiming?.length }, () => renderSilentVideo({
+    // Motion clips are temporary intermediates in the same media dir; they
+    // feed the existing concat -> renderSilentVideo -> mux path and are always
+    // removed (finally). A motion failure is a render failure, never a
+    // silently degraded artifact.
+    motionClips = traceSync('child.ffmpeg.motion', { segments: visualTiming?.length }, () => prepareMotionClips({
       visualTiming,
+      width: RENDER_DEFAULTS.WIDTH,
+      height: RENDER_DEFAULTS.HEIGHT,
+      fps: RENDER_DEFAULTS.FPS,
+      dir,
+      tag: `${process.pid}-${Date.now()}`,
+      videoEncoder: RENDER_DEFAULTS.VIDEO_ENCODER
+    }));
+    traceSync('child.ffmpeg.render', { segments: visualTiming?.length }, () => renderSilentVideo({
+      visualTiming: motionClips.timing,
       width: RENDER_DEFAULTS.WIDTH,
       height: RENDER_DEFAULTS.HEIGHT,
       fps: RENDER_DEFAULTS.FPS,
@@ -352,6 +384,7 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
       `render_failed_${err.message}`, err.message
     );
   } finally {
+    motionClips?.cleanup();
     fs.rmSync(silentVideoTmpPath, { force: true });
     if (captionsSrtTmpPath) fs.rmSync(captionsSrtTmpPath, { force: true });
   }
@@ -553,12 +586,25 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
     ? path.join(dir, `.captions-short.tmp-${process.pid}-${Date.now()}.srt`)
     : null;
 
+  let shortMotionClips = null;
   try {
     if (captionsSrtTmpPath) {
       writeSrtFile(shortCaptionTiming, captionsSrtTmpPath);
     }
-    traceSync('child.ffmpeg.render.short', { segments: shortVisualTiming?.length }, () => renderSilentVideo({
+    // Consumes the motion descriptors RECORDED in the source render_spec
+    // (carried through trimVisualTiming); nothing is re-derived. A source
+    // rendered without motion has no descriptors and stays plain stills.
+    shortMotionClips = traceSync('child.ffmpeg.motion.short', { segments: shortVisualTiming?.length }, () => prepareMotionClips({
       visualTiming: shortVisualTiming,
+      width: SHORT_FORM_RENDER_DEFAULTS.WIDTH,
+      height: SHORT_FORM_RENDER_DEFAULTS.HEIGHT,
+      fps: RENDER_DEFAULTS.FPS,
+      dir,
+      tag: `short-${process.pid}-${Date.now()}`,
+      videoEncoder: RENDER_DEFAULTS.VIDEO_ENCODER
+    }));
+    traceSync('child.ffmpeg.render.short', { segments: shortVisualTiming?.length }, () => renderSilentVideo({
+      visualTiming: shortMotionClips.timing,
       width: SHORT_FORM_RENDER_DEFAULTS.WIDTH,
       height: SHORT_FORM_RENDER_DEFAULTS.HEIGHT,
       fps: RENDER_DEFAULTS.FPS,
@@ -582,6 +628,7 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
     }, nowISO);
     return { outcome: OUTCOME.RENDER_FAILED, reason: err.message, mediaArtifact: null };
   } finally {
+    shortMotionClips?.cleanup();
     fs.rmSync(silentVideoTmpPath, { force: true });
     if (captionsSrtTmpPath) fs.rmSync(captionsSrtTmpPath, { force: true });
   }
