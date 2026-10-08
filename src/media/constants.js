@@ -49,7 +49,11 @@ export const DECISION_LOG_DECISION = Object.freeze({
   RENDER_FAILED: 'RENDER_FAILED',
   VALIDATION_FAILED: 'VALIDATION_FAILED',
   RENDERED: 'RENDERED',
-  NO_VALID_SEGMENT: 'NO_VALID_SEGMENT'
+  NO_VALID_SEGMENT: 'NO_VALID_SEGMENT',
+  // Optional local ASR (whisper.cpp) outcomes. Neither changes the media
+  // outcome: ASR is an additive timing source (see asrWorker.js).
+  ASR_TIMESTAMPS_RECORDED: 'ASR_TIMESTAMPS_RECORDED',
+  ASR_FAILED: 'ASR_FAILED'
 });
 
 // Asset types the renderer will display as a visual frame. Deliberately
@@ -95,6 +99,12 @@ export const NARRATION_ENGINE = 'espeak-ng';
 // hexgrad/kokoro-js) is the preferred worker; espeak-ng stays the fallback.
 // NOTE: the bit-for-bit determinism claim above applies to espeak-ng ONLY.
 export const NARRATION_PROVIDER = Object.freeze({ ESPEAK: 'espeak-ng', KOKORO: 'kokoro', AUTO: 'auto' });
+
+// Optional local ASR worker (whisper.cpp, MIT). Disabled unless ASR_PROVIDER
+// is set to 'whisper.cpp'. TIMING_SOURCE names where a timing came from so
+// ASR-measured timing is never confused with text-estimated timing.
+export const ASR_PROVIDER = Object.freeze({ NONE: 'none', WHISPER_CPP: 'whisper.cpp' });
+export const TIMING_SOURCE = Object.freeze({ TEXT_ESTIMATED: 'text-estimated', ASR: 'asr' });
 
 // Caption/subtitle defaults for deterministic burned-in captions (Media
 // Production v1.1). A small, fixed styling configuration — not a theme

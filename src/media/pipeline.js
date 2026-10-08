@@ -1,13 +1,14 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS, SHORT_FORM_RENDER_DEFAULTS } from './constants.js';
+import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS, SHORT_FORM_RENDER_DEFAULTS, ASR_PROVIDER, TIMING_SOURCE } from './constants.js';
 import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets } from './visualTiming.js';
 import { computeVisualSequencing } from './visualSequencing.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
 import { synthesizeNarration, probeDurationSeconds } from './narration.js';
+import { resolveAsrMode, transcribeAudio, writeTranscriptArtifact } from './asrWorker.js';
 import { scriptBodyToNarrationText, ScriptBodyContractError } from './scriptText.js';
 import { renderSilentVideo, muxNarration, writeSrtFile } from './render.js';
 import { validateMediaArtifact } from './validate.js';
@@ -40,6 +41,40 @@ function fetchAssetsWithUsageContext(storage, contentVersionId) {
   );
   const usageByAssetId = new Map(usageRows.map((u) => [u.asset_id, u.usage_context]));
   return assets.map((a) => ({ ...a, usage_context: usageByAssetId.get(a.id) ?? null }));
+}
+
+/**
+ * Optional local ASR step (whisper.cpp). Returns null when ASR is disabled
+ * (the default), so the default pipeline result is unchanged. Otherwise
+ * returns { status, timingSource, ... } and NEVER throws: an ASR failure is
+ * recorded (decision_log + trace) and media production continues with the
+ * existing text-estimated caption timing -- estimated timing is never
+ * labelled as ASR timing. Caption timing itself is NOT altered here; the
+ * ASR segments are only exposed for the later captions pass.
+ */
+function runAsrStep({ storage, runId, contentVersionId, dir, narrationPath, narrationDurationSeconds, nowISO }) {
+  try {
+    if (resolveAsrMode() === ASR_PROVIDER.NONE) return null;
+    const result = traceSync('child.asr', { provider: ASR_PROVIDER.WHISPER_CPP }, () => transcribeAudio(narrationPath, { durationSeconds: narrationDurationSeconds }));
+    const artifact = writeTranscriptArtifact(dir, result, { audioPath: narrationPath });
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersionId,
+      decision: DECISION_LOG_DECISION.ASR_TIMESTAMPS_RECORDED, reason: `asr_transcript_${ASR_PROVIDER.WHISPER_CPP}_${artifact.checksum}`
+    }, nowISO);
+    return {
+      status: 'TIMESTAMPS_RECORDED', provider: result.provider, timestampsSource: TIMING_SOURCE.ASR,
+      captionTimingSource: TIMING_SOURCE.TEXT_ESTIMATED,
+      transcriptPath: artifact.path, transcriptChecksum: artifact.checksum,
+      language: result.language, duration: result.duration, segments: result.segments
+    };
+  } catch (err) {
+    const reason = err?.reason ?? 'ASR_UNEXPECTED_ERROR';
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersionId,
+      decision: DECISION_LOG_DECISION.ASR_FAILED, reason: `asr_failed_${String(err?.message ?? err).split('\n')[0].slice(0, 300)}`
+    }, nowISO);
+    return { status: 'FAILED', reason, timestampsSource: null, captionTimingSource: TIMING_SOURCE.TEXT_ESTIMATED };
+  }
 }
 
 /**
@@ -222,6 +257,9 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     );
   }
 
+  // --- Optional ASR timestamps (whisper.cpp; off unless ASR_PROVIDER is set) ---
+  const asr = runAsrStep({ storage, runId, contentVersionId: contentVersion.id, dir, narrationPath, narrationDurationSeconds, nowISO });
+
   // --- Captions (Media Production v1.1) ---
   // Caption text is the SAME narrationText the narrator speaks (the
   // canonical Script -> Media conversion above), deterministically
@@ -355,11 +393,11 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
 
   if (outcome.raced) {
     const existing = storage.get('SELECT * FROM media_artifacts WHERE content_version_id = ?', [contentVersion.id]);
-    return { outcome: OUTCOME.ALREADY_RENDERED, mediaArtifact: existing ?? null };
+    return { outcome: OUTCOME.ALREADY_RENDERED, mediaArtifact: existing ?? null, ...(asr ? { asr } : {}) };
   }
 
   const mediaArtifact = storage.get('SELECT * FROM media_artifacts WHERE id = ?', [outcome.mediaArtifactId]);
-  return { outcome: OUTCOME.RENDERED, mediaArtifact };
+  return { outcome: OUTCOME.RENDERED, mediaArtifact, ...(asr ? { asr } : {}) };
 }
 
 /**
