@@ -17,3 +17,12 @@ Used via `src/media/kokoroWorker.js`, a child process called by `src/media/narra
 
 ## espeak-ng (fallback narration)
 Invoked as an external CLI (GPL-3.0-or-later); not bundled or linked into this repository.
+
+## Thumbnail canvas worker (primary thumbnail renderer; FFmpeg is the fallback)
+| Component | Version | License | Source |
+|---|---|---|---|
+| @napi-rs/canvas | 1.0.10 (exact pin) | MIT (npm metadata and repo LICENSE file) | https://github.com/Brooooooklyn/canvas (npm: @napi-rs/canvas) |
+| @napi-rs/canvas-<platform> prebuilt binaries | 1.0.10 | MIT (npm metadata) | npm; bundle Google Skia (BSD-3-Clause per skia.org; not independently re-verified from the binaries) |
+| DejaVu Sans Bold (bundled font) | see assets/fonts/LICENSE-DejaVu.txt | DejaVu/Bitstream Vera license | already bundled |
+
+Used via `src/media/thumbnailCanvasWorker.js`, a child process called by `src/media/thumbnail.js`. No network access, no image loading, no system fonts. Set `THUMBNAIL_RENDERER=ffmpeg` to bypass it.
