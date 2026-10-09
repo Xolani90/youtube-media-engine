@@ -67,6 +67,10 @@ export function normalizeTitle(title) {
  *  - otherwise left exactly as-is -- no CTAs, hashtags, links, or
  *    generated content added.
  *
+ * NOTE: this truncating helper is NOT used on the publication request path.
+ * buildPublicationRequest() uses buildDescriptionWithAttribution(), which
+ * blocks over-limit descriptions instead of truncating them.
+ *
  * @param {unknown} description
  * @returns {string}
  */
@@ -81,50 +85,53 @@ export function normalizeDescription(description) {
 export const ATTRIBUTION_HEADER = 'Credits:';
 
 /**
- * Final description assembly with mandatory asset attribution.
+ * Final YouTube description assembly and validation.
  *
- * `viewerPromise` is validated/normalized exactly as before when NO asset
- * requires attribution (the legacy path is byte-for-byte unchanged, including
- * its existing length behavior). When at least one asset requires attribution
- * the credits are appended after the viewer promise and the COMPLETE final
- * description is validated against the YouTube limit -- it is never truncated:
- * an over-limit result throws instead of dropping a credit or any other
- * content.
+ * This is the ONLY description builder used by buildPublicationRequest().
+ * Whether or not any asset requires attribution, the COMPLETE final
+ * description is validated against the YouTube limit and is NEVER truncated:
+ * an over-limit result throws InvalidPublicationMetadataError (the pipeline
+ * maps it to its existing STRUCTURAL_FAILURE outcome, before any publications
+ * row is claimed and before the adapter), so no viewer-promise text and no
+ * mandatory credit can be silently dropped to make it fit.
  *
- * Source of truth is the persisted `assets` row (`attribution_required`,
- * `attribution_text`), as returned by AssetProvenanceRepository
- * .getAssetsForContent() for the exact content_version being published.
- * Missing, empty, non-string or unusable required attribution throws
- * InvalidPublicationMetadataError (the pipeline maps it to its existing
- * STRUCTURAL_FAILURE outcome, before any publications row is claimed).
+ *  - No asset requires attribution: the description is the viewer promise,
+ *    unchanged (an empty string is still valid).
+ *  - One or more assets require attribution: credits are appended after the
+ *    viewer promise under ATTRIBUTION_HEADER. Source of truth is the persisted
+ *    `assets` row (`attribution_required`, `attribution_text`) from
+ *    AssetProvenanceRepository.getAssetsForContent() for the exact
+ *    content_version being published. Missing, empty, non-string or unusable
+ *    required attribution throws.
  *
- * YouTube documents the description limit in bytes (UTF-8); that is what is
- * enforced for the attributed path. UTF-8 byte length >= UTF-16 length, so the
- * byte check also guarantees the character limit.
+ * YouTube documents the description limit in bytes (UTF-8), which is what is
+ * enforced. UTF-8 byte length >= UTF-16 length, so this also guarantees the
+ * 5,000-character limit.
  *
- * Ordering is deterministic (code-point order of the credit text); only
- * credits with byte-identical text after trimming are deduplicated, so
- * distinct required attribution is never removed.
+ * Credit ordering is deterministic (code-point order of the credit text); only
+ * credits with identical text after trimming are deduplicated, so distinct
+ * required attribution is never removed.
  *
  * @param {unknown} viewerPromise
  * @param {Array<object>|null|undefined} assets
  * @returns {string}
  */
 export function buildDescriptionWithAttribution(viewerPromise, assets) {
-  const base = normalizeDescription(viewerPromise);
+  if (typeof viewerPromise !== 'string') {
+    throw new InvalidPublicationMetadataError('description_not_a_string');
+  }
   const credits = collectRequiredAttributions(assets);
-  if (credits.length === 0) return base;
-
-  // Validate the viewer promise un-truncated: normalizeDescription() would
-  // have silently cut an over-limit promise, which is not allowed once
-  // credits must also fit.
-  const promise = viewerPromise;
-  const block = `${ATTRIBUTION_HEADER}\n${credits.join('\n')}`;
-  const description = promise.length > 0 ? `${promise}\n\n${block}` : block;
+  let description = viewerPromise;
+  if (credits.length > 0) {
+    const block = `${ATTRIBUTION_HEADER}\n${credits.join('\n')}`;
+    description = viewerPromise.length > 0 ? `${viewerPromise}\n\n${block}` : block;
+  }
   const bytes = Buffer.byteLength(description, 'utf8');
   if (bytes > DESCRIPTION_MAX_LENGTH) {
     throw new InvalidPublicationMetadataError(
-      `description_with_required_attribution_exceeds_${DESCRIPTION_MAX_LENGTH}_bytes_actual_${bytes}`
+      credits.length > 0
+        ? `description_with_required_attribution_exceeds_${DESCRIPTION_MAX_LENGTH}_bytes_actual_${bytes}`
+        : `description_exceeds_${DESCRIPTION_MAX_LENGTH}_bytes_actual_${bytes}`
     );
   }
   return description;

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {
-  buildDescriptionWithAttribution, collectRequiredAttributions, normalizeDescription,
+  buildDescriptionWithAttribution, collectRequiredAttributions,
   InvalidPublicationMetadataError, DESCRIPTION_MAX_LENGTH, ATTRIBUTION_HEADER
 } from '../../src/publication/metadataValidation.js';
 import { buildPublicationRequest } from '../../src/publication/PublicationRequest.js';
@@ -26,13 +26,12 @@ const A = (id, required, text) => ({ id, attribution_required: required, attribu
 
 // --- Part 1: pure assembly -------------------------------------------------
 
-test('A. no asset requires attribution: description is exactly the existing normalizeDescription() result', () => {
+test('A. no asset requires attribution: a within-limit description is returned unchanged', () => {
   assert.equal(buildDescriptionWithAttribution('Promise', []), 'Promise');
   assert.equal(buildDescriptionWithAttribution('Promise', undefined), 'Promise');
   assert.equal(buildDescriptionWithAttribution('Promise', [A('a1', 0, 'ignored credit'), A('a2', 0, null)]), 'Promise');
   assert.equal(buildDescriptionWithAttribution('', []), '');
-  const over = 'D'.repeat(DESCRIPTION_MAX_LENGTH + 5); // legacy path unchanged
-  assert.equal(buildDescriptionWithAttribution(over, []), normalizeDescription(over));
+  assert.equal(buildDescriptionWithAttribution('Line one\n\nLine two', []), 'Line one\n\nLine two');
 });
 
 test('B. single required credit is appended after the viewer promise', () => {
@@ -302,4 +301,117 @@ test('J. Gate 2 is unchanged: an asset attached after the PASS makes it stale (G
   });
   assert.equal(result.outcome, 'GATE2_NOT_AUTHORIZING');
   assert.equal(adapter.calls.length, 0);
+});
+
+// --- Over-limit descriptions are blocked on EVERY path, never truncated ------
+
+test('L1. no attribution: a description of exactly 5000 bytes passes unchanged', () => {
+  const exact = 'x'.repeat(DESCRIPTION_MAX_LENGTH);
+  assert.equal(buildDescriptionWithAttribution(exact, []), exact);
+  assert.equal(buildDescriptionWithAttribution(exact, undefined), exact);
+});
+
+test('L2. no attribution: 5001 bytes blocks with an actionable reason and never returns a shortened string', () => {
+  const over = 'x'.repeat(DESCRIPTION_MAX_LENGTH + 1);
+  assert.throws(
+    () => buildDescriptionWithAttribution(over, []),
+    (e) => e instanceof InvalidPublicationMetadataError && e.message === 'description_exceeds_5000_bytes_actual_5001'
+  );
+  // Credits that are present but NOT required do not change the no-attribution rule.
+  assert.throws(() => buildDescriptionWithAttribution(over, [A('a1', 0, 'not required')]), InvalidPublicationMetadataError);
+});
+
+test('L3. no attribution: the limit is UTF-8 bytes, not UTF-16 units', () => {
+  const twoByte = 'é'.repeat(DESCRIPTION_MAX_LENGTH / 2); // 2500 chars, exactly 5000 bytes
+  assert.equal(buildDescriptionWithAttribution(twoByte, []), twoByte);
+  assert.throws(() => buildDescriptionWithAttribution(`${twoByte}a`, []), InvalidPublicationMetadataError);
+  const manyEmoji = '😀'.repeat(1250); // 2500 UTF-16 units but 5000 bytes
+  assert.equal(buildDescriptionWithAttribution(manyEmoji, []), manyEmoji);
+  assert.throws(() => buildDescriptionWithAttribution(`${manyEmoji}a`, []), InvalidPublicationMetadataError);
+});
+
+test('L4. no attribution: a non-string description is still rejected', () => {
+  for (const bad of [null, undefined, 42, {}]) {
+    assert.throws(() => buildDescriptionWithAttribution(bad, []), (e) => e instanceof InvalidPublicationMetadataError && e.message === 'description_not_a_string');
+  }
+});
+
+test('L5. attribution required: exactly-at-limit passes, over-limit blocks with the attribution-specific reason (pure)', () => {
+  const credit = 'Credit line';
+  const fixed = Buffer.byteLength(`\n\n${ATTRIBUTION_HEADER}\n${credit}`, 'utf8');
+  const exact = 'x'.repeat(DESCRIPTION_MAX_LENGTH - fixed);
+  assert.equal(Buffer.byteLength(buildDescriptionWithAttribution(exact, [A('a1', 1, credit)]), 'utf8'), DESCRIPTION_MAX_LENGTH);
+  assert.throws(
+    () => buildDescriptionWithAttribution(`${exact}y`, [A('a1', 1, credit)]),
+    (e) => e.message === 'description_with_required_attribution_exceeds_5000_bytes_actual_5001'
+  );
+});
+
+test('L6. the over-limit result is a THROW on both paths: no code path returns text shorter than its inputs', () => {
+  const credits = [A('a1', 1, 'Credit One'), A('a2', 1, 'Credit Two')];
+  for (const promiseLen of [DESCRIPTION_MAX_LENGTH + 1, DESCRIPTION_MAX_LENGTH - 5, DESCRIPTION_MAX_LENGTH * 3]) {
+    for (const assets of [[], credits]) {
+      const promise = 'p'.repeat(promiseLen);
+      let out;
+      try { out = buildDescriptionWithAttribution(promise, assets); } catch (e) { assert.ok(e instanceof InvalidPublicationMetadataError); continue; }
+      assert.ok(out.startsWith(promise), 'if it returns, the whole viewer promise is intact');
+      for (const c of assets.length ? ['Credit One', 'Credit Two'] : []) assert.ok(out.includes(c));
+      assert.ok(Buffer.byteLength(out, 'utf8') <= DESCRIPTION_MAX_LENGTH);
+    }
+  }
+});
+
+test('L7. buildPublicationRequest (no assets argument) blocks an over-limit viewer promise instead of truncating it', () => {
+  const ok = 'v'.repeat(DESCRIPTION_MAX_LENGTH);
+  assert.equal(buildPublicationRequest(reqArgs({ contentBrief: { id: 'b1', working_title: 'My Video', viewer_promise: ok } })).description, ok);
+  assert.throws(
+    () => buildPublicationRequest(reqArgs({ contentBrief: { id: 'b1', working_title: 'My Video', viewer_promise: `${ok}v` } })),
+    (e) => e instanceof InvalidPublicationMetadataError && e.message === 'description_exceeds_5000_bytes_actual_5001'
+  );
+  assert.throws(
+    () => buildPublicationRequest(reqArgs({ assets: [A('a1', 0, null)], contentBrief: { id: 'b1', working_title: 'My Video', viewer_promise: `${ok}v` } })),
+    InvalidPublicationMetadataError
+  );
+});
+
+test('L8. pipeline, no attribution: a viewer promise of exactly 5000 bytes is published to the adapter intact', async () => {
+  const promise = 'p'.repeat(DESCRIPTION_MAX_LENGTH);
+  const { result, adapter } = await publishWith({ viewerPromise: promise, assets: [{ attributionRequired: false }] });
+  assert.equal(result.outcome, 'PUBLISHED');
+  assert.equal(adapter.calls[0].description, promise);
+});
+
+test('L9. pipeline, no attribution: an over-limit description is blocked (STRUCTURAL_FAILURE), adapter never called, nothing claimed, nothing truncated', async () => {
+  for (const assets of [[], [{ attributionRequired: false }]]) {
+    const { result, adapter, rows } = await publishWith({ viewerPromise: 'p'.repeat(DESCRIPTION_MAX_LENGTH + 1), assets });
+    assert.equal(result.outcome, 'STRUCTURAL_FAILURE');
+    assert.equal(result.reason, 'description_exceeds_5000_bytes_actual_5001');
+    assert.equal(result.publication, null);
+    assert.equal(adapter.calls.length, 0, 'the provider never receives a shortened description');
+    assert.equal(rows.length, 0, 'no publications row, not even PENDING');
+  }
+});
+
+test('L10. pipeline, attribution required: exactly 5000 bytes passes with every credit; 5001 blocks (both reasons are distinct)', async () => {
+  const credits = ['Credit One on Pexels', 'Credit Two on Pexels'];
+  const assets = credits.map((attributionText) => ({ attributionRequired: true, attributionText }));
+  const fixed = Buffer.byteLength(`\n\n${ATTRIBUTION_HEADER}\n${credits.join('\n')}`, 'utf8');
+  const exact = 'p'.repeat(DESCRIPTION_MAX_LENGTH - fixed);
+  const ok = await publishWith({ viewerPromise: exact, assets });
+  assert.equal(ok.result.outcome, 'PUBLISHED');
+  assert.equal(Buffer.byteLength(ok.adapter.calls[0].description, 'utf8'), DESCRIPTION_MAX_LENGTH);
+  assert.ok(ok.adapter.calls[0].description.startsWith(exact));
+  for (const c of credits) assert.ok(ok.adapter.calls[0].description.includes(c));
+
+  const over = await publishWith({ viewerPromise: `${exact}p`, assets });
+  assert.equal(over.result.outcome, 'STRUCTURAL_FAILURE');
+  assert.equal(over.result.reason, 'description_with_required_attribution_exceeds_5000_bytes_actual_5001');
+  assert.equal(over.adapter.calls.length, 0);
+  assert.equal(over.rows.length, 0);
+});
+
+test('L11. pipeline: an ordinary short description with no assets still publishes unchanged (existing behavior)', async () => {
+  const { result, adapter } = await publishWith({});
+  assert.equal(result.outcome, 'PUBLISHED');
+  assert.equal(adapter.calls[0].description, 'Promise');
 });

@@ -11,14 +11,15 @@ import { normalizeTitle, buildDescriptionWithAttribution } from './metadataValid
  * its own provider-specific request shape — this module knows nothing
  * about YouTube, or any other provider.
  *
- * Phase 2A: title/description are passed through
- * normalizeTitle()/normalizeDescription() (./metadataValidation.js)
- * before being placed on the returned request, so every publication
+ * Phase 2A: the title is passed through normalizeTitle() and the
+ * description through buildDescriptionWithAttribution()
+ * (./metadataValidation.js) before being placed on the returned request, so every publication
  * request this function produces already carries YouTube-compatible
  * metadata — this is the one canonical place that happens, so no
  * caller (pipeline.js, any future caller) needs to duplicate it. A
- * fundamentally invalid title (missing/empty/wrong type) throws
- * InvalidPublicationMetadataError; the caller is responsible for
+ * fundamentally invalid title (missing/empty/wrong type), a description
+ * over the YouTube limit (never truncated), or missing/unusable required
+ * asset attribution throws InvalidPublicationMetadataError; the caller is responsible for
  * translating that into its own error contract (see pipeline.js's
  * STRUCTURAL_FAILURE handling).
  *
