@@ -58,7 +58,10 @@ export const DECISION_LOG_DECISION = Object.freeze({
   CAPTIONS_FROM_ASR: 'CAPTIONS_FROM_ASR',
   CAPTIONS_ASR_FALLBACK: 'CAPTIONS_ASR_FALLBACK',
   // Background music: attached music file absent or mixing disabled -> narration-only render, recorded (never silent).
-  MUSIC_UNAVAILABLE: 'MUSIC_UNAVAILABLE'
+  MUSIC_UNAVAILABLE: 'MUSIC_UNAVAILABLE',
+  // Diagnostic final-video QA (qaWorker.js): evidence only, never changes the media outcome.
+  MEDIA_QA_RECORDED: 'MEDIA_QA_RECORDED',
+  MEDIA_QA_NOT_RECORDED: 'MEDIA_QA_NOT_RECORDED'
 });
 
 // Asset types the renderer will display as a visual frame. Deliberately

@@ -15,6 +15,7 @@ import { renderSilentVideo, muxNarration, writeSrtFile } from './render.js';
 import { selectMusicAsset, resolveMusicMixEnabled, resolveMixParams, probeMusicFile } from './audioMix.js';
 import { resolveMotionEnabled, annotateTimingWithMotion, prepareMotionClips } from './motion.js';
 import { validateMediaArtifact } from './validate.js';
+import { analyzeMediaQa, resolveMediaQaEnabled, writeQaReportArtifact } from './qaWorker.js';
 import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
 import { selectShortFormSegment, trimVisualTiming, trimCaptionTiming } from './shortFormSelection.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
@@ -32,6 +33,43 @@ function logDecision(storage, { runId = null, subjectType, subjectId, decision, 
     [id, runId, subjectType, subjectId, decision, reason, nowISO(), MEDIA_STAGE]
   );
   return id;
+}
+
+/**
+ * Diagnostic final-video QA (src/media/qaWorker.js). Evidence only: it can NEVER
+ * change a media outcome, reject a render, touch retry state or throw. Returns
+ * null when disabled (MEDIA_QA=off), otherwise { report } or { error }.
+ */
+function runDiagnosticQa(videoPath, context) {
+  if (!resolveMediaQaEnabled()) return null;
+  try {
+    return { report: analyzeMediaQa(videoPath, { context }) };
+  } catch (err) {
+    return { error: String(err?.message ?? err).split('\n')[0].slice(0, 200) };
+  }
+}
+
+/** Writes the checksum-bound report beside the promoted artifact and records one decision_log row. Never throws. */
+function recordDiagnosticQa(storage, { runId, contentVersionId, qa, artifactPath, filename }, nowISO) {
+  if (!qa) return;
+  try {
+    let reason;
+    if (qa.report) {
+      const written = writeQaReportArtifact({ dir: path.dirname(artifactPath), filename, report: qa.report, artifactPath });
+      reason = written.written
+        ? `artifact_${written.artifactChecksum}_report_${written.checksum}_status_${qa.report.status}`
+        : `report_not_written_${written.reason}`;
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersionId,
+        decision: written.written ? DECISION_LOG_DECISION.MEDIA_QA_RECORDED : DECISION_LOG_DECISION.MEDIA_QA_NOT_RECORDED, reason
+      }, nowISO);
+    } else {
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersionId,
+        decision: DECISION_LOG_DECISION.MEDIA_QA_NOT_RECORDED, reason: `qa_error_${qa.error}`
+      }, nowISO);
+    }
+  } catch { /* evidence-only: a QA persistence problem must never alter the media outcome */ }
 }
 
 /** D-G2 assets currently attached to this content_version, with usage_context merged in. Read-only. Identical helper to src/production/pipeline.js's own (deliberately re-implemented, per the existing per-stage decoupling convention). */
@@ -439,6 +477,9 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     );
   }
 
+  // Diagnostic QA on the validated, not-yet-promoted bytes (evidence only).
+  const qa = runDiagnosticQa(finalVideoTmpPath, { stage: 'long_form', kenBurnsMotion: resolveMotionEnabled() });
+
   // Validated -> promote to the final deterministic path (atomic rename).
   finalizeArtifact(finalVideoTmpPath, finalVideoPath);
   const artifactChecksum = sha256File(finalVideoPath);
@@ -487,6 +528,7 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     return { outcome: OUTCOME.ALREADY_RENDERED, mediaArtifact: existing ?? null, ...(asr ? { asr } : {}) };
   }
 
+  recordDiagnosticQa(storage, { runId, contentVersionId: contentVersion.id, qa, artifactPath: finalVideoPath, filename: 'media-qa.json' }, nowISO);
   const mediaArtifact = storage.get('SELECT * FROM media_artifacts WHERE id = ?', [outcome.mediaArtifactId]);
   return { outcome: OUTCOME.RENDERED, mediaArtifact, ...(asr ? { asr } : {}) };
 }
@@ -683,6 +725,7 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
     return { outcome: OUTCOME.VALIDATION_FAILED, reason: validation.reason, mediaArtifact: null };
   }
 
+  const qa = runDiagnosticQa(finalVideoTmpPath, { stage: 'short_form', kenBurnsMotion: resolveMotionEnabled() });
   finalizeArtifact(finalVideoTmpPath, finalVideoPath);
   const artifactChecksum = sha256File(finalVideoPath);
 
@@ -724,6 +767,7 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
     return { outcome: OUTCOME.ALREADY_RENDERED, mediaArtifact: existing ?? null };
   }
 
+  recordDiagnosticQa(storage, { runId, contentVersionId: contentVersion.id, qa, artifactPath: finalVideoPath, filename: 'media-qa-short.json' }, nowISO);
   const shortFormArtifact = storage.get('SELECT * FROM short_form_media_artifacts WHERE id = ?', [outcome.shortFormId]);
   return { outcome: OUTCOME.RENDERED, mediaArtifact: shortFormArtifact };
 }
