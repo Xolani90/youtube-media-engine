@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { analyzeMediaQa, defaultRunner, parseAnalysisOutput, silentSecondsWithinAudio, writeQaReportArtifact, verifyQaReportBinding, resolveMediaQaEnabled, QA_STATUS, QA_SEVERITY, QA_THRESHOLDS } from '../../src/media/qaWorker.js';
+import { analyzeMediaQa, defaultRunner, parseAnalysisOutput, silentSecondsWithinAudio, eventSecondsWithinVideo, writeQaReportArtifact, verifyQaReportBinding, resolveMediaQaEnabled, QA_STATUS, QA_SEVERITY, QA_THRESHOLDS } from '../../src/media/qaWorker.js';
 import { renderMotionClip, planMotion } from '../../src/media/motion.js';
 
 // Real FFmpeg/FFprobe, real worker. Synthetic media is deterministic; every generated file is removed.
@@ -87,6 +87,59 @@ test('silent seconds are clamped to the audio duration (an EOF silence closed pa
   assert.equal(silentSecondsWithinAudio(4, 10), 4);
   assert.equal(silentSecondsWithinAudio(0, 10), 0);
   assert.equal(silentSecondsWithinAudio(3.2, null), 3.2, 'unknown audio duration: nothing to clamp against');
+});
+
+// Black / freeze ratios go through the real worker; only FFmpeg's detector log (and, for the invalid-duration case, the probe
+// JSON) is substituted, so the report is built by the production code path.
+const detectorRunner = (analysisStderr, probeEdit = (p) => p) => (cmd, args, o) => {
+  if (args.includes('-vf')) return { status: 0, signal: null, stdout: '', stderr: analysisStderr, error: null };
+  const r = defaultRunner(cmd, args, o);
+  return args.includes('-print_format') ? { ...r, stdout: JSON.stringify(probeEdit(JSON.parse(r.stdout))) } : r;
+};
+const blackLog = (d) => `[blackdetect @ 0x1] black_start:0 black_end:${d} black_duration:${d}\n`;
+const freezeLog = (d) => `lavfi.freezedetect.freeze_start: 0\nlavfi.freezedetect.freeze_duration: ${d}\nlavfi.freezedetect.freeze_end: ${d}\n`;
+
+test('black and frozen ratios: in-range results are unchanged', () => {
+  const f = make('ratio-normal.mp4', [...moving(4), ...speechLike(4)]);
+  const base = analyzeMediaQa(f, { runner: detectorRunner('') });
+  const vd = base.streams.video.duration_seconds;
+  const r = analyzeMediaQa(f, { runner: detectorRunner(blackLog(1) + freezeLog(2)) });
+  assert.equal(r.black.black_seconds, 1);
+  assert.equal(r.black.ratio, Math.round((1 / vd) * 1e4) / 1e4);
+  assert.equal(r.freeze.frozen_seconds, 2);
+  assert.equal(r.freeze.ratio, Math.round((2 / vd) * 1e4) / 1e4);
+  assert.equal(analyzeMediaQa(f, { runner: detectorRunner('') }).black.ratio, 0);
+});
+
+test('black and frozen ratios are capped at 1 when a detector closes past the end of the video', () => {
+  const f = make('ratio-over.mp4', [...moving(4), ...speechLike(4)]);
+  const vd = analyzeMediaQa(f, { runner: detectorRunner('') }).streams.video.duration_seconds;
+  const r = analyzeMediaQa(f, { runner: detectorRunner(blackLog(vd + 0.5) + freezeLog(vd + 0.5)) });
+  assert.equal(r.black.ratio, 1);
+  assert.equal(r.freeze.ratio, 1);
+  assert.ok(r.black.black_seconds <= vd && r.freeze.frozen_seconds <= vd, `${r.black.black_seconds} / ${r.freeze.frozen_seconds} of ${vd}s`);
+  // The warn / fail-candidate decisions are unchanged: a full-length black or frozen video is still reported as before.
+  assert.equal(sev(r, 'black_video'), QA_SEVERITY.FAIL_CANDIDATE);
+  assert.equal(sev(r, 'frozen_video'), QA_SEVERITY.WARN);
+});
+
+test('black and frozen ratios: unknown video duration keeps the null ratio and never produces NaN or Infinity', () => {
+  const f = make('ratio-nodur.mp4', [...moving(4), ...speechLike(4)]);
+  const dropDuration = (p) => { for (const st of p.streams) if (st.codec_type === 'video') st.duration = 'N/A'; delete p.format.duration; return p; };
+  const r = analyzeMediaQa(f, { runner: detectorRunner(blackLog(2) + freezeLog(2), dropDuration) });
+  assert.equal(r.black.ratio, null);
+  assert.equal(r.freeze.ratio, null);
+  const nums = [r.black.black_seconds, r.freeze.frozen_seconds];
+  assert.ok(nums.every((n) => Number.isFinite(n)), JSON.stringify(nums));
+  assert.ok(!JSON.stringify(r).includes('NaN') && !JSON.stringify(r).includes('Infinity'));
+});
+
+test('event seconds are clamped to the video duration; in-range and unknown-duration values are untouched', () => {
+  assert.equal(eventSecondsWithinVideo(6.005, 6), 6);
+  assert.equal(eventSecondsWithinVideo(2.5, 6), 2.5);
+  assert.equal(eventSecondsWithinVideo(0, 6), 0);
+  assert.equal(eventSecondsWithinVideo(3.2, null), 3.2);
+  assert.equal(eventSecondsWithinVideo(3.2, 0), 3.2);
 });
 
 test('near-silent audio is a FAIL_CANDIDATE', () => {

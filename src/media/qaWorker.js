@@ -154,6 +154,11 @@ export function parseAnalysisOutput(stderr, { videoDuration, audioDuration }) {
 export function silentSecondsWithinAudio(silentSeconds, audioSeconds) {
   return audioSeconds > 0 ? Math.min(silentSeconds, audioSeconds) : silentSeconds;
 }
+// Same defence for black and frozen video: an event closed against the stream cannot exceed the video itself, so the
+// ratio stays within 0..1. A missing or non-positive duration is left alone (the ratio is then null, as before).
+export function eventSecondsWithinVideo(eventSeconds, videoSeconds) {
+  return videoSeconds > 0 ? Math.min(eventSeconds, videoSeconds) : eventSeconds;
+}
 function sumDurations(segs) { return segs.reduce((a, s) => a + (s.duration ?? 0), 0); }
 function maxDuration(segs) { return segs.reduce((a, s) => Math.max(a, s.duration ?? 0), 0); }
 
@@ -275,10 +280,11 @@ export function analyzeMediaQa(filePath, {
         const parsed = parseAnalysisOutput(ar.stderr, { videoDuration: vd.seconds, audioDuration: ad.seconds });
         if (vf) {
           report.black.ran = true; report.black.segments = parsed.black;
-          report.black.black_seconds = round(sumDurations(parsed.black));
-          report.black.ratio = vd.seconds ? round(sumDurations(parsed.black) / vd.seconds, 4) : null;
+          const bk = eventSecondsWithinVideo(sumDurations(parsed.black), vd.seconds);
+          report.black.black_seconds = round(bk);
+          report.black.ratio = vd.seconds ? round(bk / vd.seconds, 4) : null;
           report.freeze.ran = true; report.freeze.segments = parsed.freeze;
-          const fz = sumDurations(parsed.freeze);
+          const fz = eventSecondsWithinVideo(sumDurations(parsed.freeze), vd.seconds);
           report.freeze.frozen_seconds = round(fz);
           report.freeze.ratio = vd.seconds ? round(fz / vd.seconds, 4) : null;
           if (parsed.freeze.some((s) => s.unterminated && s.duration === null)) noteUnavailable('freeze_unterminated_extent', 'VIDEO_DURATION_UNKNOWN');
