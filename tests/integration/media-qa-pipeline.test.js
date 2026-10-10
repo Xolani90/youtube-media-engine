@@ -83,6 +83,8 @@ test('valid output continues through the production path; QA report is bound to 
   assert.equal(report.status, QA_STATUS.COMPLETE, JSON.stringify(report.unavailable));
   assert.ok(report.findings.every((f) => f.enforced === false));
   assert.equal(report.context.kenBurnsMotion, true);
+  // Calibration: the real narration + loudnorm + AAC output measures about -1.0..-0.9 dBTP, which must not be flagged (warn line is -0.5).
+  assert.ok(!report.findings.some((f) => f.check === 'true_peak_overshoot'), JSON.stringify(report.loudness));
 
   const logged = qaRows(ctx);
   assert.equal(logged.length, 1);

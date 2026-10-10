@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { analyzeMediaQa, defaultRunner, parseAnalysisOutput, writeQaReportArtifact, verifyQaReportBinding, resolveMediaQaEnabled, QA_STATUS, QA_SEVERITY, QA_THRESHOLDS } from '../../src/media/qaWorker.js';
+import { analyzeMediaQa, defaultRunner, parseAnalysisOutput, silentSecondsWithinAudio, writeQaReportArtifact, verifyQaReportBinding, resolveMediaQaEnabled, QA_STATUS, QA_SEVERITY, QA_THRESHOLDS } from '../../src/media/qaWorker.js';
 import { renderMotionClip, planMotion } from '../../src/media/motion.js';
 
 // Real FFmpeg/FFprobe, real worker. Synthetic media is deterministic; every generated file is removed.
@@ -77,6 +77,16 @@ test('silent audio track is a FAIL_CANDIDATE (effectively_silent_audio)', () => 
   const r = analyzeMediaQa(f);
   assert.equal(r.status, QA_STATUS.COMPLETE, JSON.stringify(r.unavailable));
   assert.equal(sev(r, 'effectively_silent_audio'), QA_SEVERITY.FAIL_CANDIDATE);
+  // The ratio is a fraction of the audio duration, so it can never leave 0..1 (FFmpeg may close an EOF silence slightly late).
+  assert.ok(r.silence.ratio >= 0 && r.silence.ratio <= 1, `silent ratio ${r.silence.ratio}`);
+  assert.ok(r.silence.silent_seconds <= r.streams.audio.duration_seconds, `silent ${r.silence.silent_seconds}s of ${r.streams.audio.duration_seconds}s`);
+});
+
+test('silent seconds are clamped to the audio duration (an EOF silence closed past the end cannot push the ratio above 1); shorter silences are untouched', () => {
+  assert.equal(silentSecondsWithinAudio(10.005, 10), 10);
+  assert.equal(silentSecondsWithinAudio(4, 10), 4);
+  assert.equal(silentSecondsWithinAudio(0, 10), 0);
+  assert.equal(silentSecondsWithinAudio(3.2, null), 3.2, 'unknown audio duration: nothing to clamp against');
 });
 
 test('near-silent audio is a FAIL_CANDIDATE', () => {
@@ -90,6 +100,7 @@ test('excessively loud audio is flagged (loudness deviation FAIL_CANDIDATE + tru
   const r = analyzeMediaQa(f);
   assert.equal(sev(r, 'loudness_deviation'), QA_SEVERITY.FAIL_CANDIDATE, JSON.stringify(r.loudness));
   assert.ok(r.loudness.deviation_lu > QA_THRESHOLDS.loudness.fail_candidate_abs_deviation_lu);
+  assert.equal(sev(r, 'true_peak_overshoot'), QA_SEVERITY.WARN, JSON.stringify(r.loudness)); // a real overshoot (+1.4 dBFS in calibration) is still flagged, warn-only
 });
 
 test('audio/video duration mismatch is flagged', () => {

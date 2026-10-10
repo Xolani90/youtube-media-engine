@@ -49,7 +49,7 @@ export const QA_THRESHOLDS = Object.freeze({
     class: 'SUBJECTIVE_TUNING', target_lufs: LOUDNORM_TARGETS.I,
     warn_abs_deviation_lu: 2, fail_candidate_abs_deviation_lu: 6
   }),
-  true_peak: Object.freeze({ class: 'SUBJECTIVE_TUNING_WARN_ONLY', target_dbtp: LOUDNORM_TARGETS.TP, warn_above_dbtp: -1.0 })
+  true_peak: Object.freeze({ class: 'SUBJECTIVE_TUNING_WARN_ONLY', target_dbtp: LOUDNORM_TARGETS.TP, warn_above_dbtp: -0.5 })
 });
 
 const DEFAULT_TIMEOUTS_MS = Object.freeze({ version: 15_000, probe: 30_000, analysis: 15 * 60_000 });
@@ -149,6 +149,11 @@ export function parseAnalysisOutput(stderr, { videoDuration, audioDuration }) {
   return out;
 }
 
+// A silent interval cannot be longer than the audio itself. FFmpeg can close an end-of-file silence a few
+// milliseconds past the measured audio duration, which made the ratio exceed 1; clamp to the valid 0..duration range.
+export function silentSecondsWithinAudio(silentSeconds, audioSeconds) {
+  return audioSeconds > 0 ? Math.min(silentSeconds, audioSeconds) : silentSeconds;
+}
 function sumDurations(segs) { return segs.reduce((a, s) => a + (s.duration ?? 0), 0); }
 function maxDuration(segs) { return segs.reduce((a, s) => Math.max(a, s.duration ?? 0), 0); }
 
@@ -288,7 +293,7 @@ export function analyzeMediaQa(filePath, {
             if (parsed.truePeak === null) noteUnavailable('true_peak', 'EBUR128_TRUE_PEAK_MISSING');
           }
           report.silence.ran = true; report.silence.segments = parsed.silence;
-          const sl = sumDurations(parsed.silence);
+          const sl = silentSecondsWithinAudio(sumDurations(parsed.silence), ad.seconds);
           report.silence.silent_seconds = round(sl);
           report.silence.ratio = ad.seconds ? round(sl / ad.seconds, 4) : null;
           if (parsed.silence.some((s) => s.unterminated && s.duration === null)) noteUnavailable('silence_unterminated_extent', 'AUDIO_DURATION_UNKNOWN');
