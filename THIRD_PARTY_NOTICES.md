@@ -24,6 +24,8 @@ Used via `src/media/kokoroWorker.js`, a child process called by `src/media/narra
 
 Used via `src/media/sceneRelevanceWorker.js`, a child process called by `src/media/sceneRelevance.js`. The worker loads the model from a local directory only (remote model access disabled); it never downloads weights. Scores rank candidate images against scene text; they are not a rights, factual or safety check. Not independently re-verified: the legal reading that the base model's license covers the third-party ONNX files.
 
+Pinned artifacts (verified 2026-10-10): Xenova/siglip-base-patch16-224 at revision 4649052661e53c7000355844105f8a1792088239. onnx/text_model_quantized.onnx SHA-256 AD0329B1F35ACC66D8953FF2559CE358DA8EB0A7011794CF951523D63A4DBCE2; onnx/vision_model_quantized.onnx SHA-256 EF14A954F3D57E1806666432BD9785004C1DC27100AA260EEE0CB0F10A5DE058. Both match the X-Linked-ETag Hugging Face reports for that revision. This pins the files that were tested; it is not a license determination.
+
 ## espeak-ng (fallback narration)
 Invoked as an external CLI (GPL-3.0-or-later); not bundled or linked into this repository.
 
