@@ -263,6 +263,7 @@ scenes or prompt wording. Nothing here changes production behaviour.
 |---|---|---|
 | `eval-scene-relevance-v2-lib.js`, `-contact-sheet.js`, `-freeze.js`, `-report.js`, tests | yes | none |
 | `eval-scene-relevance-v2-fetch.js` | `--dry-run` only | Pixabay key, network, `--confirm-stage-approved` |
+| `eval-scene-relevance-v2-evidence.js` (`record`, `verify`) | yes | none (needs a completed freeze) |
 | `eval-scene-relevance-v2-run.js` | no | local model folder (`SCENE_RELEVANCE_MODEL_DIR`) and frozen judgments |
 
 ## 11. Limitations
@@ -286,3 +287,12 @@ from Hugging Face; base model `google/siglip-base-patch16-224` declares Apache-2
 no licence. Evidence still needed before any production or commercial use: a licence statement from the
 conversion's author, or a self-conversion from the Apache-2.0 base weights with documented provenance, plus
 the owner's recorded decision. This evaluation does not clear the model for production or commercial use.
+
+## 13. Freeze lifecycle and model identity (pre-freeze addendum; behaviour of the tooling, not a change to criteria)
+
+Once `judgments-manifest.json` (or any freeze-era or review artefact) exists, the fetch script refuses to run and nothing is
+removed or replaced; a new evaluation uses a separate folder and preregistration. Before inference the run script verifies the
+bytes of the two pinned ONNX files named in section 12 against those SHA-256 values, again before every call and after the run;
+the report accepts a result only if that verified identity is recorded. No threshold, scene, split or negative case changes.
+The tokenizer, config and preprocessor files are not hash-pinned (the repository records no hashes for them).
+The recovery procedure is in `FREEZE-EVIDENCE.md`.

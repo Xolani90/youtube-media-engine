@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  DEFAULT_EVAL_DIR, CRITERIA, candidateIntegritySha256, readJsonStrict, buildItems, loadFrozen, validateResults, sha256File, stableStringify,
+  DEFAULT_EVAL_DIR, CRITERIA, validateModelIdentityRecord, candidateIntegritySha256, readJsonStrict, buildItems, loadFrozen, validateResults, sha256File, stableStringify,
   sceneOutcome, aggregatePositives, decide, detectionItems, detectionGroupOf, designedCounts, partitionDetection, auroc, selectRule, evaluateRule, agreementBetween, estimateLoadVsInference, median, mean, pct
 } from './eval-scene-relevance-v2-lib.js';
 
@@ -34,6 +34,10 @@ function load() {
   const m = results.meta;
   if (m.manifestSha256 !== frozen.manifestSha256) throw new Error('results.json was produced under a different manifest than the one on disk');
   if (!String(m.workerPath).startsWith('default')) throw new Error(`a non-default worker was used (${m.workerPath}); this is not a real-model run`);
+  // Model identity: the run must have VERIFIED the pinned model bytes before and after inference, and the recorded identity must equal
+  // the repository pins. A hash that was merely recorded (or recorded against other pins) never passes.
+  validateModelIdentityRecord(m.modelIdentity);
+  for (const [rel, f] of Object.entries(m.modelIdentity.files)) if (m.onnxSha256?.[rel.split('/').pop()] !== f.sha256) throw new Error(`results.json: onnxSha256 is inconsistent with the verified model identity for ${rel}`);
   for (const [f, h] of Object.entries(frozen.manifest.judgmentFiles)) if (m.judgmentFiles?.[f] !== h) throw new Error(`results.json recorded a different hash for ${f}`);
   // loadFrozen already re-hashed candidates.json and every image on disk; here the results must also have been produced under those exact inputs.
   if (m.candidatesSha256 !== frozen.manifest.candidateIntegrity.candidatesSha256) throw new Error('results.json was produced with a different candidates.json than the frozen one');

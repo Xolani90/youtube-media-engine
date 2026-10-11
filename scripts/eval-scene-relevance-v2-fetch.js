@@ -12,6 +12,8 @@
 // unrecognised state. The only way forward is an explicit owner decision in
 // fetch-owner-decisions.json, bound to the SHA-256 of that exact recorded failure:
 //   node scripts/eval-scene-relevance-v2-fetch.js --show-insufficient      (offline; prints each hash and a template)
+// FREEZE GUARD: once judgments-manifest.json (or any freeze-era or review artefact, or an unreadable folder) exists, every mode refuses before any
+// other work. A new evaluation needs its own folder and preregistration; a freeze is never removed or replaced (see FREEZE-EVIDENCE.md).
 // An approved retry re-uses the SAME query (a query change needs a new preregistration). Before retrying,
 // the old record and its image folder are moved to attemptHistory / images/<scene>.attempt<N>/; nothing is deleted.
 //
@@ -27,13 +29,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { boundPixabayQuery } from '../src/providers/asset/PixabayAssetSourceProvider.js';
-import { DEFAULT_EVAL_DIR, CANDIDATES_PER_SCENE, CANDIDATE_LETTERS, MIN_CANDIDATES, FETCH_DECISIONS_FILE, readJsonStrict, validateScenesDoc, validateNegativesDoc, validateFetchDecisions, insufficientGate, archiveInsufficientScene, stableStringify } from './eval-scene-relevance-v2-lib.js';
+import { DEFAULT_EVAL_DIR, CANDIDATES_PER_SCENE, CANDIDATE_LETTERS, MIN_CANDIDATES, FETCH_DECISIONS_FILE, readJsonStrict, validateScenesDoc, validateNegativesDoc, validateFetchDecisions, insufficientGate, archiveInsufficientScene, assertFetchAllowed, stableStringify } from './eval-scene-relevance-v2-lib.js';
 
 const EVAL_DIR = path.resolve(process.env.EVAL_DIR || DEFAULT_EVAL_DIR);
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes(n);
 const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : null; };
 const PER_PAGE = 20; const DELAY_MS = 700;
+
+// FREEZE GUARD. Runs before ANY other work: no scenes read, no gate, no network, no write, rename or archive.
+// Refuses (every mode, including --dry-run and --show-insufficient) once a freeze manifest, freeze-era residue, a review
+// artefact or an unreadable folder state exists. It never removes or replaces a freeze.
+try { assertFetchAllowed(EVAL_DIR); } catch (e) { console.error(`FETCH REFUSED before any network call or file change: ${e.message}`); process.exit(1); }
+const guard = () => assertFetchAllowed(EVAL_DIR); // re-checked immediately before every write below (a freeze created mid-run stops the run)
 const LICENSE = 'Pixabay Content License (as stated by Pixabay at fetch time; not independently verified)';
 
 const scenesDoc = readJsonStrict(path.join(EVAL_DIR, 'scenes.json'));
@@ -88,15 +96,17 @@ function sniffFormat(buf) {
 
 async function main() {
   const doc = candDoc0 ?? { schema: 'scene-relevance-v2-candidates', endpoint: 'https://pixabay.com/api/', params: { image_type: 'photo', safesearch: 'true', per_page: PER_PAGE }, scenes: {} };
-  const save = () => fs.writeFileSync(candPath, stableStringify(doc));
+  const save = () => { guard(); fs.writeFileSync(candPath, stableStringify(doc)); };
   let searches = 0; let downloads = 0;
   for (const a of gate.approved) {
     if (!plan.some((p) => p.id === a.sceneId)) continue;
+    guard();
     const n = archiveInsufficientScene(doc, a.sceneId, a.decision, EVAL_DIR); save();
     console.log(`${a.sceneId}: owner-approved retry (same query); previous attempt preserved as attempt ${n}`);
   }
   for (const p of plan) {
     if (doc.scenes[p.id]) { console.log(`${p.id}: already fetched, skipping`); continue; }
+    guard();
     const q = boundPixabayQuery(p.query);
     let res;
     try { res = await fetch(`https://pixabay.com/api/?${new URLSearchParams({ key, q, image_type: 'photo', safesearch: 'true', per_page: String(PER_PAGE) })}`); }
@@ -122,6 +132,7 @@ async function main() {
       catch (err) { failures.push({ candidateId, searchRank: picks[i] + 1, stage: 'download', error: redact(err?.message) }); console.error(`${candidateId}: download failed (recorded)`); continue; }
       const format = sniffFormat(buf);
       if (!buf.length || !format) { failures.push({ candidateId, searchRank: picks[i] + 1, stage: 'format', error: 'not a JPEG/PNG/WebP image' }); console.error(`${candidateId}: bad image bytes (recorded)`); continue; }
+      guard();
       const rel = `images/${p.id}/${candidateId}.${format}`;
       fs.mkdirSync(path.join(EVAL_DIR, 'images', p.id), { recursive: true });
       fs.writeFileSync(path.join(EVAL_DIR, ...rel.split('/')), buf);
@@ -134,4 +145,4 @@ async function main() {
   }
   console.log(`\nDone: ${searches} searches, ${downloads} downloads this run.`);
 }
-main();
+main().catch((e) => { console.error(`FETCH STOPPED: ${redact(e?.message)}. Nothing further was written; re-run resumes if the evaluation folder is still unfrozen.`); process.exitCode = 1; });

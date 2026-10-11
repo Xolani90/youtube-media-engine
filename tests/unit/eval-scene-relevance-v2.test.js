@@ -65,10 +65,14 @@ function makeFixture({ judg = {} } = {}) {
 const run = (name, args, env) => spawnSync(process.execPath, [script(name), ...args], { cwd: ROOT, env: { ...process.env, ...env }, encoding: 'utf8' });
 const freeze = (dir, extra = []) => run('freeze', ['--primary', 'owner', ...extra], { EVAL_DIR: dir });
 
+// What a genuine, pin-verified run records: built only from the repository pins.
+const genuineIdentity = (over = {}) => ({ ...L.buildModelIdentityRecord(L.PINNED_MODEL, Object.fromEntries(Object.entries(L.PINNED_MODEL.files).map(([rel, h]) => [rel, { sha256: h, bytes: 1000 }])), { verifiedAfterInference: true }), ...over });
+const genuineOnnx = () => Object.fromEntries(Object.entries(L.PINNED_MODEL.files).map(([rel, h]) => [rel.split('/').pop(), h]));
+
 // Synthetic results whose scores follow the judgments (relevant high, others low).
 function syntheticResults(dir, its, manifest, { tamper } = {}) {
   const j = L.readJsonStrict(path.join(dir, 'judgments-owner.json'));
-  const out = { schema: 'scene-relevance-v2-results', meta: { startedAt: 'x', node: 'v', platform: 'p', gitHead: null, modelDirName: 'm', dtype: 'q8', preprocessorConfig: null, workerPath: 'default (src/media/sceneRelevanceWorker.js)', manifestSha256: L.sha256File(path.join(dir, 'judgments-manifest.json')), frozenFiles: manifest.frozenFiles, judgmentFiles: manifest.judgmentFiles, candidatesSha256: manifest.candidateIntegrity.candidatesSha256, candidateIntegritySha256: L.candidateIntegritySha256(manifest.candidateIntegrity) }, items: [], timing: [{ sceneId: 'A02', images: 8, oneImageMs: [1000, 1000], allImagesMs: [2400, 2400], allCallsOk: true }] };
+  const out = { schema: 'scene-relevance-v2-results', meta: { startedAt: 'x', node: 'v', platform: 'p', gitHead: null, modelDirName: 'm', dtype: 'q8', preprocessorConfig: null, workerPath: 'default (src/media/sceneRelevanceWorker.js)', manifestSha256: L.sha256File(path.join(dir, 'judgments-manifest.json')), frozenFiles: manifest.frozenFiles, judgmentFiles: manifest.judgmentFiles, candidatesSha256: manifest.candidateIntegrity.candidatesSha256, candidateIntegritySha256: L.candidateIntegritySha256(manifest.candidateIntegrity), onnxSha256: genuineOnnx(), modelIdentity: genuineIdentity() }, items: [], timing: [{ sceneId: 'A02', images: 8, oneImageMs: [1000, 1000], allImagesMs: [2400, 2400], allCallsOk: true }] };
   for (const it of its) {
     const rel = new Set(j.items[it.itemId].relevant);
     const ranking = it.candidates.map((c, i) => ({ candidateId: c.candidateId, score: rel.size ? (rel.has(c.candidateId) ? (c.candidateId.endsWith('C') ? 0.5 : 0.4) : 0.1 - i * 0.001) : 0.05 - i * 0.0005 }))
@@ -192,9 +196,20 @@ test('run script refuses without frozen judgments, with a changed hash, and with
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// A tiny stand-in model folder plus a pins file for it (the testing hook). Real pins can never match synthetic bytes.
+function fakeModel(over = {}) {
+  const md = fs.mkdtempSync(path.join(os.tmpdir(), 'scene-rel-v2-model-')); fs.mkdirSync(path.join(md, 'onnx'));
+  const bytes = { 'onnx/text_model_quantized.onnx': 'text-bytes', 'onnx/vision_model_quantized.onnx': 'vision-bytes', ...over };
+  for (const [rel, b] of Object.entries(bytes)) fs.writeFileSync(path.join(md, ...rel.split('/')), b);
+  for (const f of L.UNPINNED_MODEL_FILES) fs.writeFileSync(path.join(md, f), `{"${f}":1}`);
+  const pins = { repo: 'Xenova/siglip-base-patch16-224', revision: L.PINNED_MODEL.revision, files: { 'onnx/text_model_quantized.onnx': L.sha256Hex('text-bytes'), 'onnx/vision_model_quantized.onnx': L.sha256Hex('vision-bytes') } };
+  const pinsFile = path.join(md, 'pins.json'); fs.writeFileSync(pinsFile, JSON.stringify(pins));
+  return { md, pins, pinsFile };
+}
 test('run script (fake worker, offline) writes valid results; report then marks the non-default worker INVALID', () => {
   const { dir, its } = makeFixture(); assert.equal(freeze(dir).status, 0);
-  const env = { EVAL_DIR: dir, SCENE_RELEVANCE_MODEL_DIR: dir, EVAL_WORKER_PATH: FAKE_WORKER, FAKE_MODE: 'ok' };
+  const fm = fakeModel();
+  const env = { EVAL_DIR: dir, SCENE_RELEVANCE_MODEL_DIR: fm.md, EVAL_MODEL_PINS_FILE: fm.pinsFile, EVAL_WORKER_PATH: FAKE_WORKER, FAKE_MODE: 'ok' };
   const r = run('run', [], env); assert.equal(r.status, 0, r.stderr);
   const res = L.validateResults(L.readJsonStrict(path.join(dir, 'results.json')), its);
   assert.equal(res.items.length, 50); assert.equal(res.timing.length, 3);
@@ -935,4 +950,223 @@ test('integrity: path escapes and inconsistent candidate records are refused; ha
   const ci = L.buildCandidateIntegrity(dir, L.buildItems(realScenes(), realNeg(), cd2), 'c'.repeat(64));
   assert.deepEqual(ci.images[L.sha256Hex('dup')].map((e) => e.candidateId), ['A01-A', 'A01-B']);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ================================================================ pre-fetch safety patch (freeze guard, model pin)
+// Recursive snapshot: relative path -> sha256 (files), 'dir', or 'link'. Used to prove a refused run changed nothing.
+function snapshot(dir) {
+  const out = {};
+  const walk = (d, rel) => { for (const n of fs.readdirSync(d).sort()) { const p = path.join(d, n); const r = rel ? `${rel}/${n}` : n; const st = fs.lstatSync(p); if (st.isDirectory()) { out[r] = 'dir'; walk(p, r); } else if (st.isFile()) out[r] = L.sha256File(p); else out[r] = 'link'; } };
+  walk(dir, ''); return out;
+}
+const fetchFixture = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scene-rel-v2-guard-')); for (const f of ['scenes.json', 'negatives.json']) fs.copyFileSync(path.join(REAL, f), path.join(dir, f)); return dir; };
+
+test('freezeState classifies the folder from entry names alone and only "clean" allows collection', () => {
+  const mk = (...names) => { const d = fetchFixture(); for (const n of names) { if (n.endsWith('/')) fs.mkdirSync(path.join(d, n)); else fs.writeFileSync(path.join(d, n), '{}'); } return d; };
+  assert.equal(L.freezeState(mk()).state, 'clean'); assert.equal(L.freezeState(path.join(os.tmpdir(), 'scene-rel-v2-does-not-exist')).state, 'clean');
+  assert.equal(L.assertFetchAllowed(mk()), true);
+  const cases = [
+    [['judgments-manifest.json'], 'frozen'], [['JUDGMENTS-MANIFEST.JSON'], 'frozen'], [['judgments-manifest.json/'], 'frozen'],
+    [['judgments-manifest.json', 'results.json'], 'frozen'],
+    [['results.json'], 'inconsistent'], [['judgments-owner.json'], 'inconsistent'], [['frozen-rule.json'], 'inconsistent'], [['metrics.json'], 'inconsistent'], [['REPORT.md'], 'inconsistent'],
+    [['judgments-manifest.json.bak'], 'ambiguous'], [['judgments-manifest.old'], 'ambiguous'],
+    [['answer-key.json'], 'review-started'], [['blind-judgments-owner.json'], 'review-started'], [['contact-sheet.html'], 'review-started'], [['review-assets/'], 'review-started']
+  ];
+  for (const [names, want] of cases) { const d = mk(...names); assert.equal(L.freezeState(d).state, want, names.join(',')); assert.throws(() => L.assertFetchAllowed(d), /Fetching, archiving and rewriting candidates are refused/, names.join(',')); fs.rmSync(d, { recursive: true, force: true }); }
+  const f = path.join(os.tmpdir(), `scene-rel-v2-file-${process.pid}`); fs.writeFileSync(f, 'x');
+  assert.equal(L.freezeState(f).state, 'ambiguous', 'a folder that cannot be listed is ambiguous, never clean'); fs.rmSync(f);
+});
+
+test('fetch after freeze: every mode is refused before any network call, and nothing on disk changes', () => {
+  const states = { 'manifest': ['judgments-manifest.json'], 'manifest in other case': ['Judgments-Manifest.json'], 'manifest + results': ['judgments-manifest.json', 'results.json'], 'results without manifest': ['results.json'], 'judgments without manifest': ['judgments-owner.json'], 'answer key': ['answer-key.json'], 'blind export': ['blind-judgments-owner.json'], 'manifest-like name': ['judgments-manifest.json.bak'] };
+  for (const [label, names] of Object.entries(states)) {
+    const dir = fetchFixture(); for (const n of names) fs.writeFileSync(path.join(dir, n), '{}');
+    const stub = fetchStub(dir); const env = { EVAL_DIR: dir, ...stub.env }; const before = snapshot(dir);
+    for (const args of [['--only', 'A01', '--confirm-stage-approved'], ['--group', 'positive', '--confirm-stage-approved'], ['--group', 'nearmiss', '--confirm-stage-approved'], ['--only', 'A01', '--dry-run'], ['--show-insufficient']]) {
+      const r = run('fetch', args, env);
+      assert.equal(r.status, 1, `${label} ${args.join(' ')}: ${r.stderr}`); assert.match(r.stderr, /FETCH REFUSED before any network call or file change/);
+    }
+    assert.equal(stub.calls(), 0, `${label}: no network request`); assert.deepEqual(snapshot(dir), before, `${label}: no file created, changed, renamed or removed`);
+    assert.equal(fs.existsSync(path.join(dir, 'candidates.json')), false); assert.equal(fs.existsSync(path.join(dir, 'images')), false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const f = path.join(os.tmpdir(), `scene-rel-v2-notadir-${process.pid}`); fs.writeFileSync(f, 'x');
+  const r = run('fetch', ['--only', 'A01', '--confirm-stage-approved'], { EVAL_DIR: f, PIXABAY_API_KEY: 'test-key-not-real' }); assert.equal(r.status, 1); assert.match(r.stderr, /"ambiguous"/); fs.rmSync(f);
+});
+
+test('fetch after freeze: an owner-approved insufficient-scene retry cannot rename image folders or rewrite candidates.json', () => {
+  const dir = fetchFixture();
+  const rec = { query: 'q', hitsReturned: 3, hitPixabayIds: [1, 2, 3], candidates: [{ candidateId: 'A01-A', sceneId: 'A01', localPath: 'images/A01/A01-A.jpg', sha256: L.sha256Hex('x') }], failures: [], status: 'insufficient', insufficientReason: 'too_few_downloads', recordedAt: '2026-10-12T10:00:00.000Z' };
+  fs.writeFileSync(path.join(dir, 'candidates.json'), L.stableStringify({ schema: 'scene-relevance-v2-candidates', scenes: { A01: rec } }));
+  fs.mkdirSync(path.join(dir, 'images', 'A01'), { recursive: true }); fs.writeFileSync(path.join(dir, 'images', 'A01', 'A01-A.jpg'), 'x');
+  fs.writeFileSync(path.join(dir, L.FETCH_DECISIONS_FILE), JSON.stringify(decDoc(decisionFor(rec, 'A01'))));
+  fs.writeFileSync(path.join(dir, 'judgments-manifest.json'), '{}');
+  const stub = fetchStub(dir); const before = snapshot(dir);
+  const r = run('fetch', ['--only', 'A01', '--confirm-stage-approved'], { EVAL_DIR: dir, ...stub.env });
+  assert.equal(r.status, 1); assert.match(r.stderr, /FETCH REFUSED before any network call or file change/); assert.equal(stub.calls(), 0);
+  assert.deepEqual(snapshot(dir), before); assert.ok(fs.existsSync(path.join(dir, 'images', 'A01', 'A01-A.jpg'))); assert.equal(fs.existsSync(path.join(dir, 'images', 'A01.attempt1')), false);
+  // the library function is guarded too, independent of the script
+  const doc = L.readJsonStrict(path.join(dir, 'candidates.json'));
+  assert.throws(() => L.archiveInsufficientScene(doc, 'A01', decisionFor(rec, 'A01'), dir), /Fetching, archiving and rewriting candidates are refused/);
+  assert.deepEqual(snapshot(dir), before);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('fetch: a clean folder still proceeds (the guard does not block normal collection), and a freeze created mid-run stops the run before candidates.json is written', () => {
+  const clean = fetchFixture(); const s1 = fetchStub(clean);
+  const r1 = run('fetch', ['--only', 'A01', '--confirm-stage-approved'], { EVAL_DIR: clean, ...s1.env });
+  assert.equal(r1.status, 1); assert.match(r1.stderr, /Recorded as insufficient/); assert.equal(s1.calls(), 1, 'existing insufficient-scene behaviour is unchanged');
+  assert.equal(L.readJsonStrict(path.join(clean, 'candidates.json')).scenes.A01.status, 'insufficient');
+  fs.rmSync(clean, { recursive: true, force: true });
+
+  const dir = fetchFixture(); const file = path.join(dir, 'freeze-during-search.mjs'); const log = path.join(dir, 'calls.log');
+  fs.writeFileSync(file, `import fs from 'node:fs';\nglobalThis.fetch = async (u) => { fs.appendFileSync(${JSON.stringify(log)}, 'call\\n'); fs.writeFileSync(${JSON.stringify(path.join(dir, 'judgments-manifest.json'))}, '{}'); return new Response(JSON.stringify({ hits: [1, 2, 3].map((id) => ({ id, largeImageURL: 'https://stub.invalid/' + id + '.jpg' })) }), { status: 200 }); };\n`);
+  const imp = new URL(`file://${file.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '/$1:')}`).href;
+  const r2 = run('fetch', ['--only', 'A01', '--confirm-stage-approved'], { EVAL_DIR: dir, NODE_OPTIONS: `--import ${imp}`, PIXABAY_API_KEY: 'test-key-not-real' });
+  assert.equal(r2.status, 1); assert.match(r2.stderr, /FETCH STOPPED/); assert.equal(fs.readFileSync(log, 'utf8').trim().split('\n').length, 1, 'only the one search that was already under way');
+  assert.equal(fs.existsSync(path.join(dir, 'candidates.json')), false, 'candidates.json was not written after the freeze appeared'); assert.equal(fs.existsSync(path.join(dir, 'images')), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('pinned model constants equal the existing evidence in THIRD_PARTY_NOTICES.md and PREREGISTRATION.md (no invented values)', () => {
+  const notices = fs.readFileSync(path.join(ROOT, 'THIRD_PARTY_NOTICES.md'), 'utf8'); const prereg = fs.readFileSync(path.join(REAL, 'PREREGISTRATION.md'), 'utf8');
+  for (const doc of [notices, prereg]) {
+    assert.ok(doc.includes(L.PINNED_MODEL.revision), 'revision'); assert.ok(doc.includes(L.PINNED_MODEL.repo), 'repo');
+    for (const h of Object.values(L.PINNED_MODEL.files)) assert.ok(doc.toUpperCase().includes(h.toUpperCase()), `hash ${h}`);
+  }
+  assert.deepEqual(Object.keys(L.PINNED_MODEL.files).sort(), ['onnx/text_model_quantized.onnx', 'onnx/vision_model_quantized.onnx']);
+  assert.throws(() => { L.PINNED_MODEL.revision = 'x'; L.PINNED_MODEL.files['onnx/text_model_quantized.onnx'] = 'x'; }, TypeError, 'pins are frozen');
+});
+
+test('verifyModelIdentity: correct bytes pass; changed, truncated, missing, non-regular and unreadable files are all refused', () => {
+  const fm = fakeModel(); const rec = L.verifyModelIdentity(fm.md, fm.pins);
+  assert.equal(rec.verifiedBeforeInference, true); assert.equal(rec.verifiedAfterInference, false); assert.equal(rec.pinSource, 'repository');
+  assert.equal(rec.files['onnx/text_model_quantized.onnx'].bytes, 'text-bytes'.length); assert.match(rec.identitySha256, /^[0-9a-f]{64}$/);
+  const tp = path.join(fm.md, 'onnx', 'text_model_quantized.onnx');
+  fs.writeFileSync(tp, 'text-byteS'); assert.throws(() => L.verifyModelIdentity(fm.md, fm.pins), /text_model_quantized\.onnx has SHA-256 .* expected .*inference refused/);
+  fs.writeFileSync(tp, 'text-byte'); assert.throws(() => L.verifyModelIdentity(fm.md, fm.pins), /expected/);
+  fs.writeFileSync(tp, ''); assert.throws(() => L.verifyModelIdentity(fm.md, fm.pins), /expected/);
+  fs.writeFileSync(tp, 'text-bytes'); assert.doesNotThrow(() => L.verifyModelIdentity(fm.md, fm.pins));
+  fs.rmSync(path.join(fm.md, 'onnx', 'vision_model_quantized.onnx')); assert.throws(() => L.verifyModelIdentity(fm.md, fm.pins), /missing or unreadable: onnx\/vision_model_quantized\.onnx/);
+  fs.mkdirSync(path.join(fm.md, 'onnx', 'vision_model_quantized.onnx')); assert.throws(() => L.verifyModelIdentity(fm.md, fm.pins), /not a regular file/);
+  fs.rmdirSync(path.join(fm.md, 'onnx', 'vision_model_quantized.onnx'));
+  const real = path.join(fm.md, 'real-vision.bin'); fs.writeFileSync(real, 'vision-bytes');
+  let linked = true; try { fs.symlinkSync(real, path.join(fm.md, 'onnx', 'vision_model_quantized.onnx')); } catch { linked = false; }
+  if (linked) assert.throws(() => L.verifyModelIdentity(fm.md, fm.pins), /not a regular file/, 'a symlink with the right bytes is still refused (it could be re-pointed after verification)');
+  assert.throws(() => L.verifyModelIdentity(path.join(fm.md, 'nope'), fm.pins), /model directory cannot be read/);
+  assert.throws(() => L.verifyModelIdentity(path.join(fm.md, 'pins.json'), fm.pins), /not a directory/);
+  assert.throws(() => L.verifyModelIdentity('', fm.pins), /not set/);
+  assert.throws(() => L.validatePins({ ...fm.pins, revision: 'short' }), /malformed/); assert.throws(() => L.validatePins({ ...fm.pins, files: { '../x': 'a'.repeat(64) } }), /bad entry/);
+  assert.throws(() => L.verifyModelIdentity(fm.md, { ...fm.pins, files: {} }), /malformed/, 'an empty pin set can never verify anything');
+  fs.rmSync(fm.md, { recursive: true, force: true });
+});
+
+test('run script refuses to start inference unless the pinned model bytes verify; nothing is written and the worker never runs', () => {
+  const { dir } = makeFixture(); assert.equal(freeze(dir).status, 0);
+  const marker = path.join(dir, 'worker-ran'); const worker = path.join(dir, 'marker-worker.mjs'); fs.writeFileSync(worker, `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(marker)}, 'ran');\nawait import(${JSON.stringify(new URL(`file://${FAKE_WORKER.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '/$1:')}`).href)});\n`);
+  const base = (md, extra = {}) => ({ EVAL_DIR: dir, SCENE_RELEVANCE_MODEL_DIR: md, EVAL_WORKER_PATH: worker, FAKE_MODE: 'ok', ...extra });
+  const expectRefused = (env, re) => { const r = run('run', [], env); assert.equal(r.status, 1, r.stderr); assert.match(r.stderr, re); assert.equal(fs.existsSync(path.join(dir, 'results.json')), false, 'no results.json'); assert.equal(fs.existsSync(marker), false, 'worker never started'); };
+  const ok = fakeModel(); const changed = fakeModel({ 'onnx/vision_model_quantized.onnx': 'tampered' }); const missing = fakeModel(); fs.rmSync(path.join(missing.md, 'onnx', 'text_model_quantized.onnx'));
+  expectRefused(base(ok.md), /model identity not verified: .*expected/);                       // repository pins, synthetic bytes: cannot match
+  expectRefused(base(changed.md, { EVAL_MODEL_PINS_FILE: changed.pinsFile }), /model identity not verified: .*vision_model_quantized\.onnx has SHA-256/); // pins file says 'vision-bytes', folder has other bytes
+  expectRefused(base(missing.md, { EVAL_MODEL_PINS_FILE: missing.pinsFile }), /model identity not verified: .*missing or unreadable: onnx\/text_model_quantized\.onnx/);
+  const noWorker = run('run', [], { EVAL_DIR: dir, SCENE_RELEVANCE_MODEL_DIR: ok.md, EVAL_MODEL_PINS_FILE: ok.pinsFile }); assert.equal(noWorker.status, 1); assert.match(noWorker.stderr, /only honoured together with EVAL_WORKER_PATH/);
+  assert.equal(fs.existsSync(path.join(dir, 'results.json')), false);
+  for (const x of [ok, changed, missing]) fs.rmSync(x.md, { recursive: true, force: true });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('run script: model bytes changed DURING the run abort it without writing results.json', () => {
+  const { dir } = makeFixture(); assert.equal(freeze(dir).status, 0); const fm = fakeModel();
+  const worker = path.join(dir, 'tamper-worker.mjs'); const target = path.join(fm.md, 'onnx', 'vision_model_quantized.onnx');
+  fs.writeFileSync(worker, `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(target)}, 'swapped-mid-run');\nawait import(${JSON.stringify(new URL(`file://${FAKE_WORKER.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '/$1:')}`).href)});\n`);
+  const r = run('run', [], { EVAL_DIR: dir, SCENE_RELEVANCE_MODEL_DIR: fm.md, EVAL_MODEL_PINS_FILE: fm.pinsFile, EVAL_WORKER_PATH: worker, FAKE_MODE: 'ok' });
+  assert.equal(r.status, 1, r.stderr); assert.match(r.stderr, /expected .*model files changed during the run; results\.json was NOT written/); assert.equal(fs.existsSync(path.join(dir, 'results.json')), false);
+  fs.rmSync(fm.md, { recursive: true, force: true }); fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('run script (fake worker) binds the VERIFIED identity into results.json; unpinned files are observed but not enforced', () => {
+  const { dir } = makeFixture(); assert.equal(freeze(dir).status, 0); const fm = fakeModel();
+  const r = run('run', ['--no-timing'], { EVAL_DIR: dir, SCENE_RELEVANCE_MODEL_DIR: fm.md, EVAL_MODEL_PINS_FILE: fm.pinsFile, EVAL_WORKER_PATH: FAKE_WORKER, FAKE_MODE: 'ok' });
+  assert.equal(r.status, 0, r.stderr); const m = L.readJsonStrict(path.join(dir, 'results.json')).meta;
+  assert.equal(m.modelIdentity.verifiedBeforeInference, true); assert.equal(m.modelIdentity.verifiedAfterInference, true); assert.equal(m.modelIdentity.pinSource, 'test-override');
+  assert.equal(m.onnxSha256['text_model_quantized.onnx'], L.sha256Hex('text-bytes')); assert.deepEqual(Object.keys(m.unpinnedFilesObserved).sort(), [...L.UNPINNED_MODEL_FILES].sort());
+  assert.throws(() => L.validateModelIdentityRecord(m.modelIdentity), /pins, not the repository pins/, 'an override-pinned run can never satisfy the report');
+  fs.rmSync(fm.md, { recursive: true, force: true }); fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('report checks the model identity: genuine passes; wrong, missing, unverified or inconsistent identity metadata is INVALID', () => {
+  assert.doesNotThrow(() => L.validateModelIdentityRecord(genuineIdentity()));
+  const bad = (over, re) => assert.throws(() => L.validateModelIdentityRecord(typeof over === 'function' ? over(genuineIdentity()) : { ...genuineIdentity(), ...over }), re);
+  bad({ pinSource: 'test-override' }, /not the repository pins/); bad({ revision: 'a'.repeat(40) }, /repo or revision/); bad({ repo: 'someone/else' }, /repo or revision/);
+  bad({ verifiedBeforeInference: false }, /both before and after/); bad({ verifiedAfterInference: false }, /both before and after/); bad({ verifiedAfterInference: 'true' }, /both before and after/);
+  bad({ identitySha256: 'b'.repeat(64) }, /digest is inconsistent/); bad({ schema: 'x' }, /missing/);
+  bad((r) => { r.files['onnx/text_model_quantized.onnx'].sha256 = 'c'.repeat(64); return r; }, /differs from the pinned value/);
+  bad((r) => { delete r.files['onnx/vision_model_quantized.onnx']; return r; }, /differ from the pinned file set/);
+  bad((r) => { r.files['onnx/extra.onnx'] = { sha256: 'd'.repeat(64), bytes: 1 }; return r; }, /differ from the pinned file set/);
+  bad((r) => { r.files['onnx/text_model_quantized.onnx'].bytes = 0; return r; }, /size/);
+  assert.throws(() => L.validateModelIdentityRecord(undefined), /missing/);
+  const setup = (tamper) => { const f = makeFixture(); assert.equal(freeze(f.dir).status, 0); syntheticResults(f.dir, f.its, L.readJsonStrict(path.join(f.dir, 'judgments-manifest.json')), { tamper }); return f; };
+  const verdict = (d) => fs.readFileSync(path.join(d, 'REPORT.md'), 'utf8');
+  const cases = [
+    [(r) => { delete r.meta.modelIdentity; }, /model identity record is missing/],
+    [(r) => { r.meta.modelIdentity.files['onnx/vision_model_quantized.onnx'].sha256 = 'e'.repeat(64); }, /differs from the pinned value/],
+    [(r) => { r.meta.modelIdentity.verifiedBeforeInference = false; }, /both before and after/],
+    [(r) => { r.meta.onnxSha256['text_model_quantized.onnx'] = 'f'.repeat(64); }, /onnxSha256 is inconsistent/],
+    [(r) => { delete r.meta.onnxSha256; }, /onnxSha256 is inconsistent/]
+  ];
+  for (const [tamper, re] of cases) { const f = setup(tamper); assert.equal(run('report', ['--select-rule'], { EVAL_DIR: f.dir }).status, 2); assert.match(verdict(f.dir), re); fs.rmSync(f.dir, { recursive: true, force: true }); }
+  const g = setup(); assert.equal(run('report', ['--select-rule'], { EVAL_DIR: g.dir }).status, 0, 'a genuine identity is accepted'); fs.rmSync(g.dir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- freeze evidence (backup + verify)
+test('evidence record/verify: backs up a valid freeze outside the folder, never touches the folder, and detects accidental corruption', () => {
+  const { dir } = makeFixture(); assert.equal(freeze(dir).status, 0);
+  const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'scene-rel-v2-bk-')), 'backup'); const before = snapshot(dir);
+  const rec = run('evidence', ['record', '--out', out], { EVAL_DIR: dir }); assert.equal(rec.status, 0, rec.stderr);
+  const mh = L.sha256File(path.join(dir, 'judgments-manifest.json')); assert.ok(rec.stdout.includes(mh)); assert.deepEqual(snapshot(dir), before, 'record changes nothing in the evaluation folder');
+  assert.ok(fs.existsSync(path.join(out, 'images', 'A01', 'A01-A.jpg')) && fs.existsSync(path.join(out, 'judgments-manifest.json')) && fs.existsSync(path.join(out, 'candidates.json')));
+  const sums = fs.readFileSync(path.join(out, 'EVIDENCE-SHA256SUMS.txt'), 'utf8'); assert.ok(sums.includes(`${mh} *judgments-manifest.json`));
+  const ok = run('evidence', ['verify', '--backup', out, '--expect-manifest-sha256', mh], { EVAL_DIR: dir }); assert.equal(ok.status, 0, ok.stderr); assert.match(ok.stdout, /^OK: /);
+  assert.match(run('evidence', ['verify', '--backup', out], { EVAL_DIR: dir }).stdout, /cannot detect a manifest and backup edited together/);
+  // accidental corruption of the backup, of the live folder, an extra live image, a missing live image
+  const bimg = path.join(out, 'images', 'A01', 'A01-A.jpg'); const keep = fs.readFileSync(bimg); fs.appendFileSync(bimg, 'x');
+  let v = run('evidence', ['verify', '--backup', out], { EVAL_DIR: dir }); assert.equal(v.status, 1); assert.match(v.stderr, /backup file corrupted.*A01-A\.jpg/); assert.doesNotMatch(v.stderr, /evaluation folder differs/, 'only the backup was damaged'); fs.writeFileSync(bimg, keep);
+  fs.appendFileSync(path.join(dir, 'images', 'A01', 'A01-B.jpg'), 'x'); v = run('evidence', ['verify', '--backup', out], { EVAL_DIR: dir }); assert.equal(v.status, 1); assert.match(v.stderr, /evaluation folder differs from the backup.*A01-B\.jpg/); fs.writeFileSync(path.join(dir, 'images', 'A01', 'A01-B.jpg'), fs.readFileSync(path.join(out, 'images', 'A01', 'A01-B.jpg')));
+  const limg = path.join(dir, 'images', 'C02', 'C02-D.jpg'); const lkeep = fs.readFileSync(limg); fs.rmSync(limg);
+  v = run('evidence', ['verify', '--backup', out], { EVAL_DIR: dir }); assert.equal(v.status, 1); assert.match(v.stderr, /evaluation folder is missing: images\/C02\/C02-D\.jpg/); fs.writeFileSync(limg, lkeep);
+  fs.writeFileSync(path.join(dir, 'images', 'C02', 'C02-Z.jpg'), 'new'); v = run('evidence', ['verify', '--backup', out], { EVAL_DIR: dir }); assert.equal(v.status, 1); assert.match(v.stderr, /not in the backup: images\/C02\/C02-Z\.jpg/); fs.rmSync(path.join(dir, 'images', 'C02', 'C02-Z.jpg'));
+  assert.equal(run('evidence', ['verify', '--backup', out], { EVAL_DIR: dir }).status, 0, 'restored state verifies again');
+  // a wrong or malformed independently recorded hash
+  v = run('evidence', ['verify', '--backup', out, '--expect-manifest-sha256', 'a'.repeat(64)], { EVAL_DIR: dir }); assert.equal(v.status, 1); assert.match(v.stderr, /differs from the independently recorded/);
+  v = run('evidence', ['verify', '--backup', out, '--expect-manifest-sha256', 'zz'], { EVAL_DIR: dir }); assert.equal(v.status, 1);
+  fs.rmSync(path.dirname(out), { recursive: true, force: true }); fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('evidence: a manifest edited together with its backup and sidecar is only caught by the independently recorded hash', () => {
+  const { dir } = makeFixture(); assert.equal(freeze(dir).status, 0);
+  const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'scene-rel-v2-bk-')), 'backup'); const recorded = L.sha256File(path.join(dir, 'judgments-manifest.json'));
+  assert.equal(run('evidence', ['record', '--out', out], { EVAL_DIR: dir }).status, 0);
+  // an editor changes the live manifest AND the backup copy AND the backup's sums and metadata consistently
+  const man = L.readJsonStrict(path.join(dir, 'judgments-manifest.json')); man.frozenAt = '2030-01-01T00:00:00.000Z'; const text = L.stableStringify(man); const nh = L.sha256Hex(text);
+  fs.writeFileSync(path.join(dir, 'judgments-manifest.json'), text); fs.writeFileSync(path.join(out, 'judgments-manifest.json'), text);
+  fs.writeFileSync(path.join(out, 'EVIDENCE-SHA256SUMS.txt'), fs.readFileSync(path.join(out, 'EVIDENCE-SHA256SUMS.txt'), 'utf8').replace(recorded, nh));
+  const meta = L.readJsonStrict(path.join(out, 'EVIDENCE.json')); meta.manifestSha256 = nh; fs.writeFileSync(path.join(out, 'EVIDENCE.json'), L.stableStringify(meta));
+  assert.equal(run('evidence', ['verify', '--backup', out], { EVAL_DIR: dir }).status, 0, 'without an independent hash the consistent edit passes (documented limitation)');
+  const v = run('evidence', ['verify', '--backup', out, '--expect-manifest-sha256', recorded], { EVAL_DIR: dir }); assert.equal(v.status, 1); assert.match(v.stderr, /differs from the independently recorded/);
+  fs.rmSync(path.dirname(out), { recursive: true, force: true }); fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('evidence record refuses: no freeze, a backup inside the folder, a non-empty target, a changed image; and never overwrites', () => {
+  const unfrozen = makeFixture(); const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'scene-rel-v2-bk-'));
+  let r = run('evidence', ['record', '--out', path.join(outRoot, 'a')], { EVAL_DIR: unfrozen.dir }); assert.equal(r.status, 1); assert.match(r.stderr, /not a valid freeze/); assert.equal(fs.existsSync(path.join(outRoot, 'a')), false, 'nothing created without a freeze');
+  assert.equal(freeze(unfrozen.dir).status, 0); const dir = unfrozen.dir;
+  r = run('evidence', ['record', '--out', path.join(dir, 'backup')], { EVAL_DIR: dir }); assert.equal(r.status, 1); assert.match(r.stderr, /outside the evaluation folder/); assert.equal(fs.existsSync(path.join(dir, 'backup')), false);
+  const full = path.join(outRoot, 'full'); fs.mkdirSync(full); fs.writeFileSync(path.join(full, 'x'), 'x');
+  r = run('evidence', ['record', '--out', full], { EVAL_DIR: dir }); assert.equal(r.status, 1); assert.match(r.stderr, /must not exist or must be empty/); assert.deepEqual(fs.readdirSync(full), ['x']);
+  const good = path.join(outRoot, 'good'); assert.equal(run('evidence', ['record', '--out', good], { EVAL_DIR: dir }).status, 0);
+  r = run('evidence', ['record', '--out', good], { EVAL_DIR: dir }); assert.equal(r.status, 1, 'an existing backup is never overwritten');
+  fs.appendFileSync(path.join(dir, 'images', 'A01', 'A01-B.jpg'), 'x'); const after = path.join(outRoot, 'after');
+  r = run('evidence', ['record', '--out', after], { EVAL_DIR: dir }); assert.equal(r.status, 1); assert.match(r.stderr, /image bytes changed after freezing/); assert.equal(fs.existsSync(after), false);
+  fs.rmSync(outRoot, { recursive: true, force: true }); fs.rmSync(dir, { recursive: true, force: true });
 });

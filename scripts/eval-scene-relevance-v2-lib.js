@@ -313,6 +313,115 @@ export function loadFrozen(evalDir, items) {
   return { manifest, manifestSha256: sha256File(mp), judgments };
 }
 
+// ------------------------------------------------- freeze lifecycle guard (fetch)
+export const MANIFEST_FILE = 'judgments-manifest.json';
+
+// Classifies the evaluation folder from directory entries alone (names are compared case-insensitively, as on
+// Windows). Nothing is parsed, repaired or removed. Only 'clean' allows candidate collection:
+//   frozen        judgments-manifest.json exists (valid or not, file or directory)
+//   inconsistent  freeze-era artefacts (judgments, results, rule, report) exist WITHOUT the manifest
+//   ambiguous     the folder cannot be listed, or a manifest-like name that is not exactly the manifest exists
+//   review-started  the answer key, a blind export or the contact sheet exists: candidates are already bound to a review
+export function freezeState(evalDir) {
+  let names;
+  try { names = fs.readdirSync(evalDir); } catch (e) {
+    if (e.code === 'ENOENT') return { state: 'clean', reasons: [] };
+    return { state: 'ambiguous', reasons: [`cannot list ${evalDir}: ${e.code || e.message}`] };
+  }
+  const lower = names.map((n) => n.toLowerCase());
+  const has = (re) => lower.filter((n) => re.test(n));
+  if (lower.includes(MANIFEST_FILE)) return { state: 'frozen', reasons: [`${MANIFEST_FILE} exists`] };
+  const manifestLike = has(/^judgments-manifest/);
+  if (manifestLike.length) return { state: 'ambiguous', reasons: [`unexpected manifest-like entries: ${manifestLike.join(', ')}`] };
+  const residue = has(/^(judgments-.+\.json|results\.json|frozen-rule\.json|metrics\.json|report\.md)$/);
+  if (residue.length) return { state: 'inconsistent', reasons: [`freeze-era files exist without ${MANIFEST_FILE}: ${residue.join(', ')}`] };
+  const review = has(/^(answer-key\.json|blind-judgments-.+\.json|contact-sheet\.html|review-assets)$/);
+  if (review.length) return { state: 'review-started', reasons: [`review artefacts exist: ${review.join(', ')}`] };
+  return { state: 'clean', reasons: [] };
+}
+
+// Throws unless candidate collection is still allowed. Every fetch-side write path calls this first.
+export function assertFetchAllowed(evalDir) {
+  const { state, reasons } = freezeState(evalDir);
+  if (state === 'clean') return true;
+  fail(`evaluation folder state is "${state}" (${reasons.join('; ')}). Fetching, archiving and rewriting candidates are refused. A freeze is never removed or replaced; a new evaluation needs its own evaluation folder and preregistration (see FREEZE-EVIDENCE.md).`);
+}
+
+// ------------------------------------------------------------ pinned model identity
+// Values come from the repository's existing pinned evidence (THIRD_PARTY_NOTICES.md "Pinned artifacts" and
+// PREREGISTRATION.md section 12); a test checks both documents still agree with these constants. Only the two ONNX
+// files have recorded hashes. The model folder carries no revision metadata, so the revision is enforced only through
+// those hashes (they match the Hugging Face X-Linked-ETag for that revision, per the notices). The tokenizer, config and
+// preprocessor files have NO recorded hashes in the repository and are therefore not pinned here.
+export const PINNED_MODEL = Object.freeze({
+  repo: 'Xenova/siglip-base-patch16-224',
+  revision: '4649052661e53c7000355844105f8a1792088239',
+  files: Object.freeze({
+    'onnx/text_model_quantized.onnx': 'ad0329b1f35acc66d8953ff2559ce358da8eb0a7011794cf951523d63a4dbce2',
+    'onnx/vision_model_quantized.onnx': 'ef14a954f3d57e1806666432bd9785004c1dc27100aa260eee0cb0f10a5de058'
+  })
+});
+export const UNPINNED_MODEL_FILES = ['config.json', 'preprocessor_config.json', 'tokenizer.json']; // observed, never enforced
+
+export function validatePins(p) {
+  if (!isObj(p) || typeof p.repo !== 'string' || !p.repo || !/^[0-9a-f]{40}$/.test(p.revision || '') || !isObj(p.files) || !Object.keys(p.files).length) fail('model pins: malformed (repo, 40-hex revision and a non-empty files map are required)');
+  for (const [rel, h] of Object.entries(p.files)) if (!/^[A-Za-z0-9_./-]+$/.test(rel) || rel.split('/').includes('..') || path.isAbsolute(rel) || !HEX64.test(h)) fail(`model pins: bad entry ${rel}`);
+  return p;
+}
+
+function hashFileStream(p) {
+  const h = crypto.createHash('sha256'); const fd = fs.openSync(p, 'r');
+  try { const buf = Buffer.allocUnsafe(1 << 20); let n; let bytes = 0; while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) { h.update(buf.subarray(0, n)); bytes += n; } return { sha256: h.digest('hex'), bytes }; }
+  finally { fs.closeSync(fd); }
+}
+
+export const modelIdentitySha256 = (pins, hashes) => sha256Hex(stableStringify({ repo: pins.repo, revision: pins.revision, files: hashes }));
+
+export function buildModelIdentityRecord(pins, files, { pinSource = 'repository', verifiedBeforeInference = true, verifiedAfterInference = false } = {}) {
+  const hashes = Object.fromEntries(Object.entries(files).map(([rel, f]) => [rel, f.sha256]));
+  return { schema: 'scene-relevance-v2-model-identity', repo: pins.repo, revision: pins.revision, revisionBasis: 'enforced only through the pinned file hashes; the model folder carries no revision metadata', pinSource, files, identitySha256: modelIdentitySha256(pins, hashes), verifiedBeforeInference, verifiedAfterInference };
+}
+
+// Hashes the ACTUAL bytes of every pinned file and compares with the pins. Throws (so inference never starts) if a file
+// is missing, unreadable, not a regular file (symlinks and directories are refused), or has a different hash.
+export function verifyModelIdentity(modelDir, pins = PINNED_MODEL, opts = {}) {
+  validatePins(pins);
+  if (typeof modelDir !== 'string' || !modelDir) fail('model directory is not set');
+  const root = path.resolve(modelDir);
+  let st; try { st = fs.lstatSync(root); } catch (e) { fail(`model directory cannot be read: ${e.code || e.message}`); }
+  if (!st.isDirectory()) fail('model path is not a directory');
+  const files = {};
+  for (const [rel, want] of Object.entries(pins.files)) {
+    const p = path.join(root, ...rel.split('/'));
+    let s; try { s = fs.lstatSync(p); } catch (e) { fail(`pinned model file missing or unreadable: ${rel} (${e.code || e.message})`); }
+    if (!s.isFile()) fail(`pinned model file is not a regular file (symlinks and directories are refused): ${rel}`);
+    let r; try { r = hashFileStream(p); } catch (e) { fail(`pinned model file cannot be read: ${rel} (${e.code || e.message})`); }
+    if (r.sha256 !== want) fail(`pinned model file ${rel} has SHA-256 ${r.sha256}, expected ${want}; inference refused`);
+    if (r.bytes !== s.size) fail(`pinned model file ${rel} changed while it was being verified`);
+    files[rel] = { sha256: r.sha256, bytes: r.bytes };
+  }
+  return buildModelIdentityRecord(pins, files, opts);
+}
+
+// What the REPORT checks: the recorded identity must equal the repository pins, must come from the repository pins (not a
+// test override), and must say it was verified before AND after inference. A hash merely recorded is not enough.
+export function validateModelIdentityRecord(rec, pins = PINNED_MODEL) {
+  if (!isObj(rec) || rec.schema !== 'scene-relevance-v2-model-identity') fail('results.json: model identity record is missing (the run did not verify the pinned model files)');
+  if (rec.pinSource !== 'repository') fail(`results.json: model identity was checked against ${JSON.stringify(rec.pinSource)} pins, not the repository pins`);
+  if (rec.repo !== pins.repo || rec.revision !== pins.revision) fail('results.json: model repo or revision differs from the pinned evidence');
+  if (!isObj(rec.files) || Object.keys(rec.files).sort().join('|') !== Object.keys(pins.files).sort().join('|')) fail('results.json: recorded model files differ from the pinned file set');
+  const hashes = {};
+  for (const [rel, want] of Object.entries(pins.files)) {
+    const f = rec.files[rel];
+    if (!isObj(f) || f.sha256 !== want) fail(`results.json: recorded SHA-256 for ${rel} differs from the pinned value`);
+    if (!Number.isInteger(f.bytes) || f.bytes < 1) fail(`results.json: recorded size for ${rel} is invalid`);
+    hashes[rel] = f.sha256;
+  }
+  if (rec.identitySha256 !== modelIdentitySha256(pins, hashes)) fail('results.json: model identity digest is inconsistent with its files');
+  if (rec.verifiedBeforeInference !== true || rec.verifiedAfterInference !== true) fail('results.json: model files were not verified both before and after inference');
+  return rec;
+}
+
 // -------------------------------------------------------------------- results
 export function validateResults(r, items) {
   if (!isObj(r) || r.schema !== 'scene-relevance-v2-results' || !isObj(r.meta) || !Array.isArray(r.items)) fail('results.json: wrong schema');
@@ -537,6 +646,7 @@ export function insufficientGate(candDoc, decisionsDoc) {
 // Moves an approved scene's record (and its image folder) into attemptHistory so nothing collected is lost,
 // then removes it from scenes so the retry starts clean. Candidate files are renamed, never deleted or overwritten.
 export function archiveInsufficientScene(candDoc, sceneId, decision, evalDir, now = new Date().toISOString()) {
+  assertFetchAllowed(evalDir); // defence in depth: never rename or rewrite anything once a freeze (or review) exists
   const rec = candDoc.scenes[sceneId];
   if (rec?.status !== 'insufficient') fail(`${sceneId}: only an insufficient scene can be archived for retry`);
   if (decision.recordSha256 !== recordSha256(rec)) fail(`${sceneId}: owner decision does not match the recorded failure`);
