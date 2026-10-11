@@ -608,6 +608,70 @@ export function evaluateRule(rule, held) {
   };
 }
 
+// ------------------------------------- post hoc duplicate-image overlap (NOT preregistered)
+// Added after Stage C collection and before freezing. Nothing here feeds the primary analysis, the verdict, the frozen
+// rule or any threshold; it only supports a sensitivity section shown BESIDE the primary result.
+//
+// Two different kinds of image reuse exist and are kept apart:
+//  1. Accidental duplicates: the same image bytes were returned for two different scenes' own candidate sets
+//     (positive and near-miss items). Only these are examined here.
+//  2. Deliberate reuse: every cross-category item (XN*) shows another scene's candidate set under a different
+//     description, by design. That is part of the preregistered design and is NOT treated as a duplicate.
+const ownSetItems = (items) => items.filter((i) => i.kind !== 'cross');
+
+// Hashes that appear in the own candidate sets of more than one scene. Cross items are ignored on purpose.
+export function duplicateGroups(items) {
+  const byHash = new Map();
+  for (const it of ownSetItems(items)) for (const c of it.candidates) {
+    if (!byHash.has(c.sha256)) byHash.set(c.sha256, { sha256: c.sha256, candidateIds: [], sceneIds: new Set(), splits: new Set() });
+    const g = byHash.get(c.sha256); g.candidateIds.push(c.candidateId); g.sceneIds.add(it.itemId); g.splits.add(it.split);
+  }
+  return [...byHash.values()].filter((g) => g.sceneIds.size > 1)
+    .map((g) => ({ sha256: g.sha256, candidateIds: g.candidateIds.sort(), sceneIds: [...g.sceneIds].sort(), splits: [...g.splits].sort(), crossesSplit: g.splits.size > 1 }))
+    .sort((a, b) => (a.sha256 < b.sha256 ? -1 : 1));
+}
+
+// Records versus distinct hashes. 'records' equals the frozen imageCount; the counts themselves are never altered.
+export function duplicateOverlapSummary(items) {
+  const records = uniqueCandidates(items).size;
+  const distinct = new Set([...uniqueCandidates(items).values()].map((c) => c.sha256)).size;
+  const groups = duplicateGroups(items);
+  return { candidateRecords: records, distinctImageHashes: distinct, duplicateGroups: groups.length, extraRecords: records - distinct, groupsCrossingSplit: groups.filter((g) => g.crossesSplit).length };
+}
+
+// Items removed by the post hoc sensitivity rule (both sides of every split-crossing accidental group, plus the
+// cross items whose image set is one of those scenes). Deliberate cross-category reuse alone never excludes anything.
+export function duplicateExclusions(items) {
+  const direct = new Set();
+  for (const g of duplicateGroups(items)) if (g.crossesSplit) for (const id of g.sceneIds) direct.add(id);
+  const inherited = new Set(items.filter((i) => i.kind === 'cross' && direct.has(i.candidateScene)).map((i) => i.itemId));
+  return { direct: [...direct].sort(), inherited: [...inherited].sort(), excluded: [...direct, ...inherited].sort() };
+}
+
+const countByGroup = (items) => { const o = {}; for (const it of items) { const k = `${it.split}/${detectionGroupOf(it)}`; o[k] = (o[k] || 0) + 1; } return o; };
+
+// Re-runs the preregistered procedure unchanged (same floors, same statistics, same selection code) on the items that
+// remain after exclusion. Read-only: inputs are not modified. The result is exploratory.
+export function duplicateSensitivity(items, results, j) {
+  const ex = duplicateExclusions(items); const gone = new Set(ex.excluded);
+  const kept = items.filter((i) => !gone.has(i.itemId));
+  const det = (split) => detectionItems(kept.filter((i) => i.split === split), results, j);
+  const calDet = det('calibration'); const heldDet = det('heldout');
+  const rule = selectRule(calDet);
+  const recById = new Map(results.items.map((r) => [r.itemId, r]));
+  const heldPos = kept.filter((i) => i.kind === 'positive' && i.split === 'heldout');
+  const ranking = aggregatePositives(heldPos.map((i) => sceneOutcome(i, recById.get(i.itemId), j.items[i.itemId])), heldPos);
+  return {
+    label: 'POST HOC, not preregistered',
+    exclusions: ex,
+    itemsBefore: countByGroup(items), itemsAfter: countByGroup(kept),
+    rule,
+    heldOutDetection: rule.status === 'selected' ? evaluateRule(rule, heldDet) : null,
+    heldOutCounts: { suitable: heldDet.suitable.length, unsuitable: heldDet.unsuitable.length, contaminated: heldDet.contaminated.length, modelFailed: heldDet.modelFailed.length },
+    heldOutRanking: ranking
+  };
+}
+
 // ------------------------------------------------- fetch: insufficient-scene gate
 // A scene the fetch recorded as insufficient (too few hits or too few downloads) is NEVER skipped or retried
 // silently. The owner records an explicit decision in fetch-owner-decisions.json, bound to the SHA-256 of the exact

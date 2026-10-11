@@ -296,3 +296,27 @@ bytes of the two pinned ONNX files named in section 12 against those SHA-256 val
 the report accepts a result only if that verified identity is recorded. No threshold, scene, split or negative case changes.
 The tokenizer, config and preprocessor files are not hash-pinned (the repository records no hashes for them).
 The recovery procedure is in `FREEZE-EVIDENCE.md`.
+
+## 14. Duplicate-image overlap (addendum added after the original preregistration; Stage C collected, before the freeze)
+
+This section was added after Stage C collection and before the freeze. It is not part of the original
+preregistration. The primary analysis, the dataset, every threshold, the split and the decision criteria above are unchanged.
+
+Stage C holds 320 candidate records but 300 distinct image hashes: 19 duplicate groups (20 extra records), where the same
+image bytes were returned for more than one scene. This was not anticipated and sections 3 to 5 do not specify handling.
+Thirteen of the 19 groups cross the calibration/held-out split. By scene, the groups are (count x scenes): 4 x D01+NM04,
+4 x E01+NM06, 3 x C03+NM09, 1 x C03+F04, 1 x C03+F04+NM09 (these 13 cross the split); 2 x B02+F01, 1 x B02+NM02,
+2 x E02+NM08, 1 x B04+F05 (these 6 do not).
+
+Separately, and by design, every cross-category item (XN01 to XN10) shows another scene's candidate set under a different
+description (sections 4 and 5), so some image sets already appear under two items, sometimes in opposite splits. That reuse is
+part of the preregistered design, is not a duplicate in the sense above, and is left in place.
+
+The candidate set, images, judgments and primary analysis are retained as collected. The report adds one post hoc
+sensitivity analysis, labelled as such and shown beside, never instead of, the primary result. Rule: exclude every scene that
+belongs to a split-crossing duplicate group, on both sides, and every cross-category item that reuses an excluded scene's
+images (C03, D01, E01, F04, NM04, NM06, NM09, XN05, XN07, XN10). The preregistered rule-selection procedure and floors are then
+re-run unchanged on the remaining items. It was not preregistered, it detects only byte-identical images, the remaining
+samples are smaller, and it is exploratory: "no usable rule" there reflects sample size, not a finding about the model.
+The report also states that the frozen "images" count means candidate records (320), of which 300 are distinct.
+This is a post hoc analysis of the retained subset. It is not a causal estimate of duplicate-induced bias, and its rule is recomputed at report time, not frozen.

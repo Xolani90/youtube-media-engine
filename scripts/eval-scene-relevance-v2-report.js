@@ -14,7 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_EVAL_DIR, CRITERIA, validateModelIdentityRecord, candidateIntegritySha256, readJsonStrict, buildItems, loadFrozen, validateResults, sha256File, stableStringify,
-  sceneOutcome, aggregatePositives, decide, detectionItems, detectionGroupOf, designedCounts, partitionDetection, auroc, selectRule, evaluateRule, agreementBetween, estimateLoadVsInference, median, mean, pct
+  sceneOutcome, aggregatePositives, decide, detectionItems, detectionGroupOf, DETECTION_GROUPS, designedCounts, partitionDetection, auroc, selectRule, evaluateRule, agreementBetween, estimateLoadVsInference, median, mean, pct,
+  duplicateOverlapSummary, duplicateSensitivity
 } from './eval-scene-relevance-v2-lib.js';
 
 const EVAL_DIR = path.resolve(process.env.EVAL_DIR || DEFAULT_EVAL_DIR);
@@ -119,11 +120,15 @@ const loadEst = estimateLoadVsInference(results.timing.filter((t) => t.allCallsO
 const second = frozen.manifest.secondReviewer ? frozen.judgments[frozen.manifest.secondReviewer] : null;
 const agreement = second ? agreementBetween(items, primary, second) : null;
 
+const dupSummary = duplicateOverlapSummary(items); // post hoc addition; read-only, never feeds the primary analysis
+const sens = duplicateSensitivity(items, results, primary);
+
 const metrics = {
   verdict, verdictBasis: why, criteria: CRITERIA, heldOut: held, calibrationDescriptiveOnly: cal,
   provisionalSafeguards: { minEligibleHeldOut: CRITERIA.minEligibleHeldOut, calibrationMinPerClass: CRITERIA.rule.minPerClass, calibrationMinAuroc: CRITERIA.rule.minAuroc, note: 'chosen in Stage A; not statistically validated thresholds' },
   heldOutIneligibleScenes: heldIneligible,
-  integrity: { candidatesSha256: frozen.manifest.candidateIntegrity.candidatesSha256, evaluatedImages: frozen.manifest.candidateIntegrity.imageCount, verifiedAgainstDisk: true },
+  integrity: { candidatesSha256: frozen.manifest.candidateIntegrity.candidatesSha256, evaluatedImages: frozen.manifest.candidateIntegrity.imageCount, verifiedAgainstDisk: true, candidateRecords: frozen.manifest.candidateIntegrity.imageCount, distinctImageHashes: Object.keys(frozen.manifest.candidateIntegrity.images).length },
+  postHocDuplicateSensitivity: { ...sens, overlap: dupSummary },
   detection: { rule, inclusive: true, heldOutInclusive: ruleEvalInclusive, heldOutExcludingAbsenceDiagnostic: ruleEvalExclAbsence, heldOutCounts: { suitable: heldDet.suitable.length, unsuitable: heldDet.unsuitable.length, contaminated: heldDet.contaminated, modelFailed: heldDet.modelFailed, unsuitableExcludingAbsence: heldParts.headline.unsuitable.length, absenceUnsuitable: heldParts.absence.unsuitable.length }, groups, absenceVsSuitableAuroc: absenceAuroc, designedItems: designed },
   failures, latencyMs: { calls: times.length, median: median(times), mean: mean(times), max: Math.max(...times) }, loadVsInference: loadEst,
   reviewers: { primary: primary.reviewerId, second: second?.reviewerId ?? null, aiSuggestedLabels: primary.aiSuggestedLabels, agreement }
@@ -168,7 +173,18 @@ L.push('');
 L.push(`Designed split (frozen before any score): ordinary near-miss ${groups.nearmiss.designedCalibration} calibration / ${groups.nearmiss.designedHeldOut} held-out; absence ${groups.absence.designedCalibration} calibration / ${groups.absence.designedHeldOut} held-out; cross-category ${groups.cross.designedCalibration} / ${groups.cross.designedHeldOut}. Every subgroup denominator is small, so read each row as exploratory.`, '');
 if (rule.status === 'selected') L.push(`- Absence cases, AUROC against held-out suitable sets: ${f1(absenceAuroc)} (exploratory; ${groups.absence.heldOutEvaluated} evaluated of ${groups.absence.designedHeldOut} designed).`, '');
 L.push('- Nothing here is adopted for production. Cosine scores depend on the exact text prompt, so a threshold may not transfer to other scenes or prompt wording.', '');
-L.push('## Integrity', '', `- candidates.json SHA-256 (frozen, re-verified): ${frozen.manifest.candidateIntegrity.candidatesSha256}`, `- Evaluated candidate images re-hashed against the frozen record: ${frozen.manifest.candidateIntegrity.imageCount} (a changed, missing or unlisted image, or a changed candidates.json, makes this report INVALID)`, '');
+const sx = sens.exclusions;
+L.push('## Post hoc sensitivity: duplicate-image overlap (POST HOC, not preregistered)', '');
+L.push('Added after the original preregistration and before freezing (see the addendum in PREREGISTRATION.md). It is shown beside, never instead of, the primary result above, which is unchanged. It is exploratory and does not affect the verdict.', '');
+L.push(`- Image records versus distinct images: ${dupSummary.candidateRecords} candidate records, ${dupSummary.distinctImageHashes} distinct image hashes; ${dupSummary.duplicateGroups} duplicate groups (${dupSummary.extraRecords} extra records); ${dupSummary.groupsCrossingSplit} groups cross the calibration/held-out split.`);
+L.push(`- Exclusion rule: every scene in a split-crossing duplicate group is excluded on both sides, plus any cross-category item that reuses an excluded scene's images. Excluded: ${sx.excluded.join(', ')} (${sx.direct.length} scenes, ${sx.inherited.length} cross-category items). Deliberate cross-category image reuse is part of the design and alone excludes nothing.`);
+const fmtCounts = (c) => ['calibration', 'heldout'].map((sp) => `${sp}: ` + DETECTION_GROUPS.map((g) => `${g} ${c[`${sp}/${g}`] || 0}`).join(', ')).join(' | ');
+L.push(`- Items before exclusion: ${fmtCounts(sens.itemsBefore)}`, `- Items after exclusion: ${fmtCounts(sens.itemsAfter)}`);
+L.push(`- Rule re-selected on remaining calibration items under the same preregistered floors: ${sens.rule.status === 'selected' ? `${sens.rule.statistic} >= ${sens.rule.threshold} (calibration AUROC ${f1(sens.rule.calibrationAuroc)}, balanced accuracy ${f1(sens.rule.calibrationBalancedAccuracy)})` : `NO USABLE RULE: ${sens.rule.reason}. This reflects the smaller sample, not a finding about the model.`}`);
+if (sens.heldOutDetection) L.push(`- Held-out detection on remaining items (suitable ${sens.heldOutCounts.suitable}, unsuitable ${sens.heldOutCounts.unsuitable}): AUROC ${f1(sens.heldOutDetection.auroc)}; false rejection ${pct(sens.heldOutDetection.falseRejection.count, sens.heldOutDetection.falseRejection.of)}; false acceptance ${pct(sens.heldOutDetection.falseAcceptance.count, sens.heldOutDetection.falseAcceptance.of)}`);
+L.push(`- Held-out ranking on remaining scenes: eligible ${sens.heldOutRanking.eligible} of ${sens.heldOutRanking.scenes}; top-1 ${pct(sens.heldOutRanking.top1, sens.heldOutRanking.eligible)}; top-3 ${pct(sens.heldOutRanking.top3, sens.heldOutRanking.eligible)}; pairwise ${pct(sens.heldOutRanking.pairHalves / 2, sens.heldOutRanking.pairTotal)}; Pixabay-first baseline top-1 ${pct(sens.heldOutRanking.baselineTop1, sens.heldOutRanking.eligible)}`);
+L.push('- Limits: only byte-identical images are detected (near-duplicates are not); the remaining samples are smaller than the primary ones; the deliberate cross-category reuse is left in place; same-split duplicate groups are left in place; exploratory only.', '- This is a post hoc analysis of the retained subset. It is not a causal estimate of duplicate-induced bias, and its rule is recomputed at report time, not frozen.', '');
+L.push('## Integrity', '', `- candidates.json SHA-256 (frozen, re-verified): ${frozen.manifest.candidateIntegrity.candidatesSha256}`, `- Candidate image records re-hashed against the frozen record: ${frozen.manifest.candidateIntegrity.imageCount} records, of which ${Object.keys(frozen.manifest.candidateIntegrity.images).length} are distinct image hashes (identical images returned for more than one candidate are counted once per record; see the post hoc section above). A changed, missing or unlisted image, or a changed candidates.json, makes this report INVALID.`, '');
 L.push('## Failures', '', `- Download failures recorded at fetch time: ${failures.downloads}`, `- Image decode/inference failures: ${failures.inferenceImageErrors}`, `- Candidates with no score (counted as unscored, not dropped): ${failures.unscoredCandidates}`, `- Worker/model-loading fallbacks: ${failures.workerFallbacks.length}${failures.workerFallbacks.length ? ' - ' + failures.workerFallbacks.join('; ') : ''}`, '');
 L.push('## Latency', '', `- Calls: ${times.length}; median ${f1(median(times))} ms; mean ${f1(mean(times))} ms; max ${Math.max(...times)} ms (each call reloads the models)`,
   loadEst ? `- Load vs inference (timing scenes ${loadEst.scenes.join(', ')}): fixed load ~${loadEst.fixedLoadMs} ms per call, ~${loadEst.perImageMs} ms per image` : '- Load vs inference: not measured', '');

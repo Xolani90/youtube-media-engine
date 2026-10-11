@@ -1170,3 +1170,191 @@ test('evidence record refuses: no freeze, a backup inside the folder, a non-empt
   r = run('evidence', ['record', '--out', after], { EVAL_DIR: dir }); assert.equal(r.status, 1); assert.match(r.stderr, /image bytes changed after freezing/); assert.equal(fs.existsSync(after), false);
   fs.rmSync(outRoot, { recursive: true, force: true }); fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ------------------------------------------------- post hoc duplicate-overlap sensitivity
+const realItems = () => L.buildItems(realScenes(), realNeg(), L.readJsonStrict(path.join(REAL, 'candidates.json')));
+// candidates.json is an untracked dataset file. Tests that assert facts about the REAL manifest are skipped, visibly, when it is
+// absent (fresh clone, CI); when it is present they run in full. Synthetic tests never depend on it.
+const REAL_CANDIDATES = path.join(REAL, 'candidates.json');
+const realOnly = fs.existsSync(REAL_CANDIDATES) ? {} : { skip: 'eval/scene-relevance-v2/candidates.json is not present: the real-manifest assertions did NOT run' };
+const AUTHORIZED_EXCLUSIONS = ['C03', 'D01', 'E01', 'F04', 'NM04', 'NM06', 'NM09', 'XN05', 'XN07', 'XN10'];
+const deepFreeze = (o) => { if (o && typeof o === 'object' && !Object.isFrozen(o)) { Object.freeze(o); Object.values(o).forEach(deepFreeze); } return o; };
+// Synthetic, deterministic scores/judgments over the REAL item structure: suitable sets score high, unsuitable sets low.
+function syntheticScored(its) {
+  const results = { items: [] }; const j = { items: {} };
+  for (const it of its) {
+    const positive = it.kind === 'positive';
+    const base = positive ? 0.9 : 0.3;
+    const ranking = it.candidates.map((c, i) => ({ candidateId: c.candidateId, score: Math.round((base - i * 0.01) * 1e6) / 1e6 }));
+    results.items.push({ itemId: it.itemId, ok: true, ranking, ms: 1 });
+    j.items[it.itemId] = positive ? { relevant: [it.candidates[0].candidateId], best: [it.candidates[0].candidateId], noneSuitable: false } : { relevant: [], best: [], noneSuitable: true };
+  }
+  return { results, j };
+}
+
+test('duplicateGroups / duplicateOverlapSummary: the real manifest has 320 records, 300 distinct hashes, 19 groups (13 cross the split)', realOnly, () => {
+  const its = realItems(); const s = L.duplicateOverlapSummary(its);
+  assert.deepEqual(s, { candidateRecords: 320, distinctImageHashes: 300, duplicateGroups: 19, extraRecords: 20, groupsCrossingSplit: 13 });
+  const g = L.duplicateGroups(its);
+  assert.equal(g.length, 19); assert.equal(g.filter((x) => x.crossesSplit).length, 13);
+  assert.ok(g.every((x) => x.sceneIds.length > 1 && x.sceneIds.every((id) => !id.startsWith('XN'))), 'cross-category items never form a duplicate group');
+  assert.equal(L.duplicateOverlapSummary(its).candidateRecords, L.uniqueCandidates(its).size, 'records equal the frozen imageCount basis');
+});
+
+test('duplicateGroups ignores deliberate cross-category reuse: unique hashes give no groups and no exclusions even with XN reuse', () => {
+  const its = L.buildItems(realScenes(), realNeg(), candDoc()); // synthetic: every candidate has a unique hash; XN items still reuse image sets
+  assert.ok(its.some((i) => i.kind === 'cross'));
+  assert.equal(L.duplicateGroups(its).length, 0);
+  assert.deepEqual(L.duplicateExclusions(its).excluded, []);
+  assert.equal(L.duplicateOverlapSummary(its).extraRecords, 0);
+});
+
+test('duplicateExclusions: equals the authorized set on the real manifest and isolates the accidental duplicates', realOnly, () => {
+  const its = realItems(); const ex = L.duplicateExclusions(its);
+  assert.deepEqual(ex.excluded, AUTHORIZED_EXCLUSIONS);
+  assert.deepEqual(ex.direct, ['C03', 'D01', 'E01', 'F04', 'NM04', 'NM06', 'NM09']); assert.deepEqual(ex.inherited, ['XN05', 'XN07', 'XN10']);
+  const splitOf = new Map(its.map((i) => [i.itemId, i.split]));
+  for (const id of ex.direct) assert.ok(L.duplicateGroups(its).some((g) => g.crossesSplit && g.sceneIds.includes(id)), `${id} belongs to a split-crossing duplicate group`);
+  // every excluded cross item reuses an excluded scene's images; no other cross item is excluded
+  for (const x of its.filter((i) => i.kind === 'cross')) assert.equal(ex.excluded.includes(x.itemId), ex.direct.includes(x.candidateScene));
+  // after exclusion no accidental (own-set) duplicate group crosses the split any more
+  const kept = its.filter((i) => !ex.excluded.includes(i.itemId));
+  assert.equal(L.duplicateGroups(kept).filter((g) => g.crossesSplit).length, 0);
+  // what still crosses the split afterwards is only the deliberate cross-category reuse
+  const byHash = new Map();
+  for (const it of kept) for (const c of it.candidates) { if (!byHash.has(c.sha256)) byHash.set(c.sha256, []); byHash.get(c.sha256).push(it); }
+  for (const list of byHash.values()) if (new Set(list.map((i) => i.split)).size > 1) assert.ok(list.some((i) => i.kind === 'cross'), 'residual cross-split sharing involves a cross-category item');
+  assert.ok(splitOf.size === 50);
+});
+
+test('duplicateSensitivity: re-selects under the unchanged preregistered procedure, is labelled post hoc, and leaves the primary analysis untouched', realOnly, () => {
+  const its = deepFreeze(realItems()); const { results, j } = syntheticScored(its); deepFreeze(results); deepFreeze(j);
+  const primaryBefore = JSON.stringify({ cal: L.detectionItems(its.filter((i) => i.split === 'calibration'), results, j), held: L.detectionItems(its.filter((i) => i.split === 'heldout'), results, j) });
+  const sens = L.duplicateSensitivity(its, results, j); // inputs are deep-frozen: any mutation would throw
+  assert.equal(sens.label, 'POST HOC, not preregistered');
+  assert.deepEqual(sens.exclusions.excluded, AUTHORIZED_EXCLUSIONS);
+  // sample sizes before and after
+  assert.equal(Object.values(sens.itemsBefore).reduce((a, b) => a + b, 0), 50); assert.equal(Object.values(sens.itemsAfter).reduce((a, b) => a + b, 0), 40);
+  assert.deepEqual(sens.itemsAfter, { 'heldout/positive': 15, 'calibration/positive': 11, 'calibration/cross': 4, 'heldout/cross': 3, 'calibration/nearmiss': 3, 'heldout/absence': 2, 'heldout/nearmiss': 2 });
+  // the rule is exactly what the preregistered selectRule gives on the remaining calibration items
+  const gone = new Set(AUTHORIZED_EXCLUSIONS); const kept = its.filter((i) => !gone.has(i.itemId));
+  assert.deepEqual(sens.rule, L.selectRule(L.detectionItems(kept.filter((i) => i.split === 'calibration'), results, j)));
+  assert.equal(sens.rule.status, 'selected'); assert.equal(sens.heldOutDetection.falseAcceptance.of, 7); assert.equal(sens.heldOutDetection.falseRejection.of, 15);
+  assert.equal(sens.heldOutRanking.scenes, 15); assert.equal(sens.heldOutRanking.eligible, 15);
+  // the primary analysis computed afterwards is identical
+  const primaryAfter = JSON.stringify({ cal: L.detectionItems(its.filter((i) => i.split === 'calibration'), results, j), held: L.detectionItems(its.filter((i) => i.split === 'heldout'), results, j) });
+  assert.equal(primaryAfter, primaryBefore);
+  assert.equal(L.detectionItems(its.filter((i) => i.split === 'heldout'), results, j).unsuitable.length + L.detectionItems(its.filter((i) => i.split === 'heldout'), results, j).suitable.length, 28, 'primary held-out keeps all 28 items');
+});
+
+test('duplicateSensitivity: when too few items remain it reports no usable rule instead of inventing one (synthetic)', () => {
+  const split = L.buildItems(realScenes(), realNeg(), candDoc());
+  const calId = split.find((i) => i.kind === 'positive' && i.split === 'calibration').itemId; const heldId = split.find((i) => i.kind === 'positive' && i.split === 'heldout').itemId;
+  const its = synthItemsWithShared(calId, heldId); // a real split-crossing duplicate, so the exclusion step is exercised too
+  assert.ok(L.duplicateExclusions(its).excluded.length >= 2);
+  const { results, j } = syntheticScored(its);
+  for (const id of Object.keys(j.items)) if (id.startsWith('NM') || id.startsWith('XN')) j.items[id] = { relevant: [], best: [], noneSuitable: false }; // no unsuitable class remains
+  const sens = L.duplicateSensitivity(its, results, j);
+  assert.equal(sens.rule.status, 'none'); assert.match(sens.rule.reason, /need >= 3 of each/); assert.equal(sens.heldOutDetection, null);
+});
+
+test('report source: the sensitivity section is labelled post hoc, sits beside the primary result, and records vs distinct images are worded apart', () => {
+  const src = fs.readFileSync(script('report'), 'utf8');
+  assert.match(src, /Post hoc sensitivity: duplicate-image overlap \(POST HOC, not preregistered\)/);
+  assert.match(src, /shown beside, never instead of, the primary result above, which is unchanged/);
+  assert.match(src, /candidate records, \$\{dupSummary\.distinctImageHashes\} distinct image hashes/);
+  assert.match(src, /records re-hashed against the frozen record: \$\{frozen\.manifest\.candidateIntegrity\.imageCount\} records, of which/);
+  assert.ok(src.indexOf('## Post hoc sensitivity') > src.indexOf('## Unsuitable-image detection') && src.indexOf('## Post hoc sensitivity') < src.indexOf("'## Integrity'"));
+  assert.match(src, /evaluatedImages: frozen\.manifest\.candidateIntegrity\.imageCount/, 'the existing count key is unchanged');
+});
+
+test('preregistration addendum: states the 19 groups, 20 extra records, 13 crossing, the deliberate XN reuse, and that it was added after the original', () => {
+  const md = fs.readFileSync(path.join(REAL, 'PREREGISTRATION.md'), 'utf8'); const i = md.indexOf('## 14. Duplicate-image overlap');
+  assert.ok(i > 0); const sec = md.slice(i);
+  for (const re of [/320 candidate records but 300 distinct image hashes/, /19 duplicate groups \(20 extra records\)/, /Thirteen of the 19 groups cross/, /every cross-category item \(XN01 to XN10\)/, /not part of the original\s+preregistration/, /post hoc\s+sensitivity analysis/, /C03, D01, E01, F04, NM04, NM06, NM09, XN05, XN07, XN10/]) assert.match(sec, re);
+});
+
+// ---- review follow-up: synthetic duplicate-split logic and empty-sample safety
+const POST_HOC_SENTENCE = 'This is a post hoc analysis of the retained subset. It is not a causal estimate of duplicate-induced bias, and its rule is recomputed at report time, not frozen.';
+function synthItemsWithShared(a, b) { // synthetic candidates (unique hashes) except that scenes a and b share one image hash
+  const cd = candDoc(); const ha = cd.scenes[a].candidates[0].sha256; cd.scenes[b].candidates[0].sha256 = ha;
+  return L.buildItems(realScenes(), realNeg(), cd);
+}
+test('synthetic: a same-split duplicate excludes nothing; a split-crossing accidental duplicate excludes both scenes and inheriting cross items', () => {
+  const base = L.buildItems(realScenes(), realNeg(), candDoc());
+  const cal = base.filter((i) => i.kind === 'positive' && i.split === 'calibration').map((i) => i.itemId);
+  const held = base.filter((i) => i.kind === 'positive' && i.split === 'heldout').map((i) => i.itemId);
+  const same = synthItemsWithShared(cal[0], cal[1]);
+  assert.equal(L.duplicateGroups(same).length, 1); assert.equal(L.duplicateGroups(same)[0].crossesSplit, false);
+  assert.deepEqual(L.duplicateExclusions(same).excluded, [], 'same-split duplicates alone exclude nothing');
+  const sameHeld = synthItemsWithShared(held[0], held[1]);
+  assert.deepEqual(L.duplicateExclusions(sameHeld).excluded, []);
+  const crossing = synthItemsWithShared(cal[0], held[0]);
+  const g = L.duplicateGroups(crossing); assert.equal(g.length, 1); assert.equal(g[0].crossesSplit, true);
+  const ex = L.duplicateExclusions(crossing);
+  assert.deepEqual(ex.direct, [cal[0], held[0]].sort());
+  const inheriting = crossing.filter((i) => i.kind === 'cross' && [cal[0], held[0]].includes(i.candidateScene)).map((i) => i.itemId).sort();
+  assert.deepEqual(ex.inherited, inheriting); assert.deepEqual(ex.excluded, [...ex.direct, ...ex.inherited].sort());
+  // nothing else is excluded
+  for (const id of ex.excluded) assert.ok(ex.direct.includes(id) || crossing.find((i) => i.itemId === id).kind === 'cross');
+});
+
+test('duplicateSensitivity with an empty held-out set or an empty calibration set: no exception, no invalid percentages, no-usable-rule / n/a output', () => {
+  const all = L.buildItems(realScenes(), realNeg(), candDoc()); // synthetic: unique hashes, same split structure as the real items
+  // (a) empty held-out: calibration alone still selects a rule; held-out figures are empty, never NaN
+  const calOnly = all.filter((i) => i.split === 'calibration'); const a = syntheticScored(calOnly);
+  const sa = L.duplicateSensitivity(calOnly, a.results, a.j);
+  assert.equal(sa.rule.status, 'selected');
+  assert.equal(sa.heldOutRanking.scenes, 0); assert.equal(sa.heldOutRanking.eligible, 0);
+  assert.equal(L.pct(sa.heldOutRanking.top1, sa.heldOutRanking.eligible), 'n/a'); assert.equal(L.pct(sa.heldOutRanking.pairHalves / 2, sa.heldOutRanking.pairTotal), 'n/a');
+  assert.equal(sa.heldOutDetection.auroc, null); assert.deepEqual(sa.heldOutDetection.falseRejection, { count: 0, of: 0 }); assert.deepEqual(sa.heldOutDetection.falseAcceptance, { count: 0, of: 0 });
+  assert.deepEqual(sa.heldOutCounts, { suitable: 0, unsuitable: 0, contaminated: 0, modelFailed: 0 });
+  // (b) empty calibration: no usable rule, no held-out detection, ranking still reported on its own denominators
+  const heldOnly = all.filter((i) => i.split === 'heldout'); const b = syntheticScored(heldOnly);
+  const sb = L.duplicateSensitivity(heldOnly, b.results, b.j);
+  assert.equal(sb.rule.status, 'none'); assert.match(sb.rule.reason, /0 suitable and 0 unsuitable items \(need >= 3 of each\)/);
+  assert.equal(sb.heldOutDetection, null); assert.equal(sb.heldOutRanking.scenes, 18);
+  // (c) both empty
+  const sc = L.duplicateSensitivity([], { items: [] }, { items: {} });
+  assert.equal(sc.rule.status, 'none'); assert.equal(sc.heldOutDetection, null); assert.equal(sc.heldOutRanking.scenes, 0);
+  assert.equal(L.pct(sc.heldOutRanking.top1, sc.heldOutRanking.eligible), 'n/a');
+  assert.ok(!JSON.stringify([sa, sb, sc]).includes('NaN'));
+});
+
+test('interpretation sentence is present in the report limitations and in section 14', () => {
+  assert.ok(fs.readFileSync(script('report'), 'utf8').includes(POST_HOC_SENTENCE));
+  const md = fs.readFileSync(path.join(REAL, 'PREREGISTRATION.md'), 'utf8'); assert.ok(md.slice(md.indexOf('## 14. Duplicate-image overlap')).includes(POST_HOC_SENTENCE));
+});
+
+// ---- frozen candidateIntegrity schema: keys are distinct SHA-256 hashes, entries are candidate records
+test('candidateIntegrity.images (real manifest): keys are distinct hashes, entries are candidate records, counts agree with the item-level summary', realOnly, () => {
+  // real manifest hashes, built exactly as buildCandidateIntegrity builds the record (no image files needed)
+  const its = realItems(); const images = {}; let n = 0;
+  for (const c of [...L.uniqueCandidates(its).values()].sort((a, b) => (a.candidateId < b.candidateId ? -1 : 1))) { (images[c.sha256] ||= []).push({ candidateId: c.candidateId, sceneId: L.sceneIdOfCandidate(c.candidateId) }); n++; }
+  const ci = { candidatesSha256: L.sha256File(path.join(REAL, 'candidates.json')), imageCount: n, images };
+  L.validateCandidateIntegrity(ci);
+  const s = L.duplicateOverlapSummary(its);
+  assert.equal(ci.imageCount, 320); assert.equal(Object.keys(ci.images).length, 300);
+  assert.equal(Object.values(ci.images).reduce((a, l) => a + l.length, 0), 320, 'entries are candidate records');
+  assert.ok(Object.keys(ci.images).every((h) => /^[0-9a-f]{64}$/.test(h)), 'keys are SHA-256 digests');
+  assert.equal(ci.imageCount, s.candidateRecords); assert.equal(Object.keys(ci.images).length, s.distinctImageHashes);
+});
+
+test('candidateIntegrity.images (synthetic): the real builder and verifier on disk, with one deliberate cross-scene collision', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scene-rel-v2-ci-'));
+  const cd = candDoc(); const a = cd.scenes.A01.candidates[0]; const b = cd.scenes.A02.candidates[0];
+  for (const e of Object.values(cd.scenes)) for (const c of e.candidates) {
+    const bytes = (c === a || c === b) ? 'identical-bytes' : c.candidateId; c.sha256 = L.sha256Hex(bytes);
+    fs.mkdirSync(path.dirname(path.join(dir, c.localPath)), { recursive: true }); fs.writeFileSync(path.join(dir, c.localPath), bytes);
+  }
+  fs.writeFileSync(path.join(dir, 'candidates.json'), L.stableStringify(cd));
+  const its2 = L.buildItems(realScenes(), realNeg(), cd); const built = L.buildCandidateIntegrity(dir, its2, L.sha256File(path.join(dir, 'candidates.json')));
+  L.validateCandidateIntegrity(built); assert.equal(L.verifyCandidateIntegrity(dir, its2, built), true);
+  const s2 = L.duplicateOverlapSummary(its2);
+  assert.equal(built.imageCount, 320); assert.equal(Object.keys(built.images).length, 319);
+  assert.equal(built.imageCount, s2.candidateRecords); assert.equal(Object.keys(built.images).length, s2.distinctImageHashes); assert.equal(s2.extraRecords, 1);
+  // a record that files a candidate under another candidate's hash is refused (verification itself is unchanged)
+  const bad = structuredClone(built); const [k1, k2] = Object.keys(bad.images).filter((k) => bad.images[k].length === 1); bad.images[k2].push(bad.images[k1].pop()); delete bad.images[k1];
+  assert.throws(() => L.verifyCandidateIntegrity(dir, its2, bad), /differs from the frozen image record/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
