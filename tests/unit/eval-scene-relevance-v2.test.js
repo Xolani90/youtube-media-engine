@@ -29,10 +29,10 @@ function candDoc() {
 }
 const items = () => L.buildItems(realScenes(), realNeg(), candDoc());
 
-function judgmentsFor(its, { reviewerId = 'owner', ai = false, saw = false, noneIds = ['A05'] } = {}) {
+function judgmentsFor(its, { reviewerId = 'owner', ai = false, saw = false, noneIds = ['A05'], relevantNeg = [] } = {}) {
   const out = { schema: 'scene-relevance-v2-judgments', reviewerId, judgedAt: '2026-10-12T10:00:00.000Z', aiSuggestedLabels: ai, sawModelScoresFirst: saw, items: {} };
   for (const it of its) {
-    const none = it.kind !== 'positive' || noneIds.includes(it.itemId);
+    const none = (it.kind !== 'positive' && !relevantNeg.includes(it.itemId)) || noneIds.includes(it.itemId);
     out.items[it.itemId] = none ? { reviewed: true, relevant: [], best: [], noneSuitable: true, notes: '' }
       : { reviewed: true, relevant: [`${it.itemId}-C`, `${it.itemId}-D`], best: [`${it.itemId}-C`], noneSuitable: false, notes: '' };
   }
@@ -499,10 +499,24 @@ test('report: PROMISING path end to end on synthetic data; rule frozen from cali
   assert.equal(m.heldOut.scenes, 18); assert.equal(m.heldOut.eligible, 17); assert.equal(m.heldOut.top1, 17);
   assert.equal(m.heldOut.baselineTop1, 0);
   assert.deepEqual(m.detection.heldOutCounts.suitable, 17);
-  assert.deepEqual(m.detection.heldOut.falseAcceptance, { count: 0, of: 11 });
-  assert.deepEqual(m.detection.heldOut.falseRejection, { count: 0, of: 17 });
+  // headline detection excludes the 4 absence items: 5 cross + 1 ordinary near-miss (NM10) + 1 natural none-suitable (A05)
+  assert.equal(m.detection.headlineExcludesAbsence, true);
+  assert.deepEqual(m.detection.heldOutHeadline.falseAcceptance, { count: 0, of: 7 });
+  assert.deepEqual(m.detection.heldOutHeadline.falseRejection, { count: 0, of: 17 });
+  const g = m.detection.groups;
+  assert.deepEqual([g.cross.designedHeldOut, g.cross.heldOutEvaluated, g.cross.unsuitableRejected], [5, 5, 5]);
+  assert.deepEqual([g.nearmiss.designedCalibration, g.nearmiss.designedHeldOut, g.nearmiss.heldOutEvaluated], [5, 1, 1]);
+  assert.deepEqual([g.absence.designedCalibration, g.absence.designedHeldOut, g.absence.heldOutEvaluated, g.absence.unsuitableRejected], [0, 4, 4, 4]);
+  assert.deepEqual(m.provisionalSafeguards, { minEligibleHeldOut: 12, calibrationMinPerClass: 3, calibrationMinAuroc: 0.7, note: 'chosen in Stage A; not statistically validated thresholds' });
+  assert.deepEqual(m.heldOutIneligibleScenes, ['A05']);
   const md = fs.readFileSync(path.join(dir, 'REPORT.md'), 'utf8');
   assert.match(md, /Verdict \(held-out only\): PROMISING/); assert.match(md, /exploratory coverage safeguard/); assert.match(md, /Licensing gate/);
+  assert.match(md, /Provisional safeguards \(chosen in Stage A, not statistically validated\)/);
+  assert.match(md, /Cross-category \(gross-mismatch sanity check\) \| 5 \/ 5 \| 5 \| 5\/5/);
+  assert.match(md, /Ordinary near-miss \| 5 \/ 1 \| 1 \| 1\/1/);
+  assert.match(md, /Absence \/ negation \(reported separately\) \| 0 \/ 4 \| 4 \| 4\/4/);
+  assert.match(md, /NOT evidence of fine-grained visual discrimination/); assert.match(md, /NOT included in the headline figures/);
+  assert.match(md, /Design note: .*0 absence items in calibration, and 1 ordinary near-miss and 4 absence items in held-out/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -545,7 +559,8 @@ test('report: when calibration cannot separate the classes, no rule is invented 
   assert.equal(rule.status, 'none'); assert.equal(rule.threshold, undefined); assert.match(rule.reason, /below the preregistered floor/);
   assert.equal(run('report', [], { EVAL_DIR: f.dir }).status, 0);
   const m = L.readJsonStrict(path.join(f.dir, 'metrics.json'));
-  assert.equal(m.detection.heldOut, null);
+  assert.equal(m.detection.heldOutHeadline, null);
+  assert.equal(m.detection.groups.absence.unsuitableRejected, null, 'no rule: nothing is invented for any group');
   assert.equal(m.verdict, 'PROMISING'); // ranking quality is perfect here; detection is a separate, unaffected section
   assert.match(fs.readFileSync(path.join(f.dir, 'REPORT.md'), 'utf8'), /NO USABLE RULE ESTABLISHED/);
   fs.rmSync(f.dir, { recursive: true, force: true });
@@ -555,4 +570,185 @@ test('no secrets: no Pixabay key pattern appears in the v2 sources or data', () 
   const files = fs.readdirSync(path.join(ROOT, 'scripts')).filter((n) => n.startsWith('eval-scene-relevance-v2-')).map((n) => path.join(ROOT, 'scripts', n))
     .concat(fs.readdirSync(REAL).filter((n) => /\.(json|md)$/.test(n)).map((n) => path.join(REAL, n)));
   for (const f of files) assert.ok(!/\b\d{7,9}-[0-9a-f]{20,}\b/.test(fs.readFileSync(f, 'utf8')), `possible API key in ${f}`);
+});
+
+// ------------------------------------------------ negative-set groups (Stage A review)
+test('shipped negatives: conditionType marks exactly NM02, NM04, NM06, NM08 as absence/negation; designed counts per group are fixed', () => {
+  const neg = realNeg(); L.validateNegativesDoc(neg, realScenes());
+  assert.deepEqual(neg.nearMiss.items.filter((n) => n.conditionType === 'absence').map((n) => n.id), ['NM02', 'NM04', 'NM06', 'NM08']);
+  assert.deepEqual(neg.nearMiss.items.filter((n) => n.conditionType === 'visual').map((n) => n.id), ['NM01', 'NM03', 'NM05', 'NM07', 'NM09', 'NM10']);
+  assert.match(neg.notes, /SUPPLEMENTARY GROSS-MISMATCH SANITY CHECKS/); assert.match(neg.notes, /NOT FROZEN until/);
+  const d = L.designedCounts(items());
+  assert.deepEqual(d.cross, { calibration: 5, heldout: 5 });
+  assert.deepEqual(d.nearmiss, { calibration: 5, heldout: 1 });
+  assert.deepEqual(d.absence, { calibration: 0, heldout: 4 });
+  const bad = structuredClone(realNeg()); delete bad.nearMiss.items[1].conditionType;
+  assert.throws(() => L.validateNegativesDoc(bad, realScenes()), /conditionType/);
+  const bad2 = structuredClone(realNeg()); bad2.nearMiss.items[0].conditionType = 'negation';
+  assert.throws(() => L.validateNegativesDoc(bad2, realScenes()), /conditionType/);
+});
+
+test('partitionDetection keeps absence items out of the headline and discloses their exclusions per group', () => {
+  const held = items().filter((i) => i.split === 'heldout' && ['A01', 'XN06', 'NM10', 'NM02', 'NM04', 'NM06'].includes(i.itemId));
+  const j = { items: {
+    A01: { relevant: ['A01-A'], best: [], noneSuitable: false }, XN06: { relevant: [], best: [], noneSuitable: true }, NM10: { relevant: [], best: [], noneSuitable: true },
+    NM02: { relevant: [], best: [], noneSuitable: true }, NM04: { relevant: ['NM04-B'], best: [], noneSuitable: false }, NM06: { relevant: [], best: [], noneSuitable: true } } };
+  const mk = (id, top, ok = true) => ({ itemId: id, ok, ranking: [{ candidateId: `${id}-A`, score: top }, { candidateId: `${id}-B`, score: top - 0.1 }] });
+  const det = L.detectionItems(held, { items: [mk('A01', 0.5), mk('XN06', 0.1), mk('NM10', 0.1), mk('NM02', 0.4), mk('NM04', 0.4), mk('NM06', 0.3, false)] }, j);
+  const parts = L.partitionDetection(det, held);
+  assert.deepEqual(parts.headline.suitable.map((x) => x.itemId), ['A01']);
+  assert.deepEqual(parts.headline.unsuitable.map((x) => x.itemId).sort(), ['NM10', 'XN06']);
+  assert.deepEqual(parts.absence.unsuitable.map((x) => x.itemId), ['NM02']);
+  assert.deepEqual(parts.absence.contaminated, ['NM04']); assert.deepEqual(parts.absence.modelFailed, ['NM06']);
+  assert.deepEqual(parts.headline.contaminated, []); assert.deepEqual(parts.headline.modelFailed, []);
+  assert.equal(L.detectionGroupOf(held.find((i) => i.itemId === 'NM10')), 'nearmiss'); assert.equal(L.detectionGroupOf(held.find((i) => i.itemId === 'NM02')), 'absence');
+});
+
+test('report: a contaminated absence item is excluded from its own group and disclosed; the headline is unaffected', () => {
+  const { dir, its } = makeFixture({ judg: { relevantNeg: ['NM04'] } }); assert.equal(freeze(dir).status, 0);
+  syntheticResults(dir, its, L.readJsonStrict(path.join(dir, 'judgments-manifest.json')));
+  assert.equal(run('report', ['--select-rule'], { EVAL_DIR: dir }).status, 0);
+  assert.equal(run('report', [], { EVAL_DIR: dir }).status, 0);
+  const m = L.readJsonStrict(path.join(dir, 'metrics.json')); const g = m.detection.groups;
+  assert.deepEqual([g.absence.designedHeldOut, g.absence.heldOutEvaluated, g.absence.contaminated], [4, 3, ['NM04']]);
+  assert.deepEqual(m.detection.heldOutHeadline.falseAcceptance, { count: 0, of: 7 });
+  assert.match(fs.readFileSync(path.join(dir, 'REPORT.md'), 'utf8'), /Absence \/ negation \(reported separately\) \| 0 \/ 4 \| 3 \| 3\/3 \| 1 \(NM04\)/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ------------------------------------------------ provisional safeguards
+test('provisional safeguards: below-minimum eligible sample is INCONCLUSIVE; a structural error stays INVALID; wording says not validated', () => {
+  const agg = (over) => ({ scenes: 18, eligible: 11, noneSuitable: 7, top1: 11, top3: 11, tiedAtTop: 0, bestDen: 11, bestFirst: 11, pairHalves: 2000, pairTotal: 1000, baselineTop1: 0, baselineMissing: 0, modelFailedEligible: 0, modelFailedAll: 0, categories: Object.fromEntries('ABCDEF'.split('').map((c) => [c, { scenes: 3, successes: 2 }])), ...over });
+  const low = L.decide(agg({})); assert.equal(low.verdict, 'INCONCLUSIVE'); assert.match(low.why[0], /11 eligible held-out scenes \(< 12 preregistered minimum\)/);
+  assert.equal(L.decide(agg({ eligible: 12 })).verdict, 'PROMISING');
+  assert.equal(L.decide(agg({ baselineMissing: 1 })).verdict, 'INVALID', 'a structural error outranks the sample-size safeguard');
+  assert.equal(L.decide(agg({ eligible: 0 })).verdict, 'INCONCLUSIVE');
+  assert.deepEqual([L.CRITERIA.minEligibleHeldOut, L.CRITERIA.rule.minPerClass, L.CRITERIA.rule.minAuroc], [12, 3, 0.7]);
+  const pre = fs.readFileSync(path.join(REAL, 'PREREGISTRATION.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.match(pre, /PROVISIONAL SAFEGUARDS/); assert.match(pre, /not statistically validated thresholds/);
+  assert.match(pre, /structural problem gives INVALID first/);
+});
+
+// ------------------------------------------------ preregistration wording and freeze compatibility
+test('preregistration: blindness wording matches the implementation, no longer claims a public-ID shuffle, and states the limits', () => {
+  const pre = fs.readFileSync(path.join(REAL, 'PREREGISTRATION.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.doesNotMatch(pre, /shuffled by SHA-256/); assert.doesNotMatch(pre, /opaque order J01-J50, shuffled/);
+  assert.match(pre, /random order stored in a private answer key/); assert.match(pre, /only random opaque item and candidate IDs/);
+  assert.match(pre, /partial blinding, not full blindness/); assert.match(pre, /answer-key\.json/);
+  assert.match(pre, /NOT fully blind/); assert.match(pre, /image metadata is not stripped/); assert.match(pre, /cannot be an independent blind reviewer/);
+  assert.match(pre, /PRE-FREEZE DRAFT/); assert.doesNotMatch(pre, /Status: FROZEN at Stage A/);
+  assert.match(pre, /SUPPLEMENTARY GROSS-MISMATCH SANITY CHECKS/); assert.match(pre, /absence\/negation cases/);
+  for (const id of ['NM02', 'NM04', 'NM06', 'NM08']) assert.match(pre, new RegExp(`\\| ${id} \\|[^|]*\\|[^|]*\\| heldout \\| absence \\|`));
+});
+
+test('freeze hashes the shipped preregistration and negatives; any later edit to either is detected', () => {
+  const { dir, its } = makeFixture(); assert.equal(freeze(dir).status, 0);
+  const man = L.readJsonStrict(path.join(dir, 'judgments-manifest.json'));
+  for (const f of ['PREREGISTRATION.md', 'negatives.json']) assert.equal(man.frozenFiles[f], L.sha256File(path.join(REAL, f)), `${f} hashed as shipped`);
+  assert.doesNotThrow(() => L.loadFrozen(dir, its));
+  for (const f of ['PREREGISTRATION.md', 'negatives.json']) {
+    const p = path.join(dir, f); const orig = fs.readFileSync(p);
+    fs.appendFileSync(p, ' '); assert.throws(() => L.loadFrozen(dir, its), new RegExp(`${f.replace('.', '\\.')} changed after freezing`)); fs.writeFileSync(p, orig);
+  }
+  assert.doesNotThrow(() => L.loadFrozen(dir, its));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ------------------------------------------------ fetch: insufficient scenes fail closed (offline)
+const okRec = (id) => ({ query: 'q', hitsReturned: 20, failures: [], status: 'ok', candidates: [...LETTERS].map((l, i) => ({ candidateId: `${id}-${l}`, sceneId: id, searchRank: RANKS[i], sha256: L.sha256Hex(`${id}-${l}`), localPath: `images/${id}/${id}-${l}.jpg` })) });
+const insuffRec = (id, extra = {}) => ({ query: 'q', hitsReturned: 3, hitPixabayIds: [1, 2, 3], candidates: [], failures: [], status: 'insufficient', insufficientReason: 'too_few_hits', recordedAt: '2026-10-12T10:00:00.000Z', ...extra });
+const decisionFor = (rec, id, over = {}) => ({ sceneId: id, recordSha256: L.recordSha256(rec), decision: 'retry-same-query', decidedBy: 'owner', decidedAt: '2026-10-12T11:00:00.000Z', reason: 'accept a retry of the same query', ...over });
+const decDoc = (...d) => ({ schema: 'scene-relevance-v2-fetch-owner-decisions', decisions: d });
+
+test('insufficientGate: ok scenes pass; insufficient and unrecognised scenes block; only a matching owner decision approves', () => {
+  const ins = insuffRec('A01'); const doc = { scenes: { A02: okRec('A02'), A01: ins } };
+  assert.deepEqual(L.insufficientGate({ scenes: { A02: okRec('A02') } }, null), { blocked: [], approved: [] });
+  assert.deepEqual(L.insufficientGate(null, null), { blocked: [], approved: [] }, 'no candidates.json yet: nothing blocked');
+  const g1 = L.insufficientGate(doc, null); assert.deepEqual(g1.blocked.map((b) => b.sceneId), ['A01']); assert.match(g1.blocked[0].reason, /insufficient \(too_few_hits\)/); assert.equal(g1.blocked[0].recordSha256, L.recordSha256(ins));
+  const g2 = L.insufficientGate(doc, decDoc(decisionFor(ins, 'A01'))); assert.deepEqual(g2.blocked, []); assert.deepEqual(g2.approved.map((a) => a.sceneId), ['A01']);
+  const stale = decisionFor(insuffRec('A01', { recordedAt: '2026-10-11T00:00:00.000Z' }), 'A01'); // hash of an EARLIER failure
+  assert.deepEqual(L.insufficientGate(doc, decDoc(stale)).blocked.map((b) => b.sceneId), ['A01'], 'a decision for another record never approves this one');
+  assert.deepEqual(L.insufficientGate(doc, decDoc(decisionFor(ins, 'A03'))).blocked.map((b) => b.sceneId), ['A01'], 'a decision for another scene does not apply');
+  const odd = { scenes: { A01: { ...okRec('A01'), status: 'weird' }, A02: { ...okRec('A02'), candidates: okRec('A02').candidates.slice(0, 5) } } };
+  assert.deepEqual(L.insufficientGate(odd, null).blocked.map((b) => b.sceneId), ['A01', 'A02'], 'unrecognised state and an ok scene below the floor both fail closed');
+  assert.deepEqual(L.insufficientGate({ scenes: { A02: { ...okRec('A02'), status: 'weird' } } }, decDoc(decisionFor({ ...okRec('A02'), status: 'weird' }, 'A02'))).approved, [], 'only a recorded insufficient scene can be approved');
+});
+
+test('validateFetchDecisions rejects anything but an explicit, complete retry-same-query decision', () => {
+  const ins = insuffRec('A01'); const good = decisionFor(ins, 'A01');
+  assert.doesNotThrow(() => L.validateFetchDecisions(decDoc(good)));
+  assert.throws(() => L.validateFetchDecisions(decDoc({ ...good, decision: 'change-query' })), /retry-same-query/);
+  assert.throws(() => L.validateFetchDecisions(decDoc({ ...good, decision: 'mark-ok' })), /retry-same-query/);
+  for (const k of ['decidedBy', 'reason']) assert.throws(() => L.validateFetchDecisions(decDoc({ ...good, [k]: '  ' })), new RegExp(`${k} is required`));
+  assert.throws(() => L.validateFetchDecisions(decDoc({ ...good, decidedAt: 'soon' })), /ISO date/);
+  assert.throws(() => L.validateFetchDecisions(decDoc({ ...good, recordSha256: 'abc' })), /recordSha256/);
+  assert.throws(() => L.validateFetchDecisions(decDoc({ ...good, sceneId: '../x' })), /sceneId/);
+  assert.throws(() => L.validateFetchDecisions(decDoc(good, good)), /duplicate/);
+  assert.throws(() => L.validateFetchDecisions({ schema: 'x', decisions: [] }), /wrong schema/);
+});
+
+test('archiveInsufficientScene preserves collected candidates and images, numbers attempts, and never overwrites', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scene-rel-v2-arch-'));
+  const mkDownloaded = () => { const rec = insuffRec('A01', { hitsReturned: 20, insufficientReason: 'too_few_downloads', candidates: ['A', 'B', 'C'].map((l) => ({ candidateId: `A01-${l}`, localPath: `images/A01/A01-${l}.jpg`, sha256: L.sha256Hex(l) })) }); fs.mkdirSync(path.join(dir, 'images', 'A01'), { recursive: true }); for (const c of rec.candidates) fs.writeFileSync(path.join(dir, c.localPath), `bytes-${c.candidateId}`); return rec; };
+  const rec1 = mkDownloaded(); const doc = { scenes: { A01: rec1, A02: okRec('A02') } };
+  assert.throws(() => L.archiveInsufficientScene(doc, 'A01', decisionFor(insuffRec('A01'), 'A01'), dir), /does not match the recorded failure/);
+  assert.throws(() => L.archiveInsufficientScene(doc, 'A02', decisionFor(okRec('A02'), 'A02'), dir), /only an insufficient scene/);
+  assert.ok(doc.scenes.A01 && fs.existsSync(path.join(dir, 'images', 'A01', 'A01-A.jpg')), 'a refused archive changes nothing');
+  assert.equal(L.archiveInsufficientScene(doc, 'A01', decisionFor(rec1, 'A01'), dir, '2026-10-12T12:00:00.000Z'), 1);
+  assert.equal(doc.scenes.A01, undefined); assert.ok(doc.scenes.A02, 'other scenes untouched');
+  const h = doc.attemptHistory.A01[0]; assert.equal(h.attempt, 1); assert.equal(h.ownerDecision.decidedBy, 'owner'); assert.equal(h.recordSha256, L.recordSha256(rec1));
+  assert.deepEqual(h.record.candidates.map((c) => c.localPath), ['A', 'B', 'C'].map((l) => `images/A01.attempt1/A01-${l}.jpg`));
+  for (const c of h.record.candidates) assert.equal(fs.readFileSync(path.join(dir, ...c.localPath.split('/')), 'utf8'), `bytes-${c.candidateId}`, 'bytes preserved');
+  assert.equal(fs.existsSync(path.join(dir, 'images', 'A01')), false);
+  const rec2 = mkDownloaded(); rec2.recordedAt = '2026-10-12T13:00:00.000Z'; doc.scenes.A01 = rec2;
+  assert.equal(L.archiveInsufficientScene(doc, 'A01', decisionFor(rec2, 'A01'), dir), 2);
+  assert.ok(fs.existsSync(path.join(dir, 'images', 'A01.attempt1', 'A01-A.jpg')) && fs.existsSync(path.join(dir, 'images', 'A01.attempt2', 'A01-A.jpg')));
+  doc.scenes.A01 = mkDownloaded(); doc.attemptHistory.A01.pop(); fs.mkdirSync(path.join(dir, 'images', 'A01.attempt2'), { recursive: true });
+  assert.throws(() => L.archiveInsufficientScene(doc, 'A01', decisionFor(doc.scenes.A01, 'A01'), dir), /refusing to overwrite an archived attempt/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// A stand-in for fetch(): no real network. It logs each call and answers every Pixabay search with 3 hits (< 6).
+function fetchStub(dir) {
+  const file = path.join(dir, 'stub-fetch.mjs'); const log = path.join(dir, 'stub-calls.log');
+  fs.writeFileSync(file, `import fs from 'node:fs';\nglobalThis.fetch = async (u) => { fs.appendFileSync(${JSON.stringify(log)}, String(u).split('?')[0] + '\\n'); return new Response(JSON.stringify({ hits: [1, 2, 3].map((id) => ({ id, largeImageURL: 'https://stub.invalid/' + id + '.jpg', pageURL: 'p', user: 'u', tags: 't' })) }), { status: 200 }); };\n`);
+  return { env: { NODE_OPTIONS: `--import ${new URL(`file://${file.replace(/\\/g, '/').replace(/^([A-Za-z]):/, '/$1:')}`).href}`, PIXABAY_API_KEY: 'test-key-not-real' }, calls: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).length : 0) };
+}
+
+test('fetch script: an insufficient scene stops every later run before any network call until the owner records a decision; stale decisions never carry over', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scene-rel-v2-fetch-'));
+  for (const f of ['scenes.json', 'negatives.json']) fs.copyFileSync(path.join(REAL, f), path.join(dir, f));
+  const stub = fetchStub(dir); const env = { EVAL_DIR: dir, ...stub.env };
+  const go = (...a) => run('fetch', [...a, '--confirm-stage-approved'], env);
+  const read = () => L.readJsonStrict(path.join(dir, 'candidates.json'));
+
+  // 1. first attempt: the stubbed search returns 3 hits -> recorded as insufficient and the run stops
+  const r1 = go('--only', 'A01'); assert.equal(r1.status, 1, r1.stderr); assert.match(r1.stderr, /Recorded as insufficient/); assert.equal(stub.calls(), 1);
+  const rec1 = read().scenes.A01; assert.equal(rec1.status, 'insufficient'); assert.equal(rec1.insufficientReason, 'too_few_hits'); assert.ok(rec1.recordedAt); assert.deepEqual(rec1.candidates, []);
+
+  // 2. re-run (same scene, another scene, a group, even --dry-run): refused BEFORE any network call
+  for (const args of [['--only', 'A01'], ['--only', 'C01'], ['--group', 'positive'], ['--group', 'nearmiss'], ['--only', 'A01', '--dry-run']]) {
+    const r = run('fetch', args.includes('--dry-run') ? args : [...args, '--confirm-stage-approved'], env);
+    assert.equal(r.status, 1, `${args.join(' ')}: ${r.stderr}`); assert.match(r.stderr, /FETCH REFUSED before any network call.*A01 \(recorded as insufficient \(too_few_hits\)\)/);
+  }
+  assert.equal(stub.calls(), 1, 'no network call was attempted by any refused run');
+  assert.deepEqual(read().scenes.A01, rec1, 'the insufficient record was not reclassified or replaced');
+
+  // 3. --show-insufficient is offline, exits 0, prints the hash the owner must bind a decision to
+  const show = run('fetch', ['--show-insufficient'], env); assert.equal(show.status, 0); assert.ok(show.stdout.includes(L.recordSha256(rec1))); assert.equal(stub.calls(), 1);
+
+  // 4. a malformed or non-explicit decision file keeps the stop in place
+  const decPath = path.join(dir, L.FETCH_DECISIONS_FILE);
+  fs.writeFileSync(decPath, JSON.stringify(decDoc(decisionFor(rec1, 'A01', { decision: 'change-query' }))));
+  const bad = go('--only', 'A01'); assert.equal(bad.status, 1); assert.match(bad.stderr, /retry-same-query/); assert.equal(stub.calls(), 1);
+
+  // 5. an explicit owner decision bound to this record allows exactly one retry; the old attempt is preserved
+  fs.writeFileSync(decPath, JSON.stringify(decDoc(decisionFor(rec1, 'A01'))));
+  const r5 = go('--only', 'A01'); assert.equal(r5.status, 1, r5.stderr); assert.match(r5.stdout, /owner-approved retry \(same query\); previous attempt preserved as attempt 1/); assert.equal(stub.calls(), 2);
+  const after = read(); assert.equal(after.attemptHistory.A01.length, 1); assert.deepEqual(after.attemptHistory.A01[0].record, rec1); assert.equal(after.attemptHistory.A01[0].ownerDecision.decidedBy, 'owner');
+  assert.equal(after.scenes.A01.status, 'insufficient', 'the retry failed again and is recorded as a NEW failure'); assert.notEqual(L.recordSha256(after.scenes.A01), L.recordSha256(rec1));
+
+  // 6. the consumed decision does not approve the new failure
+  const r6 = go('--only', 'A01'); assert.equal(r6.status, 1); assert.match(r6.stderr, /FETCH REFUSED before any network call/); assert.equal(stub.calls(), 2);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -1,9 +1,11 @@
 # Preregistration: SigLIP scene-relevance evaluation v2
 
-Status: FROZEN at Stage A, before any image is fetched and before any model score exists.
-The SHA-256 of this file, `scenes.json` and `negatives.json` is recorded in `judgments-manifest.json`
-when judgments are frozen, and the run and report scripts refuse to proceed if any of them changed.
-Nothing below may be changed after seeing scores. Evaluation authorisation here is separate from
+Status: PRE-FREEZE DRAFT. This file becomes binding only when `scripts/eval-scene-relevance-v2-freeze.js`
+writes `judgments-manifest.json`; at that moment it records the SHA-256 of this file, `scenes.json`,
+`negatives.json` and `answer-key.json`, and the run and report scripts refuse to proceed if any of them
+changed. Until that manifest exists, correcting this file is legitimate and no result depends on it; the
+final text must be settled before the first freeze, because the freeze script hashes whatever is on disk.
+Nothing below may be changed after the freeze, and nothing may be changed after seeing scores. Evaluation authorisation here is separate from
 production authorisation (see section 12).
 
 ## 1. Purpose
@@ -60,6 +62,16 @@ baseline. Recorded per candidate: query, hit IDs, search rank, Pixabay ID, page 
 format; per scene: every download failure. A scene needs >= 6 downloaded candidates, otherwise the fetch
 stops and the owner decides (no silent query change). 240 positive images in total.
 
+Insufficient scenes fail closed. A scene with fewer than 6 usable hits or fewer than 6 downloaded candidates is
+recorded in `candidates.json` as `status: insufficient` (with its reason and time) and the run stops. While any
+scene is insufficient or in an unrecognised state, every later fetch run (any group, any `--only`, also
+`--dry-run`) refuses to proceed before any network call. The only way forward is an explicit owner decision in
+`fetch-owner-decisions.json` (decision `retry-same-query`, deciding person, ISO date, reason), bound to the SHA-256
+of that exact recorded failure, so a decision cannot approve a later failure. `--show-insufficient` (offline)
+prints each hash and a template. An approved retry first moves the old record into `attemptHistory` and its images
+to `images/<scene>.attempt<N>/`; nothing collected is deleted or overwritten. Changing the query is not a fetch
+decision: it changes `scenes.json` or `negatives.json` and needs a new preregistration.
+
 ## 4. Calibration / held-out split (stratified, deterministic)
 
 Within each category, sort the five scene IDs ascending by the lowercase hex SHA-256 of the UTF-8 ID
@@ -80,8 +92,20 @@ would make a per-category criterion impossible. The owner approved the stratifie
 
 ## 5. Negative sets (unsuitable-image detection)
 
-Mixed into the same blind sheet as the positive scenes (50 items, opaque order J01-J50, shuffled by
-SHA-256), so the reviewer cannot tell which are negatives and sees no model output.
+Mixed into the same blind sheet as the positive scenes (50 items), so the reviewer is not told which are
+negatives and sees no model output. Items appear in a random order stored in a private answer key
+(`answer-key.json`, created once with cryptographic randomness); the reviewer sees only random opaque item and
+candidate IDs, with the display labels J01-J50 following that random order. This is partial blinding, not full
+blindness (see section 11).
+
+How the negative sets are interpreted. The ten cross-category items are SUPPLEMENTARY GROSS-MISMATCH SANITY
+CHECKS. They pair a description with photos of an unrelated subject, are mostly easy negatives, and must not be
+presented as evidence of strong fine-grained visual discrimination. The ten near-miss items are provisional and
+are reported in two separate groups: ordinary near-misses (`conditionType: visual`: NM01, NM03, NM05, NM07, NM09,
+NM10) and absence/negation cases (`conditionType: absence`: NM02, NM04, NM06, NM08), which depend on "empty" or
+"no one" and therefore also test negation handling. Absence cases are never merged into a headline claim about
+ordinary scene relevance. By the frozen split all 5 calibration near-misses are ordinary and the held-out
+near-misses are 4 absence + 1 ordinary (NM10); the report discloses these designed counts.
 
 Cross-category (10, reuse existing candidates, no extra downloads). Rule: per split, sort scene IDs by
 sha256('xneg:'+id); the first 5 are description scenes. The image scene is the scene in a different
@@ -103,18 +127,18 @@ category with the lowest sha256('xneg-img:'+d+':'+m).
 Near-miss (10, need 10 extra searches and up to 80 downloads in Stage C; none run in Stage A). The
 description states a specific visual condition and the query returns the opposite or unaffected condition.
 
-| Item | Description | Query | Split |
-|---|---|---|---|
-| NM01 | Drought-damaged maize wilting in a cracked, dry field. | `green healthy maize field` | calibration |
-| NM02 | Empty supermarket shelves after panic buying. | `fully stocked supermarket shelves` | heldout |
-| NM03 | A flooded street with water up to the car windows. | `dry city street sunny day` | calibration |
-| NM04 | An empty operating theatre with no staff or patient. | `surgeons operating theatre team` | heldout |
-| NM05 | A wildfire burning through a forest at night. | `green forest summer trees` | calibration |
-| NM06 | A courtroom with an empty bench and nobody present. | `judge lawyers courtroom hearing` | heldout |
-| NM07 | A cargo ship battling a storm at sea. | `cargo ship calm sea` | calibration |
-| NM08 | An empty polling station with no voters. | `voters queuing polling station` | heldout |
-| NM09 | A smartphone with a shattered, cracked screen. | `smartphone social media feed` | calibration |
-| NM10 | A snow-covered city street during a blizzard. | `city street summer sunshine` | heldout |
+| Item | Description | Query | Split | Condition type |
+|---|---|---|---|---|
+| NM01 | Drought-damaged maize wilting in a cracked, dry field. | `green healthy maize field` | calibration | visual |
+| NM02 | Empty supermarket shelves after panic buying. | `fully stocked supermarket shelves` | heldout | absence |
+| NM03 | A flooded street with water up to the car windows. | `dry city street sunny day` | calibration | visual |
+| NM04 | An empty operating theatre with no staff or patient. | `surgeons operating theatre team` | heldout | absence |
+| NM05 | A wildfire burning through a forest at night. | `green forest summer trees` | calibration | visual |
+| NM06 | A courtroom with an empty bench and nobody present. | `judge lawyers courtroom hearing` | heldout | absence |
+| NM07 | A cargo ship battling a storm at sea. | `cargo ship calm sea` | calibration | visual |
+| NM08 | An empty polling station with no voters. | `voters queuing polling station` | heldout | absence |
+| NM09 | A smartphone with a shattered, cracked screen. | `smartphone social media feed` | calibration | visual |
+| NM10 | A snow-covered city street during a blizzard. | `city street summer sunshine` | heldout | visual |
 
 The reviewer decides whether any candidate fits. If the reviewer marks any candidate relevant in a negative
 item, that pair is "contaminated": excluded from negative metrics and counted and listed in the report.
@@ -122,12 +146,18 @@ Scenes the reviewer judges "none suitable" are also unsuitable sets (natural neg
 
 ## 6. Blind human judgments and freezing
 
-Per item: relevant (per candidate), best (per candidate, ties allowed, subset of relevant), none suitable
-(per item), optional notes, reviewer ID. The export records two declarations: labels suggested by an AI,
-and saw model scores first. `sawModelScoresFirst = true` is refused at freeze time. AI-suggested labels are
-allowed but the report states the judgments are then not fully independent. The freeze script validates
-the files, records SHA-256 of each judgments file and of this file, `scenes.json` and `negatives.json`, and
-refuses to overwrite a manifest. The run and report scripts re-verify every hash and reject missing,
+What the reviewer sees: `contact-sheet.html` and `review-assets/` only. The sheet, its embedded data and the
+image file names carry random opaque item and candidate IDs, the description and the "look for" text; they carry
+no item IDs, class words, Pixabay tags, original paths or model output. The mapping back to real IDs is in
+`answer-key.json`, which must never be given to the reviewer. Per item the reviewer records: relevant (per
+candidate), best (per candidate, ties allowed, subset of relevant), none suitable (per item), optional notes,
+reviewer ID. The export (`blind-judgments-<id>.json`, opaque IDs only) records two declarations: labels suggested
+by an AI, and saw model scores first. `sawModelScoresFirst = true` is refused at freeze time. AI-suggested labels
+are allowed but the report states the judgments are then not fully independent. The freeze script translates the
+blind export into the canonical `judgments-<id>.json` using the key (writing it once), validates the files,
+records SHA-256 of each canonical judgments file, each blind export, this file, `scenes.json`, `negatives.json`
+and `answer-key.json`, and refuses to overwrite a manifest. A key that no longer matches the items is refused,
+never regenerated. The reviewer is not independent of the negatives' author (section 11). The run and report scripts re-verify every hash and reject missing,
 changed, malformed or inconsistent files; they never repair them. Judging order: negatives and positives
 together in one sheet, before any model run. A second reviewer is optional and kept in a separate file;
 the report gives Cohen's kappa over candidate-level relevance labels, or "undefined" with the reason (for
@@ -135,6 +165,9 @@ example when one reviewer used a single label throughout), or "not available" wi
 The primary reviewer's labels define ground truth.
 
 ## 7. Metrics (raw numerators and denominators always shown)
+
+Reporting rule for every rate: raw numerator and denominator, the failures, the exclusions (listed by ID) and the
+category denominators are always shown; nothing is dropped silently.
 
 Positive scenes ("eligible" = the primary reviewer marked at least one relevant candidate):
 - Top-1 accuracy among eligible scenes. Top-3 accuracy. Best-ranked-first rate (scenes with a human best).
@@ -170,17 +203,26 @@ baseline (no search-rank-1 candidate), non-blind judgments, a non-default worker
 not match the calibration data. The report then states the reason and gives no metric-based recommendation.
 
 INCONCLUSIVE (insufficient data): zero eligible held-out scenes, no relevant/non-relevant pairs, or fewer than
-12 eligible held-out scenes. The minimum of 12 (two thirds of 18) and the calibration floor in section 9 were
-added in Stage A to cover "insufficient sample" and are flagged for owner approval; they do not change the
-owner's thresholds above.
+12 eligible held-out scenes. The decision order is fixed: a structural problem gives INVALID first (for example
+a missing Pixabay-first baseline); only then does a below-minimum eligible sample give INCONCLUSIVE; only then are
+the thresholds applied. The minimum of 12 (two thirds of 18) and the calibration floor in section 9 are
+PROVISIONAL SAFEGUARDS added in Stage A to cover "insufficient sample". They are not statistically validated
+thresholds, are not derived from any power calculation, and do not change the owner's thresholds above. The
+report lists every held-out scene excluded as ineligible and every model failure.
 
 ## 9. Unsuitable-image detection (separate from ranking quality; not adopted for production)
 
 Unit: an item with a model ranking. "Suitable" = eligible positive scene. "Unsuitable" = positive scene
-judged none-suitable, plus valid cross-category and near-miss items. Statistics per item: top score; top-1
+judged none-suitable, plus valid cross-category and near-miss items. Reporting groups, always shown separately
+with designed and evaluated counts: cross-category (gross-mismatch sanity check), ordinary near-miss, absence /
+negation near-miss, and naturally none-suitable scenes. The held-out headline detection figures (AUROC, false
+rejection, false acceptance) exclude the absence/negation items; those are reported in their own row and with
+their own AUROC against the held-out suitable sets, and are never combined into a claim about ordinary scene
+relevance. Contaminated and model-failed items are excluded from the metrics but counted and listed per group. Statistics per item: top score; top-1
 minus top-2 gap; top-1 minus median of the item's scores.
 
-Selection, on CALIBRATION items only: need >= 3 suitable and >= 3 unsuitable calibration items; compute AUROC
+Selection, on CALIBRATION items only (the floor of 3 per class and the AUROC floor of 0.70 are provisional
+safeguards, not validated thresholds): need >= 3 suitable and >= 3 unsuitable calibration items; compute AUROC
 (ties 0.5) for each statistic; take the highest (ties: the order listed above); if its AUROC is < 0.70, no
 usable rule is established and none is invented. Otherwise one threshold: candidate thresholds are midpoints
 between adjacent distinct values; choose the one maximising balanced accuracy on calibration; ties go to
@@ -204,6 +246,10 @@ scenes or prompt wording. Nothing here changes production behaviour.
 
 30 scenes, 18 held-out, 3 per category; one search per scene and fixed spaced positions; candidates are
 Pixabay photos, not the engine's real content mix; judgments are by one person (possibly AI-assisted);
+the evaluation is NOT fully blind: each cross-category description repeats a positive scene's text word for word
+and reuses that scene's photo set (a photo set can appear under several items); near-miss descriptions have a
+recognisable "empty or damaged" style; the visual conditions themselves are recognisable; image metadata is not
+stripped; and the negatives' author, who knows which items are negatives, cannot be an independent blind reviewer;
 the tool records but cannot prove that judging preceded score viewing; the worker squashes images to
 224x224 (documented, unchanged); no other model was compared.
 

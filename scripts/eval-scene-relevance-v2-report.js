@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_EVAL_DIR, CRITERIA, readJsonStrict, buildItems, loadFrozen, validateResults, sha256File, stableStringify,
-  sceneOutcome, aggregatePositives, decide, detectionItems, selectRule, evaluateRule, agreementBetween, estimateLoadVsInference, median, mean, pct
+  sceneOutcome, aggregatePositives, decide, detectionItems, detectionGroupOf, designedCounts, partitionDetection, auroc, selectRule, evaluateRule, agreementBetween, estimateLoadVsInference, median, mean, pct
 } from './eval-scene-relevance-v2-lib.js';
 
 const EVAL_DIR = path.resolve(process.env.EVAL_DIR || DEFAULT_EVAL_DIR);
@@ -81,9 +81,23 @@ const cal = aggFor('calibration'); const held = aggFor('heldout');
 const { verdict, why } = decide(held);
 const det = (split) => detectionItems(items.filter((i) => i.split === split), results, primary);
 const heldDet = det('heldout');
+const heldItems = items.filter((i) => i.split === 'heldout');
+const heldParts = partitionDetection(heldDet, heldItems); // headline = cross + ordinary near-miss + natural none-suitable; absence kept apart
+const groupOf = new Map(items.map((i) => [i.itemId, detectionGroupOf(i)]));
+const designed = designedCounts(items);
 const rule = frozenRule.rule;
-const ruleEval = rule.status === 'selected' ? evaluateRule(rule, heldDet) : null;
-const byKind = (kind) => (rule.status !== 'selected' ? null : { unsuitableRejected: heldDet.unsuitable.filter((x) => x.kind === kind && x.stats[rule.statistic] < rule.threshold).length, of: heldDet.unsuitable.filter((x) => x.kind === kind).length });
+const stat = rule.status === 'selected' ? rule.statistic : null;
+const ruleEval = rule.status === 'selected' ? evaluateRule(rule, heldParts.headline) : null; // headline excludes absence/negation items
+const rejectedIn = (g) => heldDet.unsuitable.filter((x) => groupOf.get(x.itemId) === g && x.stats[stat] < rule.threshold).length;
+const byGroup = (g) => ({
+  designedCalibration: designed[g].calibration, designedHeldOut: designed[g].heldout,
+  heldOutEvaluated: heldDet.unsuitable.filter((x) => groupOf.get(x.itemId) === g).length,
+  contaminated: heldDet.contaminated.filter((id) => groupOf.get(id) === g), modelFailed: heldDet.modelFailed.filter((id) => groupOf.get(id) === g),
+  unsuitableRejected: rule.status !== 'selected' ? null : rejectedIn(g)
+});
+const groups = { cross: byGroup('cross'), nearmiss: byGroup('nearmiss'), absence: byGroup('absence'), naturalNoneSuitable: byGroup('positive') };
+const absenceAuroc = rule.status === 'selected' ? auroc(heldParts.headline.suitable.map((x) => x.stats[stat]), heldParts.absence.unsuitable.map((x) => x.stats[stat])) : null;
+const heldIneligible = outcomes('heldout').filter((o) => !o.eligible).map((o) => o.itemId);
 
 const failures = {
   downloads: Object.values(candDoc.scenes).reduce((n, s) => n + (s.failures?.length || 0), 0),
@@ -97,7 +111,9 @@ const agreement = second ? agreementBetween(items, primary, second) : null;
 
 const metrics = {
   verdict, verdictBasis: why, criteria: CRITERIA, heldOut: held, calibrationDescriptiveOnly: cal,
-  detection: { rule, heldOut: ruleEval, heldOutCounts: { suitable: heldDet.suitable.length, unsuitable: heldDet.unsuitable.length, contaminated: heldDet.contaminated, modelFailed: heldDet.modelFailed }, crossCategory: byKind('cross'), nearMiss: byKind('nearmiss'), naturalNoneSuitable: byKind('positive') },
+  provisionalSafeguards: { minEligibleHeldOut: CRITERIA.minEligibleHeldOut, calibrationMinPerClass: CRITERIA.rule.minPerClass, calibrationMinAuroc: CRITERIA.rule.minAuroc, note: 'chosen in Stage A; not statistically validated thresholds' },
+  heldOutIneligibleScenes: heldIneligible,
+  detection: { rule, headlineExcludesAbsence: true, heldOutHeadline: ruleEval, heldOutCounts: { suitable: heldParts.headline.suitable.length, unsuitableHeadline: heldParts.headline.unsuitable.length, contaminatedHeadline: heldParts.headline.contaminated, modelFailedHeldOut: heldDet.modelFailed }, groups, absenceVsSuitableAuroc: absenceAuroc, designedItems: designed },
   failures, latencyMs: { calls: times.length, median: median(times), mean: mean(times), max: Math.max(...times) }, loadVsInference: loadEst,
   reviewers: { primary: primary.reviewerId, second: second?.reviewerId ?? null, aiSuggestedLabels: primary.aiSuggestedLabels, agreement }
 };
@@ -117,22 +133,31 @@ const block = (agg) => [
 L.push('# SigLIP scene-relevance evaluation v2 report', '');
 L.push(`Run: ${results.meta.startedAt} | repo HEAD: ${results.meta.gitHead ?? 'unknown'} | node ${results.meta.node} on ${results.meta.platform} | model dir: ${results.meta.modelDirName} | dtype: ${results.meta.dtype}`, '');
 L.push(`## Verdict (held-out only): ${verdict}`, '', `Basis: ${why.join('; ')}.`, '');
+L.push(`Provisional safeguards (chosen in Stage A, not statistically validated): at least ${CRITERIA.minEligibleHeldOut} eligible held-out scenes (otherwise INCONCLUSIVE, unless a structural error makes the run INVALID), and for the detection rule at least ${CRITERIA.rule.minPerClass} suitable and ${CRITERIA.rule.minPerClass} unsuitable calibration items with AUROC >= ${CRITERIA.rule.minAuroc}. Eligible held-out scenes: ${held.eligible} of ${held.scenes}. Held-out scenes with no relevant candidate (excluded from rates, listed here): ${heldIneligible.length ? heldIneligible.join(', ') : 'none'}. Held-out scenes whose model run failed (counted against the model): ${held.modelFailedAll}.`, '');
 L.push('Criteria were preregistered before any score existed (PREREGISTRATION.md). Calibration performance is shown separately and is NOT used to claim success. The held-out sample is small (18 scenes, 3 per category): exploratory, not statistical proof of general performance.', '');
 L.push('## Held-out results (18 scenes: 3 per category)', '', ...block(held), '');
 L.push('### Category coverage criterion (exploratory coverage safeguard)', '', 'Every category must have at least one successful top-1 result among its three held-out scenes. With three scenes per category this is a coverage safeguard only, not strong evidence of category-level performance.', '', ...catTable(held), '');
 L.push('## Calibration results (12 scenes; descriptive only)', '', ...block(cal), '', ...catTable(cal), '');
-L.push('## Unsuitable-image detection (separate from ranking quality)', '');
+L.push('## Unsuitable-image detection (separate from ranking quality; does not affect the verdict)', '');
 L.push(`Rule frozen from calibration data only: ${rule.status === 'selected' ? `${rule.statistic} >= ${rule.threshold} accepts a set (calibration AUROC ${f1(rule.calibrationAuroc)}, balanced accuracy ${f1(rule.calibrationBalancedAccuracy)})` : `NO USABLE RULE ESTABLISHED: ${rule.reason}`}.`);
-L.push(`Calibration class counts: ${rule.counts.suitable} suitable, ${rule.counts.unsuitable} unsuitable.`);
+L.push(`Calibration class counts: ${rule.counts.suitable} suitable, ${rule.counts.unsuitable} unsuitable (provisional floor: ${CRITERIA.rule.minPerClass} each, AUROC >= ${CRITERIA.rule.minAuroc}).`, '');
+L.push('How to read the negative sets:', '- Cross-category items are a supplementary gross-mismatch sanity check. They are mostly easy negatives (unrelated subjects) and are NOT evidence of fine-grained visual discrimination.', '- Ordinary near-misses (same scene, opposite or unaffected visual condition) are the closest thing here to a hard negative, and are provisional.', '- Absence/negation cases (NM02, NM04, NM06, NM08: "empty", "no one") test negation handling. They are reported separately and are NOT included in the headline figures below or in any claim about ordinary scene relevance.', '');
 if (ruleEval) {
-  L.push(`- Held-out AUROC: ${f1(ruleEval.auroc)} (suitable ${heldDet.suitable.length}, unsuitable ${heldDet.unsuitable.length})`,
+  L.push(`Held-out headline (cross-category + ordinary near-miss + naturally none-suitable scenes; absence cases excluded):`,
+    `- AUROC: ${f1(ruleEval.auroc)} (suitable ${heldParts.headline.suitable.length}, unsuitable ${heldParts.headline.unsuitable.length})`,
     `- False rejection (suitable set rejected): ${pct(ruleEval.falseRejection.count, ruleEval.falseRejection.of)}`,
-    `- False acceptance (unsuitable set accepted): ${pct(ruleEval.falseAcceptance.count, ruleEval.falseAcceptance.of)}`,
-    `- Unsuitable sets rejected by kind: cross-category ${metrics.detection.crossCategory.unsuitableRejected}/${metrics.detection.crossCategory.of}; near-miss ${metrics.detection.nearMiss.unsuitableRejected}/${metrics.detection.nearMiss.of}; naturally none-suitable scenes ${metrics.detection.naturalNoneSuitable.unsuitableRejected}/${metrics.detection.naturalNoneSuitable.of}`);
+    `- False acceptance (unsuitable set accepted): ${pct(ruleEval.falseAcceptance.count, ruleEval.falseAcceptance.of)}`, '');
 }
-L.push(`- Contaminated negative pairs (reviewer found a relevant candidate; excluded, counted here): ${heldDet.contaminated.length}${heldDet.contaminated.length ? ' (' + heldDet.contaminated.join(', ') + ')' : ''}`,
-  `- Items with model failure or too few scores (excluded from this test, counted here): ${heldDet.modelFailed.length}${heldDet.modelFailed.length ? ' (' + heldDet.modelFailed.join(', ') + ')' : ''}`,
-  '- Nothing here is adopted for production. Cosine scores depend on the exact text prompt, so a threshold may not transfer to other scenes or prompt wording.', '');
+L.push('| Group | Designed (calibration / held-out) | Held-out evaluated | Unsuitable rejected by rule | Contaminated (excluded) | Model failed (excluded) |', '|---|---|---|---|---|---|');
+for (const [name, g] of [['Cross-category (gross-mismatch sanity check)', groups.cross], ['Ordinary near-miss', groups.nearmiss], ['Absence / negation (reported separately)', groups.absence], ['Naturally none-suitable scenes', groups.naturalNoneSuitable]]) {
+  L.push(`| ${name} | ${g.designedCalibration} / ${g.designedHeldOut} | ${g.heldOutEvaluated} | ${g.unsuitableRejected === null ? 'n/a (no rule)' : `${g.unsuitableRejected}/${g.heldOutEvaluated}`} | ${g.contaminated.length}${g.contaminated.length ? ' (' + g.contaminated.join(', ') + ')' : ''} | ${g.modelFailed.length}${g.modelFailed.length ? ' (' + g.modelFailed.join(', ') + ')' : ''} |`);
+}
+L.push('');
+if (groups.nearmiss.designedHeldOut < 3 || groups.nearmiss.designedCalibration < 3 || groups.absence.designedCalibration === 0) {
+  L.push(`Design note: the frozen split puts ${groups.nearmiss.designedCalibration} ordinary near-miss and ${groups.absence.designedCalibration} absence items in calibration, and ${groups.nearmiss.designedHeldOut} ordinary near-miss and ${groups.absence.designedHeldOut} absence items in held-out. The rule is therefore fitted without any absence case and the held-out ordinary near-miss denominator is ${groups.nearmiss.designedHeldOut}; read each group's counts with that in mind.`, '');
+}
+if (rule.status === 'selected') L.push(`- Absence cases, AUROC against held-out suitable sets: ${f1(absenceAuroc)} (exploratory; ${groups.absence.heldOutEvaluated} evaluated of ${groups.absence.designedHeldOut} designed).`, '');
+L.push('- Nothing here is adopted for production. Cosine scores depend on the exact text prompt, so a threshold may not transfer to other scenes or prompt wording.', '');
 L.push('## Failures', '', `- Download failures recorded at fetch time: ${failures.downloads}`, `- Image decode/inference failures: ${failures.inferenceImageErrors}`, `- Worker/model-loading fallbacks: ${failures.workerFallbacks.length}${failures.workerFallbacks.length ? ' - ' + failures.workerFallbacks.join('; ') : ''}`, '');
 L.push('## Latency', '', `- Calls: ${times.length}; median ${f1(median(times))} ms; mean ${f1(mean(times))} ms; max ${Math.max(...times)} ms (each call reloads the models)`,
   loadEst ? `- Load vs inference (timing scenes ${loadEst.scenes.join(', ')}): fixed load ~${loadEst.fixedLoadMs} ms per call, ~${loadEst.perImageMs} ms per image` : '- Load vs inference: not measured', '');

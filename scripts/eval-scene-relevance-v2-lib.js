@@ -15,8 +15,12 @@ export const TIMING_SCENES = ['A02', 'C03', 'F03']; // calibration-split scenes,
 export const ANSWER_KEY_FILE = 'answer-key.json';
 export const REVIEW_ASSET_DIR = 'review-assets';
 export const FROZEN_FILES = ['PREREGISTRATION.md', 'scenes.json', 'negatives.json', ANSWER_KEY_FILE];
+export const FETCH_DECISIONS_FILE = 'fetch-owner-decisions.json'; // owner-written; NOT a frozen file (fetch bookkeeping)
+export const CONDITION_TYPES = ['visual', 'absence'];
 
-// Fixed before any score exists (see PREREGISTRATION.md section 8).
+// Fixed before any score exists (see PREREGISTRATION.md section 8). minEligibleHeldOut (12) and
+// rule.minPerClass (3) / rule.minAuroc (0.70) are PROVISIONAL SAFEGUARDS chosen in Stage A, not
+// statistically validated thresholds; the owner's verdict thresholds are the promising/notPromising blocks.
 export const CRITERIA = Object.freeze({
   promising: { top1Pct: 70, pairwisePct: 75, baselineMarginPp: 15, minCategorySuccesses: 1 },
   notPromising: { top1AtMostPct: 45, pairwiseAtMostPct: 60 },
@@ -111,6 +115,7 @@ export function validateNegativesDoc(neg, scenesDoc) {
     for (const k of ['description', 'searchQuery', 'visualTarget']) if (typeof n[k] !== 'string' || !n[k].trim()) fail(`negatives.json: ${n.id}.${k} missing`);
     if (n.searchQuery.length > 100) fail(`negatives.json: ${n.id} searchQuery over 100 chars`);
     if (!['calibration', 'heldout'].includes(n.split)) fail(`negatives.json: ${n.id} bad split`);
+    if (!CONDITION_TYPES.includes(n.conditionType)) fail(`negatives.json: ${n.id}.conditionType must be one of ${CONDITION_TYPES.join(', ')}`);
   });
   if (nm.filter((n) => n.split === 'calibration').length !== 5) fail('negatives.json: near-miss split must be 5/5');
 }
@@ -145,7 +150,7 @@ export function buildItems(scenesDoc, negDoc, candDoc) {
     const d = scenesDoc.scenes.find((s) => s.id === x.descriptionScene);
     items.push({ itemId: x.id, kind: 'cross', split: x.split, category: null, description: d.description, visualTarget: d.visualTarget, candidateScene: x.imageScene, candidates: cands(x.imageScene) });
   }
-  for (const n of negDoc.nearMiss.items) items.push({ itemId: n.id, kind: 'nearmiss', split: n.split, category: null, description: n.description, visualTarget: n.visualTarget, candidateScene: n.id, candidates: cands(n.id) });
+  for (const n of negDoc.nearMiss.items) items.push({ itemId: n.id, kind: 'nearmiss', conditionType: n.conditionType, split: n.split, category: null, description: n.description, visualTarget: n.visualTarget, candidateScene: n.id, candidates: cands(n.id) });
   return items;
 }
 
@@ -339,6 +344,29 @@ export function detectionItems(items, results, j) {
   return out;
 }
 
+// Reporting groups for negative sets. Absence/negation near-misses ("empty", "no one") are kept apart from
+// ordinary near-misses so a negation weakness is never folded into a claim about ordinary scene relevance.
+export const DETECTION_GROUPS = ['positive', 'cross', 'nearmiss', 'absence'];
+export const detectionGroupOf = (item) => (item.kind === 'nearmiss' ? (item.conditionType === 'absence' ? 'absence' : 'nearmiss') : item.kind);
+
+// Items DESIGNED per group and split (before any exclusion), so denominators are visible even when items drop out.
+export function designedCounts(items) {
+  const out = {};
+  for (const g of DETECTION_GROUPS) out[g] = { calibration: 0, heldout: 0 };
+  for (const it of items) out[detectionGroupOf(it)][it.split]++;
+  return out;
+}
+
+// Splits a detectionItems() result into the headline set (everything except absence items) and the absence set.
+export function partitionDetection(det, items) {
+  const g = new Map(items.map((i) => [i.itemId, detectionGroupOf(i)]));
+  const pick = (pred) => ({
+    suitable: det.suitable.filter((x) => pred(g.get(x.itemId))), unsuitable: det.unsuitable.filter((x) => pred(g.get(x.itemId))),
+    contaminated: det.contaminated.filter((id) => pred(g.get(id))), modelFailed: det.modelFailed.filter((id) => pred(g.get(id)))
+  });
+  return { headline: pick((x) => x !== 'absence'), absence: pick((x) => x === 'absence') };
+}
+
 // Preregistered rule selection. CALIBRATION items only.
 export function selectRule(cal) {
   const R = CRITERIA.rule; const base = { counts: { suitable: cal.suitable.length, unsuitable: cal.unsuitable.length } };
@@ -366,6 +394,58 @@ export function evaluateRule(rule, held) {
     falseRejection: { count: held.suitable.filter((x) => !acc(x)).length, of: held.suitable.length },
     falseAcceptance: { count: held.unsuitable.filter(acc).length, of: held.unsuitable.length }
   };
+}
+
+// ------------------------------------------------- fetch: insufficient-scene gate
+// A scene the fetch recorded as insufficient (too few hits or too few downloads) is NEVER skipped or retried
+// silently. The owner records an explicit decision in fetch-owner-decisions.json, bound to the SHA-256 of the exact
+// recorded failure, so an old decision cannot approve a later failure. Only 'retry-same-query' exists: a different
+// query changes scenes.json/negatives.json and needs a new preregistration, not a fetch decision.
+export const recordSha256 = (rec) => sha256Hex(stableStringify(rec));
+
+export function validateFetchDecisions(doc) {
+  if (!isObj(doc) || doc.schema !== 'scene-relevance-v2-fetch-owner-decisions' || !Array.isArray(doc.decisions)) fail(`${FETCH_DECISIONS_FILE}: wrong schema`);
+  const seen = new Set();
+  for (const d of doc.decisions) {
+    if (!isObj(d) || typeof d.sceneId !== 'string' || !/^([A-F]\d{2}|NM\d{2})$/.test(d.sceneId)) fail(`${FETCH_DECISIONS_FILE}: bad sceneId`);
+    if (!/^[0-9a-f]{64}$/.test(d.recordSha256 || '')) fail(`${FETCH_DECISIONS_FILE}: ${d.sceneId} bad recordSha256`);
+    if (d.decision !== 'retry-same-query') fail(`${FETCH_DECISIONS_FILE}: ${d.sceneId} decision must be "retry-same-query" (a query change needs a new preregistration)`);
+    for (const k of ['decidedBy', 'reason']) if (typeof d[k] !== 'string' || !d[k].trim()) fail(`${FETCH_DECISIONS_FILE}: ${d.sceneId}.${k} is required`);
+    if (typeof d.decidedAt !== 'string' || Number.isNaN(Date.parse(d.decidedAt))) fail(`${FETCH_DECISIONS_FILE}: ${d.sceneId}.decidedAt must be an ISO date`);
+    const key = `${d.sceneId}:${d.recordSha256}`; if (seen.has(key)) fail(`${FETCH_DECISIONS_FILE}: duplicate decision for ${d.sceneId}`); seen.add(key);
+  }
+  return doc;
+}
+
+// Pure check over EVERY scene recorded in candidates.json. blocked => the whole fetch run must stop before any network call.
+export function insufficientGate(candDoc, decisionsDoc) {
+  const blocked = []; const approved = [];
+  for (const [sceneId, rec] of Object.entries(candDoc?.scenes ?? {})) {
+    const sha = recordSha256(rec);
+    if (rec?.status === 'ok' && Array.isArray(rec.candidates) && rec.candidates.length >= MIN_CANDIDATES) continue;
+    const why = rec?.status === 'insufficient' ? `recorded as insufficient (${rec.insufficientReason ?? 'reason not recorded'})` : `unrecognised state (status ${JSON.stringify(rec?.status)})`;
+    const d = decisionsDoc?.decisions?.find((x) => x.sceneId === sceneId && x.recordSha256 === sha);
+    if (d && rec?.status === 'insufficient') approved.push({ sceneId, recordSha256: sha, decision: d });
+    else blocked.push({ sceneId, recordSha256: sha, reason: why });
+  }
+  return { blocked, approved };
+}
+
+// Moves an approved scene's record (and its image folder) into attemptHistory so nothing collected is lost,
+// then removes it from scenes so the retry starts clean. Candidate files are renamed, never deleted or overwritten.
+export function archiveInsufficientScene(candDoc, sceneId, decision, evalDir, now = new Date().toISOString()) {
+  const rec = candDoc.scenes[sceneId];
+  if (rec?.status !== 'insufficient') fail(`${sceneId}: only an insufficient scene can be archived for retry`);
+  if (decision.recordSha256 !== recordSha256(rec)) fail(`${sceneId}: owner decision does not match the recorded failure`);
+  candDoc.attemptHistory ??= {}; candDoc.attemptHistory[sceneId] ??= [];
+  const n = candDoc.attemptHistory[sceneId].length + 1;
+  const from = path.join(evalDir, 'images', sceneId); const toRel = `images/${sceneId}.attempt${n}`; const to = path.join(evalDir, ...toRel.split('/'));
+  if (fs.existsSync(to)) fail(`${toRel} already exists; refusing to overwrite an archived attempt`);
+  const archived = { ...rec, candidates: rec.candidates.map((c) => ({ ...c, localPath: String(c.localPath).replace(`images/${sceneId}/`, `${toRel}/`) })) };
+  if (fs.existsSync(from)) fs.renameSync(from, to);
+  candDoc.attemptHistory[sceneId].push({ attempt: n, archivedAt: now, ownerDecision: decision, recordSha256: decision.recordSha256, record: archived });
+  delete candDoc.scenes[sceneId];
+  return n;
 }
 
 // ---------------------------------------------------- reviewer agreement, timing
