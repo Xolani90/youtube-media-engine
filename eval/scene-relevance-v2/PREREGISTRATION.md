@@ -2,7 +2,8 @@
 
 Status: PRE-FREEZE DRAFT. This file becomes binding only when `scripts/eval-scene-relevance-v2-freeze.js`
 writes `judgments-manifest.json`; at that moment it records the SHA-256 of this file, `scenes.json`,
-`negatives.json` and `answer-key.json`, and the run and report scripts refuse to proceed if any of them
+`negatives.json`, `candidates.json` and `answer-key.json`, together with the SHA-256 of the bytes of every
+evaluated candidate image, and the run and report scripts refuse to proceed if any of them
 changed. Until that manifest exists, correcting this file is legitimate and no result depends on it; the
 final text must be settled before the first freeze, because the freeze script hashes whatever is on disk.
 Nothing below may be changed after the freeze, and nothing may be changed after seeing scores. Evaluation authorisation here is separate from
@@ -87,6 +88,18 @@ held-out scenes, every category present in both. The tooling recomputes this and
 | E | E03, E05 | E01, E02, E04 |
 | F | F03, F05 | F01, F02, F04 |
 
+Near-miss split (rule fixed before any score or image existed; no model output is used). The ten near-miss items
+are stratified by `conditionType`: within each condition type, sort the near-miss IDs ascending by the lowercase
+hex SHA-256 of `nmsplit:` + ID (tie-breaker, were two hashes ever equal: the ID, ascending); the first floor(n/2)
+are calibration and the rest (the extra item when n is odd) are held-out. The prefix `nmsplit:` was declared once
+and computed once; no alternative prefix was tried. This replaces the earlier split, which had put all four
+absence items in held-out. The tooling recomputes the rule and rejects any `negatives.json` that differs.
+
+| Condition type | Calibration | Held-out |
+|---|---|---|
+| absence (4) | NM06, NM04 | NM02, NM08 |
+| visual / ordinary (6) | NM10, NM07, NM01 | NM05, NM03, NM09 |
+
 Why stratified: a pure global "lowest 15 hashes" split leaves category C with no held-out scenes, which
 would make a per-category criterion impossible. The owner approved the stratified split.
 
@@ -103,9 +116,10 @@ CHECKS. They pair a description with photos of an unrelated subject, are mostly 
 presented as evidence of strong fine-grained visual discrimination. The ten near-miss items are provisional and
 are reported in two separate groups: ordinary near-misses (`conditionType: visual`: NM01, NM03, NM05, NM07, NM09,
 NM10) and absence/negation cases (`conditionType: absence`: NM02, NM04, NM06, NM08), which depend on "empty" or
-"no one" and therefore also test negation handling. Absence cases are never merged into a headline claim about
-ordinary scene relevance. By the frozen split all 5 calibration near-misses are ordinary and the held-out
-near-misses are 4 absence + 1 ordinary (NM10); the report discloses these designed counts.
+"no one" and therefore also test negation handling. Absence cases are never used to support a claim about
+ordinary scene relevance, and they are never removed from the overall result either: the inclusive result keeps
+every eligible item, and the subgroups are diagnostic. By the frozen split calibration and held-out each hold 3
+ordinary near-misses and 2 absence cases (section 4); the report prints these designed counts.
 
 Cross-category (10, reuse existing candidates, no extra downloads). Rule: per split, sort scene IDs by
 sha256('xneg:'+id); the first 5 are description scenes. The image scene is the scene in a different
@@ -131,14 +145,14 @@ description states a specific visual condition and the query returns the opposit
 |---|---|---|---|---|
 | NM01 | Drought-damaged maize wilting in a cracked, dry field. | `green healthy maize field` | calibration | visual |
 | NM02 | Empty supermarket shelves after panic buying. | `fully stocked supermarket shelves` | heldout | absence |
-| NM03 | A flooded street with water up to the car windows. | `dry city street sunny day` | calibration | visual |
-| NM04 | An empty operating theatre with no staff or patient. | `surgeons operating theatre team` | heldout | absence |
-| NM05 | A wildfire burning through a forest at night. | `green forest summer trees` | calibration | visual |
-| NM06 | A courtroom with an empty bench and nobody present. | `judge lawyers courtroom hearing` | heldout | absence |
+| NM03 | A flooded street with water up to the car windows. | `dry city street sunny day` | heldout | visual |
+| NM04 | An empty operating theatre with no staff or patient. | `surgeons operating theatre team` | calibration | absence |
+| NM05 | A wildfire burning through a forest at night. | `green forest summer trees` | heldout | visual |
+| NM06 | A courtroom with an empty bench and nobody present. | `judge lawyers courtroom hearing` | calibration | absence |
 | NM07 | A cargo ship battling a storm at sea. | `cargo ship calm sea` | calibration | visual |
 | NM08 | An empty polling station with no voters. | `voters queuing polling station` | heldout | absence |
-| NM09 | A smartphone with a shattered, cracked screen. | `smartphone social media feed` | calibration | visual |
-| NM10 | A snow-covered city street during a blizzard. | `city street summer sunshine` | heldout | visual |
+| NM09 | A smartphone with a shattered, cracked screen. | `smartphone social media feed` | heldout | visual |
+| NM10 | A snow-covered city street during a blizzard. | `city street summer sunshine` | calibration | visual |
 
 The reviewer decides whether any candidate fits. If the reviewer marks any candidate relevant in a negative
 item, that pair is "contaminated": excluded from negative metrics and counted and listed in the report.
@@ -156,7 +170,14 @@ by an AI, and saw model scores first. `sawModelScoresFirst = true` is refused at
 are allowed but the report states the judgments are then not fully independent. The freeze script translates the
 blind export into the canonical `judgments-<id>.json` using the key (writing it once), validates the files,
 records SHA-256 of each canonical judgments file, each blind export, this file, `scenes.json`, `negatives.json`
-and `answer-key.json`, and refuses to overwrite a manifest. A key that no longer matches the items is refused,
+`candidates.json` and `answer-key.json`, and refuses to overwrite a manifest. It also records, in the manifest
+only (never in reviewer-facing files), a SHA-256 of every evaluated image's bytes with the candidate and scene IDs
+that use it (`candidateIntegrity`), and refuses to freeze if any image does not equal the hash in `candidates.json`.
+The contact-sheet script likewise refuses to build the reviewer sheet from an image that differs from
+`candidates.json`. The run script re-verifies all of this before the model run and again before writing
+`results.json`; the report re-verifies it and also requires `results.json` to record the same candidate and image
+hashes. Filenames and paths are never accepted in place of hashing the bytes, and no hash is ever regenerated to
+bless a changed file. A key that no longer matches the items is refused,
 never regenerated. The reviewer is not independent of the negatives' author (section 11). The run and report scripts re-verify every hash and reject missing,
 changed, malformed or inconsistent files; they never repair them. Judging order: negatives and positives
 together in one sheet, before any model run. A second reviewer is optional and kept in a separate file;
@@ -198,7 +219,7 @@ NOT PROMISING: any of: top-1 <= 45%; pairwise <= 60%; top-1 no better than the P
 
 Otherwise INCONCLUSIVE. All comparisons use exact integer arithmetic.
 
-INVALID (structural): a changed hash, malformed judgments or scores, missing candidates or results, missing
+INVALID (structural): a changed hash (including `candidates.json` or any candidate image's bytes, or a missing or inconsistent integrity record), malformed judgments or scores, missing candidates or results, missing
 baseline (no search-rank-1 candidate), non-blind judgments, a non-default worker, or a frozen rule that does
 not match the calibration data. The report then states the reason and gives no metric-based recommendation.
 
@@ -215,10 +236,12 @@ report lists every held-out scene excluded as ineligible and every model failure
 Unit: an item with a model ranking. "Suitable" = eligible positive scene. "Unsuitable" = positive scene
 judged none-suitable, plus valid cross-category and near-miss items. Reporting groups, always shown separately
 with designed and evaluated counts: cross-category (gross-mismatch sanity check), ordinary near-miss, absence /
-negation near-miss, and naturally none-suitable scenes. The held-out headline detection figures (AUROC, false
-rejection, false acceptance) exclude the absence/negation items; those are reported in their own row and with
-their own AUROC against the held-out suitable sets, and are never combined into a claim about ordinary scene
-relevance. Contaminated and model-failed items are excluded from the metrics but counted and listed per group. Statistics per item: top score; top-1
+negation near-miss, and naturally none-suitable scenes. The held-out detection result (AUROC, false
+rejection, false acceptance) is INCLUSIVE: it covers every eligible held-out item, absence/negation items
+included, and no difficult case is dropped. The groups above are diagnostic subgroups shown beside it, each with
+its own denominators and AUROC against the held-out suitable sets; the report may also print a clearly labelled
+diagnostic figure with absence items left out, which never replaces the inclusive result. The cross-category
+items remain a gross-mismatch sanity check and are never presented as fine-grained discrimination. Contaminated and model-failed items are excluded from the metrics but counted and listed per group. Statistics per item: top score; top-1
 minus top-2 gap; top-1 minus median of the item's scores.
 
 Selection, on CALIBRATION items only (the floor of 3 per class and the AUROC floor of 0.70 are provisional

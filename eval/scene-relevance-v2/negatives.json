@@ -1,7 +1,7 @@
 {
   "schema": "scene-relevance-v2-negatives",
   "version": 1,
-  "notes": "NOT FROZEN until the freeze script writes judgments-manifest.json (this file is hashed then). Interpretation: the cross-category items are SUPPLEMENTARY GROSS-MISMATCH SANITY CHECKS. They are mostly easy negatives (unrelated subjects) and must not be presented as evidence of fine-grained visual discrimination. The near-miss items are provisional and are reported in two separate groups: ordinary near-misses (conditionType 'visual') and absence/negation cases (conditionType 'absence': NM02, NM04, NM06, NM08), which test whether a model handles 'empty' or 'no one' and must not be merged into a headline claim about ordinary scene relevance. Cross-category items reuse existing candidates (no extra downloads): the description of one scene is judged against the eight candidates of a scene from a different category. Near-miss items need 10 extra searches and up to 80 downloads (Stage C, not Stage A): the description names a specific visual condition and the query deliberately returns the opposite or unaffected condition. The reviewer decides in the blind sheet whether any candidate fits; a pair where the reviewer marks any candidate relevant is reported as contaminated and excluded from negative metrics, with the count disclosed.",
+  "notes": "NOT FROZEN until the freeze script writes judgments-manifest.json (this file is hashed then). Interpretation: the cross-category items are SUPPLEMENTARY GROSS-MISMATCH SANITY CHECKS. They are mostly easy negatives (unrelated subjects) and must not be presented as evidence of fine-grained visual discrimination. The near-miss items are provisional and are reported in two separate groups: ordinary near-misses (conditionType 'visual') and absence/negation cases (conditionType 'absence': NM02, NM04, NM06, NM08), which test whether a model handles 'empty' or 'no one' and must not be merged into a headline claim about ordinary scene relevance. The near-miss split is stratified by conditionType with SHA-256 of 'nmsplit:'+id (see PREREGISTRATION.md section 4): 2 absence + 3 ordinary items in each of calibration and held-out. Cross-category items reuse existing candidates (no extra downloads): the description of one scene is judged against the eight candidates of a scene from a different category. Near-miss items need 10 extra searches and up to 80 downloads (Stage C, not Stage A): the description names a specific visual condition and the query deliberately returns the opposite or unaffected condition. The reviewer decides in the blind sheet whether any candidate fits; a pair where the reviewer marks any candidate relevant is reported as contaminated and excluded from negative metrics, with the count disclosed.",
   "crossCategory": {
     "rule": "Within each split sort scene IDs ascending by sha256('xneg:'+id); the first 5 per split are description scenes. For description scene d the image scene is the scene in a DIFFERENT category with the lowest sha256('xneg-img:'+d+':'+m).",
     "items": [
@@ -91,7 +91,7 @@
         "searchQuery": "dry city street sunny day",
         "visualTarget": "Floodwater covering a street and cars.",
         "conditionType": "visual",
-        "split": "calibration"
+        "split": "heldout"
       },
       {
         "id": "NM04",
@@ -99,7 +99,7 @@
         "searchQuery": "surgeons operating theatre team",
         "visualTarget": "An unoccupied operating room.",
         "conditionType": "absence",
-        "split": "heldout"
+        "split": "calibration"
       },
       {
         "id": "NM05",
@@ -107,7 +107,7 @@
         "searchQuery": "green forest summer trees",
         "visualTarget": "Flames or fire in woodland.",
         "conditionType": "visual",
-        "split": "calibration"
+        "split": "heldout"
       },
       {
         "id": "NM06",
@@ -115,7 +115,7 @@
         "searchQuery": "judge lawyers courtroom hearing",
         "visualTarget": "An empty courtroom with no people.",
         "conditionType": "absence",
-        "split": "heldout"
+        "split": "calibration"
       },
       {
         "id": "NM07",
@@ -139,7 +139,7 @@
         "searchQuery": "smartphone social media feed",
         "visualTarget": "A phone with a visibly cracked screen.",
         "conditionType": "visual",
-        "split": "calibration"
+        "split": "heldout"
       },
       {
         "id": "NM10",
@@ -147,7 +147,7 @@
         "searchQuery": "city street summer sunshine",
         "visualTarget": "Heavy snow on a city street.",
         "conditionType": "visual",
-        "split": "heldout"
+        "split": "calibration"
       }
     ]
   }

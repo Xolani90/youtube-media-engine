@@ -56,6 +56,7 @@ const data = {
       candidates: k.candidates.map((kc, n) => {
         const src = path.resolve(EVAL_DIR, ...cands.get(kc.candidateId).localPath.split('/'));
         if (!fs.existsSync(src)) die(`image file missing for an item: ${path.relative(EVAL_DIR, src)}`);
+        if (sha256File(src) !== cands.get(kc.candidateId).sha256) die('an image on disk does not match the sha256 recorded in candidates.json; the reviewer sheet is never built from changed images');
         const name = `${kc.opaqueCandidateId}${path.extname(src).toLowerCase()}`; const dest = path.join(assetDir, name);
         if (fs.existsSync(dest)) { if (sha256File(dest) !== sha256File(src)) die(`${REVIEW_ASSET_DIR}/${name} exists with different content`); } else fs.copyFileSync(src, dest);
         return { id: kc.opaqueCandidateId, label: String(n + 1), src: `${REVIEW_ASSET_DIR}/${name}` };

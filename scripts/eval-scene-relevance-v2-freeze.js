@@ -4,8 +4,10 @@
 // translates it with answer-key.json into canonical judgments-<id>.json (written
 // once, never overwritten), validates it strictly, then writes
 // judgments-manifest.json with the SHA-256 of each canonical judgments file, of
-// each blind file, and of the preregistration, scenes.json, negatives.json and
-// answer-key.json (so the key can never be changed or regenerated afterwards). The run script and the report
+// each blind file, and of the preregistration, scenes.json, negatives.json, candidates.json and
+// answer-key.json (so the key can never be changed or regenerated afterwards). It also records, in the
+// manifest only (never in reviewer-facing files), the SHA-256 of every evaluated image's bytes with the
+// candidate and scene IDs that use it; it refuses if an image does not match candidates.json. The run script and the report
 // verify those hashes. This script REFUSES to overwrite an existing manifest and
 // never edits a judgments file: to change anything, a human must archive the old
 // results and manifest and start a documented new freeze.
@@ -14,7 +16,7 @@
 // Refuses if results.json already exists (judgments must precede scores).
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_EVAL_DIR, ANSWER_KEY_FILE, FROZEN_FILES, readJsonStrict, buildItems, validateAnswerKey, translateBlindJudgments, validateJudgments, validateManifest, sha256File, sha256Hex, stableStringify } from './eval-scene-relevance-v2-lib.js';
+import { DEFAULT_EVAL_DIR, ANSWER_KEY_FILE, FROZEN_FILES, readJsonStrict, buildItems, validateAnswerKey, translateBlindJudgments, validateJudgments, validateManifest, buildCandidateIntegrity, CANDIDATES_FILE, sha256File, sha256Hex, stableStringify } from './eval-scene-relevance-v2-lib.js';
 
 const EVAL_DIR = path.resolve(process.env.EVAL_DIR || DEFAULT_EVAL_DIR);
 const argv = process.argv.slice(2);
@@ -50,7 +52,9 @@ for (const id of [primary, second].filter(Boolean)) {
 }
 const frozenFiles = {};
 for (const f of FROZEN_FILES) { if (!fs.existsSync(path.join(EVAL_DIR, f))) die(`${f} is missing`); frozenFiles[f] = sha256File(path.join(EVAL_DIR, f)); }
-const manifest = validateManifest({ schema: 'scene-relevance-v2-judgments-manifest', frozenAt: new Date().toISOString(), primaryReviewer: primary, secondReviewer: second || null, frozenFiles, judgmentFiles, blindJudgmentFiles: blindFiles });
+let candidateIntegrity;
+try { candidateIntegrity = buildCandidateIntegrity(EVAL_DIR, items, frozenFiles[CANDIDATES_FILE]); } catch (e) { die(e.message); }
+const manifest = validateManifest({ schema: 'scene-relevance-v2-judgments-manifest', frozenAt: new Date().toISOString(), primaryReviewer: primary, secondReviewer: second || null, frozenFiles, judgmentFiles, blindJudgmentFiles: blindFiles, candidateIntegrity });
 for (const { f, text } of pending) fs.writeFileSync(path.join(EVAL_DIR, f), text, { flag: 'wx' });
 fs.writeFileSync(manifestPath, stableStringify(manifest), { flag: 'wx' });
 console.log(`Wrote ${manifestPath}`);

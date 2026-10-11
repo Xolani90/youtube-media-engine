@@ -53,7 +53,7 @@ function makeFixture({ judg = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scene-rel-v2-'));
   for (const f of ['scenes.json', 'negatives.json', 'PREREGISTRATION.md']) fs.copyFileSync(path.join(REAL, f), path.join(dir, f));
   const cd = candDoc(); fs.writeFileSync(path.join(dir, 'candidates.json'), L.stableStringify(cd));
-  for (const e of Object.values(cd.scenes)) for (const c of e.candidates) { fs.mkdirSync(path.dirname(path.join(dir, c.localPath)), { recursive: true }); fs.writeFileSync(path.join(dir, c.localPath), 'img'); }
+  for (const e of Object.values(cd.scenes)) for (const c of e.candidates) { fs.mkdirSync(path.dirname(path.join(dir, c.localPath)), { recursive: true }); fs.writeFileSync(path.join(dir, c.localPath), c.candidateId); }
   const its = L.buildItems(realScenes(), realNeg(), cd);
   // Reviewer flow: the sheet script creates the key; the reviewer exports a BLIND file; freeze translates it.
   const sheet = run('contact-sheet', [], { EVAL_DIR: dir }); assert.equal(sheet.status, 0, sheet.stderr);
@@ -68,7 +68,7 @@ const freeze = (dir, extra = []) => run('freeze', ['--primary', 'owner', ...extr
 // Synthetic results whose scores follow the judgments (relevant high, others low).
 function syntheticResults(dir, its, manifest, { tamper } = {}) {
   const j = L.readJsonStrict(path.join(dir, 'judgments-owner.json'));
-  const out = { schema: 'scene-relevance-v2-results', meta: { startedAt: 'x', node: 'v', platform: 'p', gitHead: null, modelDirName: 'm', dtype: 'q8', preprocessorConfig: null, workerPath: 'default (src/media/sceneRelevanceWorker.js)', manifestSha256: L.sha256File(path.join(dir, 'judgments-manifest.json')), frozenFiles: manifest.frozenFiles, judgmentFiles: manifest.judgmentFiles }, items: [], timing: [{ sceneId: 'A02', images: 8, oneImageMs: [1000, 1000], allImagesMs: [2400, 2400], allCallsOk: true }] };
+  const out = { schema: 'scene-relevance-v2-results', meta: { startedAt: 'x', node: 'v', platform: 'p', gitHead: null, modelDirName: 'm', dtype: 'q8', preprocessorConfig: null, workerPath: 'default (src/media/sceneRelevanceWorker.js)', manifestSha256: L.sha256File(path.join(dir, 'judgments-manifest.json')), frozenFiles: manifest.frozenFiles, judgmentFiles: manifest.judgmentFiles, candidatesSha256: manifest.candidateIntegrity.candidatesSha256, candidateIntegritySha256: L.candidateIntegritySha256(manifest.candidateIntegrity) }, items: [], timing: [{ sceneId: 'A02', images: 8, oneImageMs: [1000, 1000], allImagesMs: [2400, 2400], allCallsOk: true }] };
   for (const it of its) {
     const rel = new Set(j.items[it.itemId].relevant);
     const ranking = it.candidates.map((c, i) => ({ candidateId: c.candidateId, score: rel.size ? (rel.has(c.candidateId) ? (c.candidateId.endsWith('C') ? 0.5 : 0.4) : 0.1 - i * 0.001) : 0.05 - i * 0.0005 }))
@@ -499,24 +499,28 @@ test('report: PROMISING path end to end on synthetic data; rule frozen from cali
   assert.equal(m.heldOut.scenes, 18); assert.equal(m.heldOut.eligible, 17); assert.equal(m.heldOut.top1, 17);
   assert.equal(m.heldOut.baselineTop1, 0);
   assert.deepEqual(m.detection.heldOutCounts.suitable, 17);
-  // headline detection excludes the 4 absence items: 5 cross + 1 ordinary near-miss (NM10) + 1 natural none-suitable (A05)
-  assert.equal(m.detection.headlineExcludesAbsence, true);
-  assert.deepEqual(m.detection.heldOutHeadline.falseAcceptance, { count: 0, of: 7 });
-  assert.deepEqual(m.detection.heldOutHeadline.falseRejection, { count: 0, of: 17 });
+  // inclusive detection result: 5 cross + 3 ordinary near-miss + 2 absence + 1 natural none-suitable (A05) = 11 unsuitable
+  assert.equal(m.detection.inclusive, true);
+  assert.deepEqual(m.detection.heldOutInclusive.falseAcceptance, { count: 0, of: 11 });
+  assert.deepEqual(m.detection.heldOutInclusive.falseRejection, { count: 0, of: 17 });
+  assert.deepEqual(m.detection.heldOutExcludingAbsenceDiagnostic.falseAcceptance, { count: 0, of: 9 });
+  assert.equal(m.integrity.verifiedAgainstDisk, true); assert.equal(m.integrity.evaluatedImages, 320);
   const g = m.detection.groups;
   assert.deepEqual([g.cross.designedHeldOut, g.cross.heldOutEvaluated, g.cross.unsuitableRejected], [5, 5, 5]);
-  assert.deepEqual([g.nearmiss.designedCalibration, g.nearmiss.designedHeldOut, g.nearmiss.heldOutEvaluated], [5, 1, 1]);
-  assert.deepEqual([g.absence.designedCalibration, g.absence.designedHeldOut, g.absence.heldOutEvaluated, g.absence.unsuitableRejected], [0, 4, 4, 4]);
+  assert.deepEqual([g.nearmiss.designedCalibration, g.nearmiss.designedHeldOut, g.nearmiss.heldOutEvaluated], [3, 3, 3]);
+  assert.deepEqual([g.absence.designedCalibration, g.absence.designedHeldOut, g.absence.heldOutEvaluated, g.absence.unsuitableRejected], [2, 2, 2, 2]);
   assert.deepEqual(m.provisionalSafeguards, { minEligibleHeldOut: 12, calibrationMinPerClass: 3, calibrationMinAuroc: 0.7, note: 'chosen in Stage A; not statistically validated thresholds' });
   assert.deepEqual(m.heldOutIneligibleScenes, ['A05']);
   const md = fs.readFileSync(path.join(dir, 'REPORT.md'), 'utf8');
   assert.match(md, /Verdict \(held-out only\): PROMISING/); assert.match(md, /exploratory coverage safeguard/); assert.match(md, /Licensing gate/);
   assert.match(md, /Provisional safeguards \(chosen in Stage A, not statistically validated\)/);
   assert.match(md, /Cross-category \(gross-mismatch sanity check\) \| 5 \/ 5 \| 5 \| 5\/5/);
-  assert.match(md, /Ordinary near-miss \| 5 \/ 1 \| 1 \| 1\/1/);
-  assert.match(md, /Absence \/ negation \(reported separately\) \| 0 \/ 4 \| 4 \| 4\/4/);
-  assert.match(md, /NOT evidence of fine-grained visual discrimination/); assert.match(md, /NOT included in the headline figures/);
-  assert.match(md, /Design note: .*0 absence items in calibration, and 1 ordinary near-miss and 4 absence items in held-out/);
+  assert.match(md, /Ordinary near-miss \| 3 \/ 3 \| 3 \| 3\/3/);
+  assert.match(md, /Absence \/ negation \(reported separately\) \| 2 \/ 2 \| 2 \| 2\/2/);
+  assert.match(md, /NOT evidence of fine-grained visual discrimination/); assert.match(md, /stay INSIDE the inclusive result/);
+  assert.match(md, /Held-out inclusive result \(every eligible held-out item/); assert.match(md, /suitable 17, unsuitable 11/);
+  assert.match(md, /Designed split \(frozen before any score\): ordinary near-miss 3 calibration \/ 3 held-out; absence 2 calibration \/ 2 held-out/);
+  assert.match(md, /## Integrity/); assert.match(md, new RegExp(manifest.candidateIntegrity.candidatesSha256));
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -559,7 +563,7 @@ test('report: when calibration cannot separate the classes, no rule is invented 
   assert.equal(rule.status, 'none'); assert.equal(rule.threshold, undefined); assert.match(rule.reason, /below the preregistered floor/);
   assert.equal(run('report', [], { EVAL_DIR: f.dir }).status, 0);
   const m = L.readJsonStrict(path.join(f.dir, 'metrics.json'));
-  assert.equal(m.detection.heldOutHeadline, null);
+  assert.equal(m.detection.heldOutInclusive, null); assert.equal(m.detection.heldOutExcludingAbsenceDiagnostic, null);
   assert.equal(m.detection.groups.absence.unsuitableRejected, null, 'no rule: nothing is invented for any group');
   assert.equal(m.verdict, 'PROMISING'); // ranking quality is perfect here; detection is a separate, unaffected section
   assert.match(fs.readFileSync(path.join(f.dir, 'REPORT.md'), 'utf8'), /NO USABLE RULE ESTABLISHED/);
@@ -580,8 +584,8 @@ test('shipped negatives: conditionType marks exactly NM02, NM04, NM06, NM08 as a
   assert.match(neg.notes, /SUPPLEMENTARY GROSS-MISMATCH SANITY CHECKS/); assert.match(neg.notes, /NOT FROZEN until/);
   const d = L.designedCounts(items());
   assert.deepEqual(d.cross, { calibration: 5, heldout: 5 });
-  assert.deepEqual(d.nearmiss, { calibration: 5, heldout: 1 });
-  assert.deepEqual(d.absence, { calibration: 0, heldout: 4 });
+  assert.deepEqual(d.nearmiss, { calibration: 3, heldout: 3 });
+  assert.deepEqual(d.absence, { calibration: 2, heldout: 2 });
   const bad = structuredClone(realNeg()); delete bad.nearMiss.items[1].conditionType;
   assert.throws(() => L.validateNegativesDoc(bad, realScenes()), /conditionType/);
   const bad2 = structuredClone(realNeg()); bad2.nearMiss.items[0].conditionType = 'negation';
@@ -589,7 +593,7 @@ test('shipped negatives: conditionType marks exactly NM02, NM04, NM06, NM08 as a
 });
 
 test('partitionDetection keeps absence items out of the headline and discloses their exclusions per group', () => {
-  const held = items().filter((i) => i.split === 'heldout' && ['A01', 'XN06', 'NM10', 'NM02', 'NM04', 'NM06'].includes(i.itemId));
+  const held = items().filter((i) => ['A01', 'XN06', 'NM10', 'NM02', 'NM04', 'NM06'].includes(i.itemId)); // grouping logic only; split is irrelevant here
   const j = { items: {
     A01: { relevant: ['A01-A'], best: [], noneSuitable: false }, XN06: { relevant: [], best: [], noneSuitable: true }, NM10: { relevant: [], best: [], noneSuitable: true },
     NM02: { relevant: [], best: [], noneSuitable: true }, NM04: { relevant: ['NM04-B'], best: [], noneSuitable: false }, NM06: { relevant: [], best: [], noneSuitable: true } } };
@@ -604,15 +608,16 @@ test('partitionDetection keeps absence items out of the headline and discloses t
   assert.equal(L.detectionGroupOf(held.find((i) => i.itemId === 'NM10')), 'nearmiss'); assert.equal(L.detectionGroupOf(held.find((i) => i.itemId === 'NM02')), 'absence');
 });
 
-test('report: a contaminated absence item is excluded from its own group and disclosed; the headline is unaffected', () => {
-  const { dir, its } = makeFixture({ judg: { relevantNeg: ['NM04'] } }); assert.equal(freeze(dir).status, 0);
+test('report: a contaminated absence item is excluded from its own group and disclosed; the other groups are unaffected', () => {
+  const { dir, its } = makeFixture({ judg: { relevantNeg: ['NM08'] } }); assert.equal(freeze(dir).status, 0);
   syntheticResults(dir, its, L.readJsonStrict(path.join(dir, 'judgments-manifest.json')));
   assert.equal(run('report', ['--select-rule'], { EVAL_DIR: dir }).status, 0);
   assert.equal(run('report', [], { EVAL_DIR: dir }).status, 0);
   const m = L.readJsonStrict(path.join(dir, 'metrics.json')); const g = m.detection.groups;
-  assert.deepEqual([g.absence.designedHeldOut, g.absence.heldOutEvaluated, g.absence.contaminated], [4, 3, ['NM04']]);
-  assert.deepEqual(m.detection.heldOutHeadline.falseAcceptance, { count: 0, of: 7 });
-  assert.match(fs.readFileSync(path.join(dir, 'REPORT.md'), 'utf8'), /Absence \/ negation \(reported separately\) \| 0 \/ 4 \| 3 \| 3\/3 \| 1 \(NM04\)/);
+  assert.deepEqual([g.absence.designedHeldOut, g.absence.heldOutEvaluated, g.absence.contaminated], [2, 1, ['NM08']]);
+  assert.deepEqual(m.detection.heldOutExcludingAbsenceDiagnostic.falseAcceptance, { count: 0, of: 9 });
+  assert.deepEqual(m.detection.heldOutInclusive.falseAcceptance, { count: 0, of: 10 });
+  assert.match(fs.readFileSync(path.join(dir, 'REPORT.md'), 'utf8'), /Absence \/ negation \(reported separately\) \| 2 \/ 2 \| 1 \| 1\/1 \| 1\.000 \| 1 \(NM08\)/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -638,7 +643,8 @@ test('preregistration: blindness wording matches the implementation, no longer c
   assert.match(pre, /NOT fully blind/); assert.match(pre, /image metadata is not stripped/); assert.match(pre, /cannot be an independent blind reviewer/);
   assert.match(pre, /PRE-FREEZE DRAFT/); assert.doesNotMatch(pre, /Status: FROZEN at Stage A/);
   assert.match(pre, /SUPPLEMENTARY GROSS-MISMATCH SANITY CHECKS/); assert.match(pre, /absence\/negation cases/);
-  for (const id of ['NM02', 'NM04', 'NM06', 'NM08']) assert.match(pre, new RegExp(`\\| ${id} \\|[^|]*\\|[^|]*\\| heldout \\| absence \\|`));
+  for (const [id, sp] of Object.entries({ NM02: 'heldout', NM04: 'calibration', NM06: 'calibration', NM08: 'heldout' })) assert.match(pre, new RegExp(`\\| ${id} \\|[^|]*\\|[^|]*\\| ${sp} \\| absence \\|`));
+  assert.match(pre, /nmsplit:/); assert.match(pre, /INCLUSIVE/); assert.match(pre, /candidateIntegrity/);
 });
 
 test('freeze hashes the shipped preregistration and negatives; any later edit to either is detected', () => {
@@ -750,5 +756,183 @@ test('fetch script: an insufficient scene stops every later run before any netwo
 
   // 6. the consumed decision does not approve the new failure
   const r6 = go('--only', 'A01'); assert.equal(r6.status, 1); assert.match(r6.stderr, /FETCH REFUSED before any network call/); assert.equal(stub.calls(), 2);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ================================================================ pre-freeze integrity follow-up
+// Near-miss split: deterministic, stratified by conditionType, no scores involved.
+test('near-miss split: deterministic, balanced by condition type, independent of input order, and enforced on the shipped file', () => {
+  const nm = realNeg().nearMiss.items;
+  const want = L.computeNearMissSplit(nm);
+  assert.deepEqual(want, Object.fromEntries(nm.map((n) => [n.id, n.split])), 'shipped negatives.json equals the documented rule');
+  const count = (type, sp) => nm.filter((n) => n.conditionType === type && n.split === sp).length;
+  assert.deepEqual([count('absence', 'calibration'), count('absence', 'heldout'), count('visual', 'calibration'), count('visual', 'heldout')], [2, 2, 3, 3]);
+  assert.deepEqual(L.computeNearMissSplit([...nm].reverse()), want, 'input order cannot change the split');
+  assert.deepEqual(L.computeNearMissSplit(structuredClone(nm).map((n) => ({ ...n, description: 'x', searchQuery: 'y', split: 'heldout' }))), want, 'only id and conditionType matter: no score, text or current split');
+  // documented rule, recomputed by hand: ascending sha256('nmsplit:'+id), first floor(n/2) are calibration
+  const h = (id) => L.sha256Hex(`nmsplit:${id}`);
+  const absence = nm.filter((n) => n.conditionType === 'absence').map((n) => n.id).sort((a, b) => (h(a) < h(b) ? -1 : 1));
+  assert.deepEqual(absence.slice(0, 2).map((id) => want[id]), ['calibration', 'calibration']);
+  assert.deepEqual(absence.slice(2).map((id) => want[id]), ['heldout', 'heldout']);
+  // odd stratum: the extra item goes to held-out; a single item is held-out
+  const odd = L.computeNearMissSplit([{ id: 'NM01', conditionType: 'visual' }, { id: 'NM02', conditionType: 'visual' }, { id: 'NM03', conditionType: 'visual' }, { id: 'NM04', conditionType: 'absence' }]);
+  assert.deepEqual([...Object.values(odd)].sort(), ['calibration', 'heldout', 'heldout', 'heldout']);
+  // tampering that keeps 5/5 but breaks the rule is still rejected
+  const bad = structuredClone(realNeg()); const a = bad.nearMiss.items.find((n) => n.split === 'calibration' && n.conditionType === 'visual'); const b = bad.nearMiss.items.find((n) => n.split === 'heldout' && n.conditionType === 'visual');
+  [a.split, b.split] = [b.split, a.split];
+  assert.throws(() => L.validateNegativesDoc(bad, realScenes()), /does not match the SHA-256 rule/);
+  const unbalanced = structuredClone(realNeg()); unbalanced.nearMiss.items.forEach((n) => { n.split = n.conditionType === 'absence' ? 'heldout' : 'calibration'; });
+  assert.throws(() => L.validateNegativesDoc(unbalanced, realScenes()), /5\/5|SHA-256 rule/);
+  assert.match(realNeg().notes, /nmsplit:/);
+});
+
+test('report: the inclusive result keeps difficult absence items; subgroups are diagnostic with their own denominators', () => {
+  const { dir, its } = makeFixture(); assert.equal(freeze(dir).status, 0);
+  // Held-out absence items NM02/NM08 look like perfect matches to the model (a negation failure): they must hurt the overall result.
+  const hard = (r) => { for (const rec of r.items) if (['NM02', 'NM08'].includes(rec.itemId)) rec.ranking = rec.ranking.map((x, i) => ({ ...x, score: 0.9 - i * 0.001 })); };
+  syntheticResults(dir, its, L.readJsonStrict(path.join(dir, 'judgments-manifest.json')), { tamper: hard });
+  assert.equal(run('report', ['--select-rule'], { EVAL_DIR: dir }).status, 0);
+  assert.equal(run('report', [], { EVAL_DIR: dir }).status, 0);
+  const m = L.readJsonStrict(path.join(dir, 'metrics.json')); const g = m.detection.groups;
+  assert.deepEqual(m.detection.heldOutInclusive.falseAcceptance, { count: 2, of: 11 }, 'both absence failures are counted in the overall result');
+  assert.deepEqual(m.detection.heldOutExcludingAbsenceDiagnostic.falseAcceptance, { count: 0, of: 9 }, 'diagnostic view only');
+  assert.ok(m.detection.heldOutInclusive.auroc < m.detection.heldOutExcludingAbsenceDiagnostic.auroc);
+  assert.deepEqual([g.absence.designedCalibration, g.absence.designedHeldOut, g.absence.heldOutEvaluated, g.absence.unsuitableRejected], [2, 2, 2, 0]);
+  assert.deepEqual([g.nearmiss.designedCalibration, g.nearmiss.designedHeldOut, g.nearmiss.heldOutEvaluated, g.nearmiss.unsuitableRejected], [3, 3, 3, 3]);
+  assert.deepEqual([g.cross.heldOutEvaluated, g.cross.unsuitableRejected], [5, 5]);
+  assert.equal(g.absence.aurocVsSuitable, 0); assert.equal(g.cross.aurocVsSuitable, 1);
+  assert.deepEqual(m.detection.heldOutCounts.contaminated, []); assert.deepEqual(m.detection.heldOutCounts.modelFailed, []);
+  assert.equal(m.heldOut.scenes, 18, 'ranking verdict inputs are untouched');
+  const md = fs.readFileSync(path.join(dir, 'REPORT.md'), 'utf8');
+  assert.match(md, /Held-out inclusive result[\s\S]*False acceptance \(unsuitable set accepted\): 2\/11/);
+  assert.match(md, /Diagnostic only, absence\/negation items left out[\s\S]*must not replace the inclusive one/);
+  assert.match(md, /Absence \/ negation \(reported separately\) \| 2 \/ 2 \| 2 \| 0\/2 \| 0\.000 \|/);
+  assert.match(md, /Candidates with no score/); assert.match(md, /Download failures recorded at fetch time/);
+  assert.deepEqual(L.CRITERIA.promising, { top1Pct: 70, pairwisePct: 75, baselineMarginPp: 15, minCategorySuccesses: 1 });
+  assert.deepEqual(L.CRITERIA.notPromising, { top1AtMostPct: 45, pairwiseAtMostPct: 60 });
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// Freeze-integrity guarantees.
+const mutate = (f, fn) => { const p = path.join(f.dir, ...f.rel.split('/')); fn(p); };
+test('freeze records candidates.json and per-image SHA-256 with candidate and scene IDs; nothing leaks to the reviewer sheet', () => {
+  const { dir, its } = makeFixture(); assert.equal(freeze(dir).status, 0);
+  const man = L.readJsonStrict(path.join(dir, 'judgments-manifest.json')); const ci = man.candidateIntegrity;
+  assert.equal(man.frozenFiles['candidates.json'], L.sha256File(path.join(dir, 'candidates.json')));
+  assert.equal(ci.candidatesSha256, man.frozenFiles['candidates.json']);
+  assert.equal(ci.imageCount, 320);
+  assert.deepEqual(ci.images[L.sha256Hex('A01-C')], [{ candidateId: 'A01-C', sceneId: 'A01' }]);
+  assert.deepEqual(ci.images[L.sha256Hex('NM10-H')], [{ candidateId: 'NM10-H', sceneId: 'NM10' }]);
+  for (const [h, list] of Object.entries(ci.images)) for (const e of list) assert.equal(L.sha256File(path.join(dir, 'images', e.sceneId, `${e.candidateId}.jpg`)), h, 'hash is of the bytes on disk');
+  assert.doesNotThrow(() => L.loadFrozen(dir, its));
+  const { text } = reviewerFacingText(dir);
+  for (const h of Object.keys(ci.images)) assert.ok(!text.includes(h), 'no image hash appears in reviewer-facing material');
+  assert.ok(!text.includes(ci.candidatesSha256));
+  const key = fs.readFileSync(path.join(dir, L.ANSWER_KEY_FILE), 'utf8');
+  assert.ok(!Object.keys(ci.images).some((h) => key.includes(h)), 'the answer key is unchanged and holds no image hashes');
+  assert.ok(fs.readFileSync(script('freeze'), 'utf8').includes('candidateIntegrity'));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('candidates.json mutation after freeze: loadFrozen, the run script and the report all fail closed; nothing is re-hashed', () => {
+  const { dir, its } = makeFixture(); assert.equal(freeze(dir).status, 0);
+  const cp = path.join(dir, 'candidates.json'); const orig = fs.readFileSync(cp);
+  const doc = L.readJsonStrict(cp); doc.scenes.A01.candidates[0].searchRank += 1; fs.writeFileSync(cp, L.stableStringify(doc));
+  assert.throws(() => L.loadFrozen(dir, L.buildItems(realScenes(), realNeg(), doc)), /candidates\.json changed after freezing/);
+  const r = run('run', [], { EVAL_DIR: dir, SCENE_RELEVANCE_MODEL_DIR: dir, EVAL_WORKER_PATH: FAKE_WORKER }); assert.equal(r.status, 1); assert.match(r.stderr, /candidates\.json changed after freezing/);
+  assert.equal(fs.existsSync(path.join(dir, 'results.json')), false);
+  const man = L.readJsonStrict(path.join(dir, 'judgments-manifest.json'));
+  assert.equal(man.candidateIntegrity.candidatesSha256, L.sha256Hex(orig), 'manifest was not silently regenerated');
+  assert.equal(run('freeze', ['--primary', 'owner'], { EVAL_DIR: dir }).status, 1, 'cannot refreeze over the manifest');
+  fs.writeFileSync(cp, orig); assert.doesNotThrow(() => L.loadFrozen(dir, its));
+  // report path: results made before the mutation must not yield a verdict afterwards
+  syntheticResults(dir, its, man); fs.writeFileSync(cp, L.stableStringify(doc));
+  assert.equal(run('report', ['--select-rule'], { EVAL_DIR: dir }).status, 2);
+  assert.match(fs.readFileSync(path.join(dir, 'REPORT.md'), 'utf8'), /INVALID[\s\S]*candidates\.json changed after freezing/);
+  assert.ok(!fs.existsSync(path.join(dir, 'metrics.json')) && !fs.existsSync(path.join(dir, 'frozen-rule.json')));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('image-byte mutation after freeze: changed, swapped, missing and re-pointed images all fail closed (a filename is never trusted)', () => {
+  const { dir, its } = makeFixture(); assert.equal(freeze(dir).status, 0);
+  const img = (id) => path.join(dir, 'images', id.split('-')[0], `${id}.jpg`);
+  const a = fs.readFileSync(img('A01-A')); const b = fs.readFileSync(img('A01-B'));
+  fs.appendFileSync(img('A01-A'), 'x'); assert.throws(() => L.loadFrozen(dir, its), /image bytes changed after freezing: A01-A/);
+  const r = run('run', [], { EVAL_DIR: dir, SCENE_RELEVANCE_MODEL_DIR: dir, EVAL_WORKER_PATH: FAKE_WORKER }); assert.equal(r.status, 1); assert.match(r.stderr, /image bytes changed after freezing/);
+  fs.writeFileSync(img('A01-A'), a);
+  fs.writeFileSync(img('A01-A'), b); fs.writeFileSync(img('A01-B'), a); // names intact, bytes swapped
+  assert.throws(() => L.loadFrozen(dir, its), /image bytes changed after freezing/);
+  fs.writeFileSync(img('A01-A'), a); fs.writeFileSync(img('A01-B'), b); assert.doesNotThrow(() => L.loadFrozen(dir, its));
+  fs.rmSync(img('NM03-D')); assert.throws(() => L.loadFrozen(dir, its), /image file missing for NM03-D/);
+  fs.writeFileSync(img('NM03-D'), 'NM03-D'); assert.doesNotThrow(() => L.loadFrozen(dir, its));
+  // report: results from before the change must not produce a verdict afterwards
+  syntheticResults(dir, its, L.readJsonStrict(path.join(dir, 'judgments-manifest.json'))); fs.appendFileSync(img('F05-E'), 'x');
+  assert.equal(run('report', ['--select-rule'], { EVAL_DIR: dir }).status, 2);
+  assert.match(fs.readFileSync(path.join(dir, 'REPORT.md'), 'utf8'), /INVALID[\s\S]*image bytes changed after freezing: F05-E/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('freeze and contact sheet refuse images that disagree with candidates.json before anything is frozen', () => {
+  const f = makeFixture(); fs.appendFileSync(path.join(f.dir, 'images', 'B02', 'B02-A.jpg'), 'x');
+  const fr = freeze(f.dir); assert.equal(fr.status, 1); assert.match(fr.stderr, /do not match the sha256 in candidates\.json/);
+  assert.equal(fs.existsSync(path.join(f.dir, 'judgments-manifest.json')), false); assert.equal(fs.existsSync(path.join(f.dir, 'judgments-owner.json')), false, 'nothing written on refusal');
+  const g = makeFixture(); const p = path.join(g.dir, 'images', 'C01', 'C01-B.jpg'); fs.writeFileSync(p, 'changed');
+  fs.rmSync(path.join(g.dir, 'contact-sheet.html')); fs.rmSync(path.join(g.dir, L.REVIEW_ASSET_DIR), { recursive: true, force: true });
+  const cs = run('contact-sheet', [], { EVAL_DIR: g.dir }); assert.notEqual(cs.status, 0); assert.match(cs.stderr, /does not match the sha256 recorded in candidates\.json/);
+  for (const x of [f, g]) fs.rmSync(x.dir, { recursive: true, force: true });
+});
+
+test('missing or inconsistent integrity records fail closed (manifest and results)', () => {
+  const { dir, its } = makeFixture(); assert.equal(freeze(dir).status, 0);
+  const mp = path.join(dir, 'judgments-manifest.json'); const man = L.readJsonStrict(mp);
+  const bad = (fn, re) => { const m = structuredClone(man); fn(m); assert.throws(() => L.validateManifest(m), re); };
+  bad((m) => { delete m.candidateIntegrity; }, /candidateIntegrity is missing/);
+  bad((m) => { delete m.frozenFiles['candidates.json']; }, /missing hash for candidates\.json/);
+  bad((m) => { m.candidateIntegrity.candidatesSha256 = 'f'.repeat(64); }, /does not match the frozen hash of candidates\.json/);
+  bad((m) => { m.candidateIntegrity.imageCount -= 1; }, /imageCount does not match/);
+  bad((m) => { m.candidateIntegrity.images = {}; }, /imageCount does not match/);
+  bad((m) => { m.candidateIntegrity.images = {}; m.candidateIntegrity.imageCount = 0; }, /missing or empty/);
+  bad((m) => { const k = Object.keys(m.candidateIntegrity.images)[0]; m.candidateIntegrity.images[k] = []; }, /malformed image entry/);
+  bad((m) => { const k = Object.keys(m.candidateIntegrity.images)[0]; m.candidateIntegrity.images[k][0].sceneId = 'Z99'; }, /inconsistent candidate\/scene mapping/);
+  bad((m) => { const [k1, k2] = Object.keys(m.candidateIntegrity.images); m.candidateIntegrity.images[k1].push(m.candidateIntegrity.images[k2][0]); m.candidateIntegrity.imageCount += 1; }, /twice/);
+  const ci = man.candidateIntegrity;
+  const drop = structuredClone(ci); const k = Object.keys(drop.images)[0]; delete drop.images[k]; drop.imageCount -= 1;
+  assert.throws(() => L.verifyCandidateIntegrity(dir, its, drop), /not in the frozen image record/);
+  const extra = structuredClone(ci); extra.images[L.sha256Hex('ghost')] = [{ candidateId: 'A01-Z', sceneId: 'A01' }]; extra.imageCount += 1;
+  assert.throws(() => L.verifyCandidateIntegrity(dir, its, extra), /not part of the current evaluation/);
+  const wrongHash = structuredClone(ci); const [h1, h2] = Object.keys(wrongHash.images); [wrongHash.images[h1], wrongHash.images[h2]] = [wrongHash.images[h2], wrongHash.images[h1]];
+  assert.throws(() => L.verifyCandidateIntegrity(dir, its, wrongHash), /differs from the frozen image record|image bytes changed/);
+  assert.doesNotThrow(() => L.verifyCandidateIntegrity(dir, its, ci));
+  // a manifest on disk with the record removed is refused by the loader (and so by run and report)
+  const stripped = structuredClone(man); delete stripped.candidateIntegrity; fs.writeFileSync(mp, L.stableStringify(stripped));
+  assert.throws(() => L.loadFrozen(dir, its), /candidateIntegrity is missing/);
+  const r = run('run', [], { EVAL_DIR: dir, SCENE_RELEVANCE_MODEL_DIR: dir, EVAL_WORKER_PATH: FAKE_WORKER }); assert.equal(r.status, 1); assert.match(r.stderr, /candidateIntegrity is missing/);
+  fs.writeFileSync(mp, L.stableStringify(man));
+  // results that do not record the frozen candidate/image hashes cannot yield a verdict
+  for (const [field, re] of [['candidatesSha256', /different candidates\.json/], ['candidateIntegritySha256', /different frozen image record/]]) {
+    syntheticResults(dir, its, man, { tamper: (res) => { res.meta[field] = 'a'.repeat(64); } });
+    assert.equal(run('report', ['--select-rule'], { EVAL_DIR: dir }).status, 2); assert.match(fs.readFileSync(path.join(dir, 'REPORT.md'), 'utf8'), re);
+    syntheticResults(dir, its, man, { tamper: (res) => { delete res.meta[field]; } });
+    assert.equal(run('report', ['--select-rule'], { EVAL_DIR: dir }).status, 2);
+    fs.rmSync(path.join(dir, 'results.json'));
+  }
+  assert.ok(!fs.existsSync(path.join(dir, 'frozen-rule.json')));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('integrity: path escapes and inconsistent candidate records are refused; hashes come from bytes, not names', () => {
+  const { dir, its } = makeFixture();
+  const cd = candDoc(); cd.scenes.A01.candidates[0].localPath = 'images/../../outside.jpg';
+  assert.throws(() => L.validateCandidatesDoc(cd, ['A01']), /bad localPath/);
+  const it2 = structuredClone(its); const abs = it2.find((i) => i.itemId === 'A01').candidates[0]; abs.localPath = '/etc/hostname';
+  assert.throws(() => L.buildCandidateIntegrity(dir, it2, 'a'.repeat(64)), /leaves the evaluation folder/);
+  const it3 = structuredClone(its); const xn = it3.find((i) => i.kind === 'cross'); xn.candidates = xn.candidates.map((c) => ({ ...c })); xn.candidates[0].sha256 = 'b'.repeat(64); // clone: cross items share candidate objects with their scene
+  assert.throws(() => L.uniqueCandidates(it3), /described inconsistently/);
+  assert.throws(() => L.buildCandidateIntegrity(dir, its, 'not-a-hash'), /SHA-256 hex digest/);
+  // same bytes under two names hash identically, and both candidates are listed under that one hash
+  fs.writeFileSync(path.join(dir, 'images', 'A01', 'A01-A.jpg'), 'dup'); fs.writeFileSync(path.join(dir, 'images', 'A01', 'A01-B.jpg'), 'dup');
+  const cd2 = candDoc(); for (const l of 'AB') cd2.scenes.A01.candidates.find((c) => c.candidateId === `A01-${l}`).sha256 = L.sha256Hex('dup');
+  const ci = L.buildCandidateIntegrity(dir, L.buildItems(realScenes(), realNeg(), cd2), 'c'.repeat(64));
+  assert.deepEqual(ci.images[L.sha256Hex('dup')].map((e) => e.candidateId), ['A01-A', 'A01-B']);
   fs.rmSync(dir, { recursive: true, force: true });
 });

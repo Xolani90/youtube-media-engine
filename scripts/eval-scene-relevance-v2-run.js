@@ -3,7 +3,8 @@
 // Calls the EXISTING rankSceneImages() once per item, unchanged: no scoring,
 // threshold or preprocessing is altered. REFUSES to start unless
 // judgments-manifest.json exists and every frozen hash (preregistration,
-// scenes.json, negatives.json, each judgments file) still matches and every
+// scenes.json, negatives.json, candidates.json, each judgments file, and the bytes of every
+// candidate image) still matches and every
 // judgments file validates strictly. It never repairs or re-hashes anything,
 // and it refuses to overwrite an existing results.json.
 //
@@ -19,7 +20,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { rankSceneImages } from '../src/media/sceneRelevance.js';
-import { DEFAULT_EVAL_DIR, TIMING_SCENES, readJsonStrict, buildItems, loadFrozen, sha256File, stableStringify } from './eval-scene-relevance-v2-lib.js';
+import { DEFAULT_EVAL_DIR, TIMING_SCENES, readJsonStrict, buildItems, loadFrozen, verifyCandidateIntegrity, candidateIntegritySha256, sha256File, stableStringify } from './eval-scene-relevance-v2-lib.js';
 
 const EVAL_DIR = path.resolve(process.env.EVAL_DIR || DEFAULT_EVAL_DIR);
 const die = (m) => { console.error(`RUN REFUSED: ${m}`); process.exit(1); };
@@ -52,7 +53,8 @@ const out = { schema: 'scene-relevance-v2-results', meta: {
   startedAt: new Date().toISOString(), node: process.version, platform: process.platform, gitHead,
   modelDirName: path.basename(path.resolve(modelDir)), dtype: process.env.SCENE_RELEVANCE_DTYPE || 'q8 (worker default)', preprocessorConfig, onnxSha256: onnx,
   workerPath: workerPath || 'default (src/media/sceneRelevanceWorker.js)',
-  manifestSha256: frozen.manifestSha256, frozenFiles: frozen.manifest.frozenFiles, judgmentFiles: frozen.manifest.judgmentFiles
+  manifestSha256: frozen.manifestSha256, frozenFiles: frozen.manifest.frozenFiles, judgmentFiles: frozen.manifest.judgmentFiles,
+  candidatesSha256: frozen.manifest.candidateIntegrity.candidatesSha256, candidateIntegritySha256: candidateIntegritySha256(frozen.manifest.candidateIntegrity)
 }, items: [], timing: [] };
 
 for (const it of items) {
@@ -76,6 +78,8 @@ if (!process.argv.includes('--no-timing')) {
     out.timing.push({ sceneId: id, images: all.length, oneImageMs: one.map((x) => x.ms), allImagesMs: many.map((x) => x.ms), allCallsOk: [...one, ...many].every((x) => x.result.ok) });
   }
 }
+// Fail closed if candidates.json or any image changed while the run was in progress; nothing is written.
+try { verifyCandidateIntegrity(EVAL_DIR, items, frozen.manifest.candidateIntegrity); } catch (e) { die(`${e.message} (detected after the model run; results.json was NOT written)`); }
 out.meta.finishedAt = new Date().toISOString();
 fs.writeFileSync(resultsPath, stableStringify(out));
 console.log(`\nWrote ${resultsPath}\nNext: node scripts/eval-scene-relevance-v2-report.js --select-rule   then   node scripts/eval-scene-relevance-v2-report.js`);

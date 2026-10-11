@@ -14,7 +14,8 @@ export const CANDIDATE_LETTERS = 'ABCDEFGH';
 export const TIMING_SCENES = ['A02', 'C03', 'F03']; // calibration-split scenes, fixed in advance
 export const ANSWER_KEY_FILE = 'answer-key.json';
 export const REVIEW_ASSET_DIR = 'review-assets';
-export const FROZEN_FILES = ['PREREGISTRATION.md', 'scenes.json', 'negatives.json', ANSWER_KEY_FILE];
+export const CANDIDATES_FILE = 'candidates.json';
+export const FROZEN_FILES = ['PREREGISTRATION.md', 'scenes.json', 'negatives.json', CANDIDATES_FILE, ANSWER_KEY_FILE];
 export const FETCH_DECISIONS_FILE = 'fetch-owner-decisions.json'; // owner-written; NOT a frozen file (fetch bookkeeping)
 export const CONDITION_TYPES = ['visual', 'absence'];
 
@@ -57,6 +58,24 @@ export function computeSplit(scenes) {
   const out = {};
   for (const ids of byCat.values()) {
     [...ids].sort((a, b) => (sha256Hex(a) < sha256Hex(b) ? -1 : 1)).forEach((id, k) => { out[id] = k < 2 ? 'calibration' : 'heldout'; });
+  }
+  return out;
+}
+
+// Near-miss split (fixed BEFORE any score or image existed; no model output is used). Items are stratified by
+// conditionType so both condition types appear in calibration and held-out wherever the counts allow:
+// within each conditionType sort the near-miss IDs ascending by the lowercase hex SHA-256 of 'nmsplit:' + id
+// (tie-breaker if two hashes were ever equal: the ID, ascending); the first floor(n/2) are calibration and the
+// rest (the extra item when n is odd) are held-out. The prefix was declared once and not varied.
+export const NEAR_MISS_SPLIT_PREFIX = 'nmsplit:';
+export function computeNearMissSplit(nearMissItems) {
+  const byType = new Map();
+  for (const n of nearMissItems) byType.set(n.conditionType, [...(byType.get(n.conditionType) || []), n.id]);
+  const key = (id) => sha256Hex(`${NEAR_MISS_SPLIT_PREFIX}${id}`);
+  const out = {};
+  for (const ids of byType.values()) {
+    [...ids].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a < b ? -1 : 1))
+      .forEach((id, k) => { out[id] = k < Math.floor(ids.length / 2) ? 'calibration' : 'heldout'; });
   }
   return out;
 }
@@ -118,6 +137,11 @@ export function validateNegativesDoc(neg, scenesDoc) {
     if (!CONDITION_TYPES.includes(n.conditionType)) fail(`negatives.json: ${n.id}.conditionType must be one of ${CONDITION_TYPES.join(', ')}`);
   });
   if (nm.filter((n) => n.split === 'calibration').length !== 5) fail('negatives.json: near-miss split must be 5/5');
+  const want = computeNearMissSplit(nm);
+  for (const n of nm) if (n.split !== want[n.id]) fail(`negatives.json: ${n.id} split \"${n.split}\" does not match the SHA-256 rule (\"${want[n.id]}\")`);
+  for (const t of CONDITION_TYPES) for (const sp of ['calibration', 'heldout']) {
+    if (nm.some((n) => n.conditionType === t) && nm.filter((n) => n.conditionType === t).length >= 2 && !nm.some((n) => n.conditionType === t && n.split === sp)) fail(`negatives.json: no ${t} near-miss in ${sp}`);
+  }
 }
 
 export function validateCandidatesDoc(doc, sceneIds) {
@@ -179,11 +203,89 @@ export function validateJudgments(j, items, label = 'judgments') {
   return j;
 }
 
+// ------------------------------------------------ candidate + image integrity
+// The freeze binds (a) the exact candidates.json bytes (it is in FROZEN_FILES) and (b) the SHA-256 of every
+// evaluated image's BYTES, stored in the manifest as candidateIntegrity: { candidatesSha256, imageCount,
+// images: { <sha256>: [{ candidateId, sceneId }] } } (one image can sit under several candidates). A filename or
+// path is never trusted: only the hash of the bytes read from disk counts. Nothing here repairs or regenerates a
+// hash; any difference throws. The manifest is not reviewer-facing, and no image bytes are stored in it.
+const HEX64 = /^[0-9a-f]{64}$/;
+export const sceneIdOfCandidate = (candidateId) => candidateId.slice(0, candidateId.lastIndexOf('-'));
+
+export function uniqueCandidates(items) {
+  const out = new Map();
+  for (const it of items) for (const c of it.candidates) {
+    const prev = out.get(c.candidateId);
+    if (prev && (prev.sha256 !== c.sha256 || prev.localPath !== c.localPath)) fail(`candidate ${c.candidateId} is described inconsistently across items`);
+    out.set(c.candidateId, c);
+  }
+  return out;
+}
+
+function imageBytesSha(evalDir, c) {
+  const root = path.resolve(evalDir); const p = path.resolve(root, ...String(c.localPath).split('/'));
+  if (path.isAbsolute(c.localPath) || (p !== root && !p.startsWith(root + path.sep))) fail(`image path for ${c.candidateId} leaves the evaluation folder`);
+  if (!fs.existsSync(p)) fail(`image file missing for ${c.candidateId}`);
+  return sha256File(p);
+}
+
+// Hashes every evaluated image from disk and requires it to equal the sha256 recorded in candidates.json.
+export function buildCandidateIntegrity(evalDir, items, candidatesSha256) {
+  if (!HEX64.test(candidatesSha256 || '')) fail('candidatesSha256 must be a SHA-256 hex digest');
+  const images = {}; let n = 0;
+  for (const c of [...uniqueCandidates(items).values()].sort((a, b) => (a.candidateId < b.candidateId ? -1 : 1))) {
+    const h = imageBytesSha(evalDir, c);
+    if (h !== c.sha256) fail(`image bytes for ${c.candidateId} do not match the sha256 in candidates.json`);
+    (images[h] ||= []).push({ candidateId: c.candidateId, sceneId: sceneIdOfCandidate(c.candidateId) }); n++;
+  }
+  return { candidatesSha256, imageCount: n, images };
+}
+
+export function validateCandidateIntegrity(ci) {
+  if (!isObj(ci)) fail('manifest: candidateIntegrity is missing (a freeze must record candidate and image hashes)');
+  if (!HEX64.test(ci.candidatesSha256 || '')) fail('manifest: candidateIntegrity.candidatesSha256 missing or malformed');
+  if (!isObj(ci.images) || !Number.isInteger(ci.imageCount) || ci.imageCount < 1) fail('manifest: candidateIntegrity.images missing or empty');
+  const seen = new Set(); let n = 0;
+  for (const [h, list] of Object.entries(ci.images)) {
+    if (!HEX64.test(h) || !Array.isArray(list) || list.length === 0) fail('manifest: candidateIntegrity has a malformed image entry');
+    for (const e of list) {
+      if (!isObj(e) || typeof e.candidateId !== 'string' || typeof e.sceneId !== 'string' || sceneIdOfCandidate(e.candidateId) !== e.sceneId) fail('manifest: candidateIntegrity has an inconsistent candidate/scene mapping');
+      if (seen.has(e.candidateId)) fail(`manifest: candidateIntegrity lists ${e.candidateId} twice`);
+      seen.add(e.candidateId); n++;
+    }
+  }
+  if (n !== ci.imageCount) fail('manifest: candidateIntegrity.imageCount does not match its entries');
+  return ci;
+}
+
+// Re-hashes candidates.json and every image now on disk against the frozen record. Throws on ANY difference
+// (changed or missing manifest, changed/missing/extra/unlisted image).
+export function verifyCandidateIntegrity(evalDir, items, ci) {
+  validateCandidateIntegrity(ci);
+  const cp = path.join(evalDir, CANDIDATES_FILE);
+  if (!fs.existsSync(cp) || sha256File(cp) !== ci.candidatesSha256) fail(`${CANDIDATES_FILE} changed after freezing (hash mismatch)`);
+  const frozen = new Map();
+  for (const [h, list] of Object.entries(ci.images)) for (const e of list) frozen.set(e.candidateId, h);
+  const cands = uniqueCandidates(items);
+  for (const [id, c] of cands) {
+    const want = frozen.get(id);
+    if (!want) fail(`candidate ${id} is not in the frozen image record`);
+    if (c.sha256 !== want) fail(`candidate ${id}: candidates.json hash differs from the frozen image record`);
+    if (imageBytesSha(evalDir, c) !== want) fail(`image bytes changed after freezing: ${id}`);
+  }
+  if (frozen.size !== cands.size) fail('the frozen image record lists candidates that are not part of the current evaluation');
+  return true;
+}
+
+export const candidateIntegritySha256 = (ci) => sha256Hex(stableStringify(ci));
+
 export function validateManifest(m) {
   if (!isObj(m) || m.schema !== 'scene-relevance-v2-judgments-manifest') fail('manifest: wrong schema');
   if (typeof m.frozenAt !== 'string' || Number.isNaN(Date.parse(m.frozenAt))) fail('manifest: frozenAt missing');
   if (!isObj(m.frozenFiles) || !isObj(m.judgmentFiles) || typeof m.primaryReviewer !== 'string') fail('manifest: malformed');
   for (const f of FROZEN_FILES) if (!/^[0-9a-f]{64}$/.test(m.frozenFiles[f] || '')) fail(`manifest: missing hash for ${f}`);
+  const ci = validateCandidateIntegrity(m.candidateIntegrity);
+  if (ci.candidatesSha256 !== m.frozenFiles[CANDIDATES_FILE]) fail(`manifest: candidateIntegrity does not match the frozen hash of ${CANDIDATES_FILE}`);
   if (!Object.keys(m.judgmentFiles).length) fail('manifest: no judgment files');
   for (const [f, h] of Object.entries(m.judgmentFiles)) if (!/^judgments-[A-Za-z0-9_-]+\.json$/.test(f) || !/^[0-9a-f]{64}$/.test(h)) fail(`manifest: bad entry ${f}`);
   return m;
@@ -207,6 +309,7 @@ export function loadFrozen(evalDir, items) {
     judgments[j.reviewerId] = j;
   }
   if (!judgments[manifest.primaryReviewer]) fail('primary reviewer has no frozen judgments file');
+  verifyCandidateIntegrity(evalDir, items, manifest.candidateIntegrity);
   return { manifest, manifestSha256: sha256File(mp), judgments };
 }
 
