@@ -4,7 +4,8 @@ import path from 'node:path';
 import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS, SHORT_FORM_RENDER_DEFAULTS, ASR_PROVIDER, TIMING_SOURCE } from './constants.js';
 import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets } from './visualTiming.js';
-import { computeVisualSequencing } from './visualSequencing.js';
+import { computeVisualSequencing, computeSequenceSlotTexts } from './visualSequencing.js';
+import { resolveSceneAssignmentEnabled, orderAssetsForSlots } from './sceneAssignment.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
 import { synthesizeNarration, probeDurationSeconds } from './narration.js';
@@ -348,7 +349,12 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   // (computed just above) as scene-cut candidates instead of a flat
   // equal-share division. Falls back to the plain equal-division
   // timeline unchanged when there's no caption structure to key off of.
-  const sequencedTiming = computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds);
+  // Opt-in (SCENE_RELEVANCE_ASSIGN=on, default off): reorder assets so each
+  // slot gets its best-ranked unused asset. Off => byte-identical to before.
+  const sequencingAssets = resolveSceneAssignmentEnabled()
+    ? orderAssetsForSlots(visualAssets, computeSequenceSlotTexts(captionTiming))
+    : visualAssets;
+  const sequencedTiming = computeVisualSequencing(sequencingAssets, captionTiming, narrationDurationSeconds);
 
   // --- Ken Burns motion (worker capability; src/media/motion.js) ---
   // Runs strictly AFTER the rights/checksum/existence gates above and AFTER

@@ -89,6 +89,20 @@ export function computeVisualSequencing(
   return timing;
 }
 
+/**
+ * Additive: the text of each merged visual slot, using the exact same
+ * segmentation/merge logic as computeVisualSequencing. Returns [] when
+ * there is no caption structure. Does not affect computeVisualSequencing.
+ */
+export function computeSequenceSlotTexts(
+  captionTiming,
+  { minVisualDurationSeconds = SEQUENCING_DEFAULTS.MIN_VISUAL_DURATION_SECONDS } = {}
+) {
+  if (!captionTiming || captionTiming.length === 0) return [];
+  return mergeShortSegments(captionBoundariesToSegments(captionTiming), minVisualDurationSeconds)
+    .map((seg) => (seg.texts ?? []).join(' ').trim());
+}
+
 /** Turns caption timing (already gap-free, ordered, and duration-exact — see captionTiming.js) into visual scene-cut candidate segments at the same boundaries. */
 function captionBoundariesToSegments(captionTiming) {
   const boundaries = [round3(captionTiming[0].start_seconds)];
@@ -99,7 +113,7 @@ function captionBoundariesToSegments(captionTiming) {
   for (let i = 0; i < boundaries.length - 1; i++) {
     const start = boundaries[i];
     const end = boundaries[i + 1];
-    if (end > start) segments.push({ start, end });
+    if (end > start) segments.push({ start, end, texts: [captionTiming[i].text] });
   }
   return segments;
 }
@@ -118,14 +132,16 @@ function mergeShortSegments(rawSegments, minVisualDurationSeconds) {
     const prev = merged[merged.length - 1];
     if (prev && prev.end - prev.start < minVisualDurationSeconds) {
       prev.end = seg.end;
+      if (prev.texts) prev.texts.push(...(seg.texts ?? []));
     } else {
-      merged.push({ start: seg.start, end: seg.end });
+      merged.push({ start: seg.start, end: seg.end, texts: seg.texts ? [...seg.texts] : undefined });
     }
   }
   if (merged.length > 1) {
     const lastIdx = merged.length - 1;
     if (merged[lastIdx].end - merged[lastIdx].start < minVisualDurationSeconds) {
       merged[lastIdx - 1].end = merged[lastIdx].end;
+      if (merged[lastIdx - 1].texts) merged[lastIdx - 1].texts.push(...(merged[lastIdx].texts ?? []));
       merged.pop();
     }
   }
