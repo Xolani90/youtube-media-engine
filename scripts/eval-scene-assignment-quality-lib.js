@@ -10,9 +10,9 @@
 //     hardNegatives = plausible-looking but wrong images that must never be chosen
 import crypto from 'node:crypto';
 import { rankEntries } from '../src/media/sceneRelevance.js';
-import { orderAssetsForSlots, orderAssetsForSlotsBatch, orderAssetsForSlotsBatchAll } from '../src/media/sceneAssignment.js';
+import { orderAssetsForSlots, orderAssetsForSlotsBatch, orderAssetsForSlotsBatchAll, orderAssetsForSlotsGlobal } from '../src/media/sceneAssignment.js';
 
-export const MODES = Object.freeze(['on', 'batch', 'batch-all']);
+export const MODES = Object.freeze(['on', 'batch', 'batch-all', 'global']);
 export const TOP_K = 3;
 
 export function validateManifest(m) {
@@ -92,6 +92,7 @@ export function assignSlots(manifest, scores, mode, { rank, rankBatch } = matrix
   const texts = manifest.scenes.map((s) => s.text);
   const out = mode === 'on' ? orderAssetsForSlots(assets, texts, { rank })
     : mode === 'batch' ? orderAssetsForSlotsBatch(assets, texts, { rankBatch })
+    : mode === 'global' ? orderAssetsForSlotsGlobal(assets, texts, { rankBatch })
     : orderAssetsForSlotsBatchAll(assets, texts, { rankBatch });
   return texts.map((_, i) => out[i % out.length].id); // same indexing computeVisualSequencing uses
 }
@@ -113,11 +114,26 @@ export function assignmentMetrics(manifest, scores, mode, opts) {
   const n = rows.length, k = (f) => rows.filter(f).length;
   return {
     mode, picks, rows,
+    // Sum of the matrix scores of the picks (unscored picks add nothing). Compares allocation, not semantic quality.
+    totalScore: Math.round(rows.reduce((a, r) => a + (r.score ?? 0), 0) * 1e9) / 1e9,
     relevantRate: k((r) => r.relevant) / n, relevantCI95: wilson(k((r) => r.relevant), n),
     falseSelectionRate: k((r) => !r.relevant) / n,
     hardNegativeSelected: k((r) => r.hardNegative), unusableSelected: k((r) => r.unusable),
     forcedOffTop1: k((r) => r.forcedOffTop1), noRelevantSceneFilled: manifest.scenes.filter((s, i) => s.relevant.length === 0 && picks[i]).length
   };
+}
+
+/**
+ * Wall-clock cost of ONE assignment pass on an already-scored matrix (scoring excluded) and whether
+ * repeated passes give identical picks. Kept out of evaluate() so evaluate() stays a pure function.
+ */
+export function timeAssignment(manifest, scores, mode, runs = 20) {
+  const first = JSON.stringify(assignSlots(manifest, scores, mode));
+  let identical = true;
+  const t0 = process.hrtime.bigint();
+  for (let i = 0; i < runs; i++) if (JSON.stringify(assignSlots(manifest, scores, mode)) !== first) identical = false;
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  return { mode, runs, identicalPicks: identical, msPerRun: Math.round((ms / runs) * 1000) / 1000 };
 }
 
 /** Descriptive abstention table: precision/coverage if picks below a cosine threshold had been rejected. Not applied anywhere. */

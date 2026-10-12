@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { rankSceneBatch } from '../src/media/sceneRelevanceBatch.js';
-import { validateManifest, evaluate, MODES } from './eval-scene-assignment-quality-lib.js';
+import { validateManifest, evaluate, timeAssignment, MODES } from './eval-scene-assignment-quality-lib.js';
 
 const args = process.argv.slice(2);
 const pos = [];
@@ -44,7 +44,8 @@ try {
     if (!res.ok) throw new Error(`scoring failed (fallback): ${res.reason}`);
     scores = res.scores;
   }
-  report = { ...evaluate(manifest, scores), scoringMs, scores };
+  const assignmentRuntime = Object.fromEntries(MODES.map((m) => [m, timeAssignment(manifest, scores, m)]));
+  report = { ...evaluate(manifest, scores), scoringMs, assignmentRuntime, scores };
 } catch (err) { console.error(`Failed: ${err.message}`); process.exit(1); } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 
 const pct = (x) => (x === null ? 'n/a' : `${(x * 100).toFixed(1)}%`);
@@ -54,5 +55,14 @@ for (const m of MODES) {
   const a = report.assignments[m];
   console.log(`ASSIGN ${m.padEnd(9)} relevant ${pct(a.relevantRate)} (CI ${a.relevantCI95?.join('..')}), false-selection ${pct(a.falseSelectionRate)}, hard-negative picked ${a.hardNegativeSelected}, unusable picked ${a.unusableSelected}, forced off top-1 ${a.forcedOffTop1}, no-relevant scenes filled ${a.noRelevantSceneFilled}; same picks as ${MODES[0]}: ${report.selectionEquivalence[m]}`);
 }
+console.log(`TOTAL SCORE of picks (same matrix): ${MODES.map((m) => `${m} ${report.assignments[m].totalScore.toFixed(4)}`).join(' | ')}`);
+console.log(`PER-SCENE PICKS (score; * = not the scene's rank-1 image, R = relevant, H = hard negative)`);
+console.log(`  ${'scene'.padEnd(6)}${MODES.map((m) => m.padEnd(22)).join('')}`);
+report.assignments[MODES[0]].rows.forEach((_, i) => {
+  const cell = (m) => { const r = report.assignments[m].rows[i]; return `${r.pick} ${r.score === null ? 'n/a' : r.score.toFixed(3)}${r.forcedOffTop1 ? '*' : ''}${r.relevant ? 'R' : ''}${r.hardNegative ? 'H' : ''}`.padEnd(22); };
+  console.log(`  ${report.assignments[MODES[0]].rows[i].scene.padEnd(6)}${MODES.map(cell).join('')}`);
+});
+console.log(`ASSIGNMENT RUNTIME (scoring excluded, mean of ${report.assignmentRuntime[MODES[0]].runs} passes): ${MODES.map((m) => `${m} ${report.assignmentRuntime[m].msPerRun} ms`).join(' | ')}`);
+console.log(`REPEATED ASSIGNMENT RUNS IDENTICAL: ${MODES.map((m) => `${m} ${report.assignmentRuntime[m].identicalPicks}`).join(' | ')}`);
 if (report.scoringMs !== null) console.log(`Scoring runtime (batch worker, one call): ${(report.scoringMs / 1000).toFixed(1)} s`);
 if (opt.out) { fs.writeFileSync(opt.out, JSON.stringify(report, null, 2)); console.log(`Report written: ${opt.out}`); }

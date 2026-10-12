@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateManifest, rankingMetrics, assignmentMetrics, thresholdTable, evaluate, wilson } from '../../scripts/eval-scene-assignment-quality-lib.js';
+import { validateManifest, rankingMetrics, assignmentMetrics, thresholdTable, evaluate, wilson, timeAssignment, assignSlots, MODES } from '../../scripts/eval-scene-assignment-quality-lib.js';
 
 // Synthetic matrices test the HARNESS only. They say nothing about SigLIP's real quality.
 const manifest = () => ({
@@ -43,7 +43,7 @@ test('ranking metrics: top-1, MRR, hard negative at rank 1, margin, unusable col
 
 test('assignment on good scores: all relevant scenes correct, but a scene with no relevant image is still filled', () => {
   const m = manifest();
-  for (const mode of ['on', 'batch', 'batch-all']) {
+  for (const mode of ['on', 'batch', 'batch-all', 'global']) {
     const a = assignmentMetrics(m, GOOD, mode);
     assert.deepEqual(a.picks.slice(0, 2), ['A', 'B'], mode);
     assert.equal(a.rows[2].relevant, false);
@@ -76,9 +76,42 @@ test('evaluate: deterministic, equivalence flags, shape validation, Wilson inter
   const r2 = evaluate(manifest(), GOOD);
   assert.equal(JSON.stringify(r1), JSON.stringify(r2));
   assert.equal(r1.ranking.top1Accuracy, 1);
-  assert.deepEqual(Object.values(r1.selectionEquivalence), [true, true, true]);
+  assert.deepEqual(Object.values(r1.selectionEquivalence), [true, true, true, true]);
   assert.throws(() => evaluate(manifest(), [[1, 2]]), /shape/);
   assert.deepEqual(wilson(0, 0), null);
   const [lo, hi] = wilson(9, 10);
   assert.ok(lo > 0.55 && hi <= 1);
+});
+
+test('modes: the three existing modes keep their order and global is appended', () => {
+  assert.deepEqual([...MODES], ['on', 'batch', 'batch-all', 'global']);
+});
+
+// Synthetic harness check of the reported conflict shape (NOT real SigLIP data). A=switchgear-like, B=other.
+const CONFLICT = [[0.074, 0.070, 0.01, null], [0.117, 0.054, 0.02, null], [0.01, 0.02, 0.03, null]];
+const conflictManifest = () => ({
+  images: [{ id: 'A', file: 'a', license: 'x', source: 'x' }, { id: 'B', file: 'b', license: 'x', source: 'x' }, { id: 'C', file: 'c', license: 'x', source: 'x' }, { id: 'X', file: 'x', kind: 'corrupt' }],
+  scenes: [{ id: 'dc', text: 'dc scene', relevant: ['B'], hardNegatives: ['A'] }, { id: 'sw', text: 'sw scene', relevant: ['A'], hardNegatives: [] }, { id: 'none', text: 'none scene', relevant: [], hardNegatives: [] }]
+});
+
+test('global gives the contested image to the scene that wants it most; totalScore is computed from the same matrix', () => {
+  const m = conflictManifest();
+  const batch = assignmentMetrics(m, CONFLICT, 'batch');
+  const global = assignmentMetrics(m, CONFLICT, 'global');
+  assert.deepEqual(batch.picks.slice(0, 2), ['A', 'B']); // dc takes A (0.074) first, sw is left with B (0.054)
+  assert.deepEqual(global.picks.slice(0, 2), ['B', 'A']); // sw gets A (0.117), dc gets B (0.070)
+  assert.ok(Math.abs(batch.totalScore - (0.074 + 0.054 + 0.03)) < 1e-9);
+  assert.ok(Math.abs(global.totalScore - (0.070 + 0.117 + 0.03)) < 1e-9);
+  assert.ok(global.totalScore >= batch.totalScore);
+  assert.equal(global.rows[1].relevant, true);
+  assert.equal(global.unusableSelected, 0); // the corrupt column is never chosen
+  assert.ok(global.noRelevantSceneFilled === 1); // no rejection exists: the no-answer scene is still filled
+});
+
+test('timeAssignment: repeated global runs give identical picks; runtime is reported per pass', () => {
+  const t = timeAssignment(conflictManifest(), CONFLICT, 'global', 10);
+  assert.equal(t.identicalPicks, true);
+  assert.equal(t.runs, 10);
+  assert.ok(Number.isFinite(t.msPerRun) && t.msPerRun >= 0);
+  assert.deepEqual(assignSlots(conflictManifest(), CONFLICT, 'global'), assignSlots(conflictManifest(), CONFLICT, 'global'));
 });
