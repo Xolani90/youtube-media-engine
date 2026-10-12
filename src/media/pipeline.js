@@ -5,7 +5,7 @@ import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_D
 import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets } from './visualTiming.js';
 import { computeVisualSequencing, computeSequenceSlotTexts } from './visualSequencing.js';
-import { resolveSceneAssignmentEnabled, orderAssetsForSlots } from './sceneAssignment.js';
+import { resolveSceneAssignmentMode, assignAssetsForSlots } from './sceneAssignment.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
 import { synthesizeNarration, probeDurationSeconds } from './narration.js';
@@ -351,9 +351,10 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   // timeline unchanged when there's no caption structure to key off of.
   // Opt-in (SCENE_RELEVANCE_ASSIGN=on, default off): reorder assets so each
   // slot gets its best-ranked unused asset. Off => byte-identical to before.
-  const sequencingAssets = resolveSceneAssignmentEnabled()
-    ? orderAssetsForSlots(visualAssets, computeSequenceSlotTexts(captionTiming))
-    : visualAssets;
+  // SCENE_RELEVANCE_ASSIGN=batch does the same with one worker call per video.
+  const sequencingAssets = resolveSceneAssignmentMode() === 'off'
+    ? visualAssets
+    : assignAssetsForSlots(visualAssets, computeSequenceSlotTexts(captionTiming));
   const sequencedTiming = computeVisualSequencing(sequencingAssets, captionTiming, narrationDurationSeconds);
 
   // --- Ken Burns motion (worker capability; src/media/motion.js) ---
