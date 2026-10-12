@@ -135,3 +135,25 @@ test('dispatcher: global selects the new mode; batch still greedy; off returns t
   assert.deepEqual(ids(assignAssetsForSlots(assets, CONFLICT_SLOTS, { env: { SCENE_RELEVANCE_ASSIGN: 'batch' }, rankBatch })), ['a1', 'a0']);
   assert.equal(assignAssetsForSlots(assets, CONFLICT_SLOTS, { env: {}, rankBatch }), assets);
 });
+
+test('an unusable image (null score column) does not disable optimisation of the remaining assets', () => {
+  // a2 is undecodable: null for every slot. Optimum over a0/a1 is dc->a1 (0.070) + sw->a0 (0.117) = 0.187.
+  const m = { dc: [0.074, 0.070, null], sw: [0.117, 0.054, null] };
+  const assets = ['a0', 'a1', 'a2'].map(A);
+  const greedy = orderAssetsForSlotsBatch(assets, ['dc', 'sw'], { rankBatch: matrixRank(m) });
+  const out = orderAssetsForSlotsGlobal(assets, ['dc', 'sw'], { rankBatch: matrixRank(m) });
+  assert.deepEqual(ids(greedy), ['a0', 'a1', 'a2']);
+  assert.deepEqual(ids(out), ['a1', 'a0', 'a2']);
+  assert.ok(Math.abs(0.070 + 0.117 - 0.187) < 1e-12);
+  assert.equal(new Set(ids(out)).size, 3);
+});
+
+test('a slot whose only usable cells are taken stays unscored and gets a free asset in current order', () => {
+  // a1 is unusable for both slots; both want a0, y wants it more. x is left unscored and takes the free a1.
+  const m = { x: [0.5, null], y: [0.9, null] };
+  assert.deepEqual(ids(orderAssetsForSlotsGlobal([A('a0'), A('a1')], ['x', 'y'], { rankBatch: matrixRank(m) })), ['a1', 'a0']);
+  // a slot with no finite score at all does not stop the others being optimised
+  const m2 = { x: [null, null, null], y: [0.2, 0.9, 0.1], z: [0.3, 0.8, 0.1] };
+  const out = orderAssetsForSlotsGlobal(['a0', 'a1', 'a2'].map(A), ['x', 'y', 'z'], { rankBatch: matrixRank(m2) });
+  assert.deepEqual(ids(out), ['a2', 'a1', 'a0']); // y->a1 (0.9), z->a0 (0.3) = 1.2 beats y->a0, z->a1 = 1.0; x takes free a2
+});

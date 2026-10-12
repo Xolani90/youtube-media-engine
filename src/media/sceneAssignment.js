@@ -209,9 +209,9 @@ export function maximizeAssignment(scores) {
  * slots to distinct assets that maximises the SUM of their scores (exact),
  * instead of the per-slot greedy of 'batch'. Output has the same shape as
  * 'batch' (a permutation of the assets, slot i -> out[i]; remaining assets
- * follow). A slot is assignable only if its text is usable and its whole score
- * row is finite; other slots are filled in current order from the assets the
- * optimiser left free. Any batch failure/invalid result => current order.
+ * follow). A slot is assignable if its text is usable and it has at least one
+ * finite score; non-finite cells are never chosen while a usable asset exists.
+ * Other slots are filled in current order from the assets the optimiser left free. Any batch failure/invalid result => current order.
  * Scores come from the existing ranker; this changes allocation, not scores.
  */
 export function orderAssetsForSlotsGlobal(visualAssets, slotTexts, { rankBatch = rankSceneBatch } = {}) {
@@ -234,17 +234,29 @@ export function orderAssetsForSlotsGlobal(visualAssets, slotTexts, { rankBatch =
   if (!good) return assets;
   const row = new Map(texts.map((t, i) => [t, res.scores[i]]));
 
+  // A non-finite cell (e.g. an undecodable image's null column) is an ineligible
+  // edge, not a reason to drop the slot: it gets a penalty larger than any
+  // possible total of real scores, so the optimiser only uses it when a slot has
+  // no usable asset left, and such a slot is then treated as unscored.
+  const finite = (x) => Number.isFinite(x);
   const assignable = [];
   slots.forEach((t, i) => {
     const r = usable(t) ? row.get(t) : null;
-    if (r && r.every((x) => Number.isFinite(x))) assignable.push(i);
+    if (r && r.some(finite)) assignable.push(i);
   });
   if (assignable.length === 0) return assets;
 
-  const cols = maximizeAssignment(assignable.map((i) => row.get(slots[i])));
+  let span = 1;
+  for (const i of assignable) for (const x of row.get(slots[i])) if (finite(x)) span = Math.max(span, Math.abs(x));
+  const penalty = -(span * (assignable.length + 1) * 2 + 1);
+  const matrix = assignable.map((i) => row.get(slots[i]).map((x) => (finite(x) ? x : penalty)));
+  const cols = maximizeAssignment(matrix);
   const out = new Array(slots.length).fill(null);
   const used = new Set();
-  assignable.forEach((slotIdx, k) => { out[slotIdx] = assets[cols[k]]; used.add(cols[k]); });
+  assignable.forEach((slotIdx, k) => {
+    if (!finite(row.get(slots[slotIdx])[cols[k]])) return; // forced onto an unusable cell: unscored slot
+    out[slotIdx] = assets[cols[k]]; used.add(cols[k]);
+  });
   const free = assets.filter((_, j) => !used.has(j));
   for (let i = 0; i < out.length; i++) if (out[i] === null) out[i] = free.shift();
   return [...out, ...free];
