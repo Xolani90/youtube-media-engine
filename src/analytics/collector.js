@@ -131,16 +131,20 @@ function upsertSnapshot(storage, { publication, periodStart, periodEnd, nowISO, 
  * @param {string} deps.periodEnd - UTC date, YYYY-MM-DD (inclusive)
  * @param {string} [deps.provider] - provider id, defaults to 'youtube'
  * @param {{collect: (args: {videoIds: string[], periodStart: string, periodEnd: string}) => Promise<object>}} deps.adapter - injectable for tests; production callers pass a YouTubeAnalyticsAdapter instance
+ * @param {string[]|null} [deps.publicationIds] - when an array, collect only these publication ids (default null: all eligible)
  * @param {string} [deps.runId]
  * @param {() => string} [deps.nowISO]
  * @returns {Promise<{ runId: string|null, provider: string, periodStart: string, periodEnd: string, eligible: number, batches: number, collected: number, unavailable: number, failed: number, aborted: boolean, results: Array<{publicationId: string, providerItemId: string, status: string}> }>}
  */
-export async function collectAnalytics({ storage, periodStart, periodEnd, provider = 'youtube', adapter, runId = null, nowISO = () => new Date().toISOString() }) {
+export async function collectAnalytics({ storage, periodStart, periodEnd, provider = 'youtube', adapter, runId = null, publicationIds = null, nowISO = () => new Date().toISOString() }) {
   if (!storage) throw new Error('collectAnalytics requires deps.storage');
   if (!periodStart || !periodEnd) throw new Error('collectAnalytics requires an explicit periodStart and periodEnd');
   if (!adapter || typeof adapter.collect !== 'function') throw new Error('collectAnalytics requires deps.adapter implementing collect()');
 
-  const eligible = selectEligiblePublicationsForAnalytics(storage, provider);
+  if (publicationIds !== null && !Array.isArray(publicationIds)) throw new Error('collectAnalytics deps.publicationIds must be an array when provided');
+  // Optional narrowing (default null = every eligible publication, unchanged behaviour).
+  const only = publicationIds === null ? null : new Set(publicationIds);
+  const eligible = selectEligiblePublicationsForAnalytics(storage, provider).filter((p) => only === null || only.has(p.id));
   const byVideoId = new Map(eligible.map((p) => [p.provider_item_id, p]));
   const batches = chunk(eligible, MAX_VIDEOS_PER_BATCH);
 
