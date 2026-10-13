@@ -1,4 +1,7 @@
 const DEFAULT_MAX_LENGTH = 80;
+// Sentence boundary: whitespace that follows terminal punctuation (plus optional closing
+// quotes/brackets). A "." inside a token (51.3, GPT-4.5, blog.google) is never a boundary.
+const SENTENCE_BOUNDARY = /(?<=[.!?\u2026]+["'\u201d\u2019)\]]*)\s+/;
 const MIN_CAPTION_DURATION_SECONDS = 0.001;
 
 /**
@@ -13,7 +16,7 @@ export function segmentCaptions(text, maxLength = DEFAULT_MAX_LENGTH) {
   if (!text || !text.trim()) return [];
 
   const normalized = text.trim().replace(/\s+/g, ' ');
-  const sentenceMatches = normalized.match(/[^.!?]+[.!?]*/g);
+  const sentenceMatches = normalized.split(SENTENCE_BOUNDARY);
   const sentences = (sentenceMatches ?? [normalized]).map((s) => s.trim()).filter(Boolean);
 
   const captions = [];
