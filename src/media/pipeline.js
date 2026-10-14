@@ -5,6 +5,7 @@ import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_D
 import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets } from './visualTiming.js';
 import { computeVisualSequencing } from './visualSequencing.js';
+import { computeSceneSequencing } from './sceneSequencing.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
 import { synthesizeNarration, probeDurationSeconds } from './narration.js';
@@ -348,7 +349,8 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   // (computed just above) as scene-cut candidates instead of a flat
   // equal-share division. Falls back to the plain equal-division
   // timeline unchanged when there's no caption structure to key off of.
-  const sequencedTiming = computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds);
+  const sequencedTiming = computeSceneSequencing(visualAssets, captionTiming, narrationDurationSeconds)
+    ?? computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds);
 
   // --- Ken Burns motion (worker capability; src/media/motion.js) ---
   // Runs strictly AFTER the rights/checksum/existence gates above and AFTER

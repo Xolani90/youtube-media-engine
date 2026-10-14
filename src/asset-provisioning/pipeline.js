@@ -3,6 +3,8 @@ import { ASSET_PROVISIONING_STAGE, OUTCOME, DECISION_LOG_DECISION, PROVISIONING_
 import { resolveProducedContentForProvisioning } from './eligibility.js';
 import { deriveVisualQuery } from './visualQuery.js';
 import { validateAcquiredAsset } from './validate.js';
+import { planScenes, resolveMultiSceneEnabled, formatSceneUsageContext } from './scenePlan.js';
+import { scriptBodyToNarrationText } from '../media/scriptText.js';
 import { VISUAL_ASSET_TYPES } from '../media/constants.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
 import { ASSET_FAILURE_KIND, isAssetAcquisitionFailure, redactSecrets } from '../providers/asset/AssetSourceProvider.js';
@@ -53,6 +55,76 @@ function sanitizeProviderFailure(f) {
   };
 }
 
+
+// Multi-scene extension (opt-in, MULTI_SCENE_VISUALS=on). The partial UNIQUE
+// index from 0014 only constrains rows whose provisioning_claim IS NOT NULL, so
+// the one claim row stays unique per content_version while additional scene
+// assets are ordinary usage rows (claim NULL) carrying their span in
+// usage_context. No schema change. Additional scenes are best-effort: scene 1
+// is the stage's contract; a missing later scene only narrows the sequencing.
+const MAX_EXTRA_QUERY_ATTEMPTS = 2;
+
+function assetFingerprints(asset) {
+  return [asset.checksum && `c:${asset.checksum}`, asset.location && `l:${asset.location}`, asset.origin && `o:${asset.origin}`].filter(Boolean);
+}
+
+async function provisionAdditionalScenes({ storage, repo, provider, contentVersionId, scenePlan, firstAsset, runId, nowISO }) {
+  const seen = new Set(assetFingerprints(firstAsset));
+  const added = [];
+  for (const scene of scenePlan.slice(1)) {
+    // The last query is the unchanged whole-video query, which would only re-find scene 1's asset.
+    const queries = scene.queries.slice(0, -1).slice(0, MAX_EXTRA_QUERY_ATTEMPTS);
+    let skipReason = queries.length ? 'no_acceptable_candidate' : 'no_scene_specific_query';
+    let stop = false;
+    for (const q of queries) {
+      let result;
+      try {
+        result = await provider.acquireVisualAsset({ query: q, assetTypes: [...VISUAL_ASSET_TYPES] });
+      } catch (err) {
+        skipReason = 'provider_threw'; continue;
+      }
+      if (isAssetAcquisitionFailure(result)) {
+        skipReason = `provider_failure_${result.failure.kind}`;
+        if (result.failure.kind === ASSET_FAILURE_KIND.RATE_LIMIT) { stop = true; break; }
+        continue;
+      }
+      if (!result) continue;
+      if (!validateAcquiredAsset(result).valid) { skipReason = 'invalid_provider_result'; continue; }
+      if (assetFingerprints(result).some((f) => seen.has(f))) { skipReason = 'duplicate_of_attached_asset'; continue; }
+      const assetId = storage.transaction(() => {
+        const id = repo.recordAsset({
+          assetType: result.assetType, location: result.location, checksum: result.checksum ?? null,
+          origin: result.origin ?? null, license: result.license ?? null,
+          attributionRequired: result.attributionRequired ?? false, attributionText: result.attributionText ?? null,
+          usageRestrictions: result.usageRestrictions ?? null, provenanceNotes: result.provenanceNotes ?? null,
+          verificationStatus: result.verificationStatus ?? 'UNVERIFIED'
+        });
+        repo.recordUsage({
+          assetId: id, contentVersionId,
+          usageContext: formatSceneUsageContext({ order: scene.index + 1, count: scene.total, span: scene.span })
+        });
+        return id;
+      });
+      assetFingerprints(result).forEach((f) => seen.add(f));
+      added.push(repo.getAsset(assetId));
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersionId,
+        decision: DECISION_LOG_DECISION.PROVISIONED, reason: `scene_${scene.index + 1}_asset_${assetId}_persisted`
+      }, nowISO);
+      skipReason = null;
+      break;
+    }
+    if (skipReason) {
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersionId,
+        decision: 'SCENE_ASSET_SKIPPED', reason: `scene_${scene.index + 1}_${skipReason}`
+      }, nowISO);
+    }
+    if (stop) break;
+  }
+  return added;
+}
+
 /**
  * Runs Asset Provisioning for a content item Production has already
  * produced (Milestone D). This function may be invoked directly by any
@@ -74,7 +146,7 @@ function sanitizeProviderFailure(f) {
  * @param {import('../providers/asset/AssetSourceProvider.js').AssetSourceProvider} deps.provider
  * @param {string} [deps.runId]
  */
-export async function runAssetProvisioning({ storage, contentBriefId, provider, runId = null }) {
+export async function runAssetProvisioning({ storage, contentBriefId, provider, runId = null, multiScene = resolveMultiSceneEnabled() }) {
   const nowISO = () => new Date().toISOString();
 
   const eligibility = resolveProducedContentForProvisioning(storage, contentBriefId);
@@ -161,6 +233,18 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
     return { outcome: OUTCOME.NO_VISUAL_CONTEXT, asset: null };
   }
 
+  // Opt-in multi-scene plan. Any planning problem (e.g. an unparseable script
+  // body) silently keeps the unchanged single-query behaviour.
+  let scenePlan = [];
+  if (multiScene) {
+    try {
+      scenePlan = planScenes({ visualIdeas: contentBrief?.visual_ideas, scriptBody: scriptBodyToNarrationText(script?.body), fallbackQuery: query });
+    } catch {
+      scenePlan = [];
+    }
+  }
+  const primaryQuery = scenePlan.length ? scenePlan[0].queries[0] : query;
+
   // Missing provider = CONFIGURATION failure, not an item-specific asset
   // acquisition failure. It keeps the existing NO_ASSET_ACQUIRED outcome
   // (no new outcome) but is distinguishable (reason PROVIDER_NOT_CONFIGURED,
@@ -178,7 +262,7 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
 
   let result;
   try {
-    result = await provider.acquireVisualAsset({ query, assetTypes: [...VISUAL_ASSET_TYPES] });
+    result = await provider.acquireVisualAsset({ query: primaryQuery, assetTypes: [...VISUAL_ASSET_TYPES] });
   } catch (err) {
     // A provider THROW is not a provider result: the in-repo provider never
     // throws for operational failures (it returns null), so a throw is a
@@ -271,7 +355,9 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
     repo.recordUsage({
       assetId: id,
       contentVersionId: contentVersion.id,
-      usageContext: PROVISIONING_USAGE_CONTEXT,
+      usageContext: scenePlan.length
+        ? formatSceneUsageContext({ order: 1, count: scenePlan.length, span: scenePlan[0].span })
+        : PROVISIONING_USAGE_CONTEXT,
       provisioningClaim: PROVISIONING_CLAIM
     });
     return { raced: false, assetId: id };
@@ -298,6 +384,12 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
   }, nowISO);
 
   const asset = repo.getAsset(outcome.assetId);
+  if (scenePlan.length > 1) {
+    const additionalAssets = await provisionAdditionalScenes({
+      storage, repo, provider, contentVersionId: contentVersion.id, scenePlan, firstAsset: asset, runId, nowISO
+    });
+    return { outcome: OUTCOME.PROVISIONED, asset, additionalAssets };
+  }
   return { outcome: OUTCOME.PROVISIONED, asset };
 }
 
