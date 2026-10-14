@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { runFfmpeg } from './ffmpegFailure.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CAPTION_DEFAULTS } from './constants.js';
@@ -85,7 +85,7 @@ export function renderSilentVideo({ visualTiming, width, height, fps, videoEncod
   ];
 
   try {
-    execFileSync('ffmpeg', args, {
+    runFfmpeg('render_silent_video', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(ffmpegCwd ? { cwd: ffmpegCwd } : {})
     });
@@ -150,8 +150,7 @@ export function muxNarration({ silentVideoPath, narrationPath, audioEncoder, out
       sampleRate: LOUDNORM_OUTPUT_SAMPLE_RATE,
       loudnorm: normalizeLoudness ? LOUDNORM_TARGETS : null
     });
-    execFileSync(
-      'ffmpeg',
+    runFfmpeg('mux_music',
       [
         '-y',
         '-i', silentVideoPath,
@@ -179,8 +178,7 @@ export function muxNarration({ silentVideoPath, narrationPath, audioEncoder, out
   const audioFilterArgs = normalizeLoudness
     ? ['-af', `loudnorm=I=${LOUDNORM_TARGETS.I}:TP=${LOUDNORM_TARGETS.TP}:LRA=${LOUDNORM_TARGETS.LRA}`, '-ar', String(LOUDNORM_OUTPUT_SAMPLE_RATE)]
     : [];
-  execFileSync(
-    'ffmpeg',
+  runFfmpeg('mux',
     [
       '-y',
       '-i', silentVideoPath,
