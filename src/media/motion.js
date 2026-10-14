@@ -2,6 +2,10 @@ import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { describeFfmpegFailure } from './ffmpegFailure.js';
+
+// Re-exported so existing importers of motion.js keep working.
+export { describeFfmpegFailure };
 
 /**
  * Ken Burns / deterministic still-image motion (worker capability).
@@ -226,16 +230,6 @@ export function buildMotionFilter({ motion, width, height, fps, durationSeconds 
 
 const MOTION_FFMPEG_MAX_BUFFER = 64 * 1024 * 1024;
 
-/**
- * Pure: summarises how an FFmpeg child ended. Records exit status, signal and
- * spawn error code, and keeps BOTH the head and the tail of stderr (the real
- * error is usually above the last few lines).
- */
-export function describeFfmpegFailure(err) {
-  const lines = String(err?.stderr ?? err?.message ?? '').trim().split('\n').map((l) => l.trim()).filter(Boolean);
-  const detail = lines.length > 9 ? [...lines.slice(0, 6), '...', ...lines.slice(-3)] : lines;
-  return `exit=${err?.status ?? '-'} signal=${err?.signal ?? '-'} code=${err?.code ?? '-'} | ${detail.join(' | ')}`;
-}
 
 function probeJson(file, extraArgs = []) {
   const out = execFileSync(
@@ -275,7 +269,7 @@ export function renderMotionClip({ imagePath, outputPath, motion, width, height,
   try {
     execFileSync(
       'ffmpeg',
-      ['-y', '-nostats', '-i', imagePath, '-vf', vf, '-frames:v', String(frames), '-r', String(fps), '-an',
+      ['-y', '-hide_banner', '-nostats', '-i', imagePath, '-vf', vf, '-frames:v', String(frames), '-r', String(fps), '-an',
         '-c:v', videoEncoder, '-pix_fmt', 'yuv420p', path.resolve(outputPath)],
       { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: MOTION_FFMPEG_MAX_BUFFER }
     );
