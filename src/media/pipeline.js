@@ -5,6 +5,7 @@ import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_D
 import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets } from './visualTiming.js';
 import { computeVisualSequencing } from './visualSequencing.js';
+import { resolveStudioSequencing, STUDIO_DECISION } from '../studio/mediaStage.js';
 import { computeSceneSequencing } from './sceneSequencing.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
@@ -349,8 +350,38 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   // (computed just above) as scene-cut candidates instead of a flat
   // equal-share division. Falls back to the plain equal-division
   // timeline unchanged when there's no caption structure to key off of.
-  const sequencedTiming = computeSceneSequencing(visualAssets, captionTiming, narrationDurationSeconds)
-    ?? computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds);
+    // --- Opt-in studio sequencing (src/studio/mediaStage.js; STUDIO_VISUALS=off by default) ---
+  // flag off      -> existing path (scene sequencing / legacy), nothing read or logged.
+  // plan absent   -> existing path, STUDIO_VISUALS_FALLBACK logged (observable).
+  // plan invalid  -> RENDER_FAILED (deterministic); existing visuals are NEVER silently substituted.
+  // plan valid    -> STUDIO_VISUALS_APPLIED logged; studio timing feeds the unchanged code below.
+  let studio;
+  try {
+    studio = resolveStudioSequencing({ dir, visualAssets, narrationDurationSeconds });
+  } catch (err) {
+    return failWith(
+      OUTCOME.RENDER_FAILED, DECISION_LOG_DECISION.RENDER_FAILED,
+      `studio_visuals_config_${err.message}`, err.message,
+      { nature: FAILURE_NATURE.DETERMINISTIC, basis: 'studio_visuals_config_invalid' }
+    );
+  }
+  if (studio.source === 'rejected') {
+    return failWith(
+      OUTCOME.RENDER_FAILED, DECISION_LOG_DECISION.RENDER_FAILED,
+      `studio_plan_rejected_${studio.reason}`, studio.reason,
+      { nature: FAILURE_NATURE.DETERMINISTIC, basis: `studio_plan_rejected_${studio.reason}` }
+    );
+  }
+  if (studio.fallback) {
+    logDecision(storage, { runId, subjectType: 'content_version', subjectId: contentVersion.id, decision: STUDIO_DECISION.FALLBACK, reason: studio.fallback.reason }, nowISO);
+  }
+  if (studio.source === 'studio') {
+    logDecision(storage, { runId, subjectType: 'content_version', subjectId: contentVersion.id, decision: STUDIO_DECISION.APPLIED, reason: `studio_plan_${studio.planChecksum}_${studio.timing.length}_segments` }, nowISO);
+  }
+  const sequencedTiming = studio.source === 'studio'
+    ? studio.timing
+    : (computeSceneSequencing(visualAssets, captionTiming, narrationDurationSeconds)
+      ?? computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds));
 
   // --- Ken Burns motion (worker capability; src/media/motion.js) ---
   // Runs strictly AFTER the rights/checksum/existence gates above and AFTER
