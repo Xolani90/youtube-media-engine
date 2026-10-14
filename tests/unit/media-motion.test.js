@@ -267,7 +267,7 @@ test('F4. KEN_BURNS_MOTION toggle: on by default, explicit off honoured, garbage
 test('F2b. describeFfmpegFailure records status/signal/code and keeps head and tail of long stderr', () => {
   const stderr = Array.from({ length: 20 }, (_, i) => `line${i}`).join('\n');
   const msg = describeFfmpegFailure({ status: 1, signal: null, code: undefined, stderr });
-  assert.match(msg, /^exit=1 signal=- code=- \| line0 \| line1 \| line2 \| line3 \| line4 \| line5 \| \.\.\. \| line17 \| line18 \| line19$/);
+  assert.match(msg, /^exit=1 signal=- code=- \| line0 \| line1 \| line2 \| \.\.\. \| line14 \| line15 \| line16 \| line17 \| line18 \| line19$/);
   const killed = describeFfmpegFailure({ status: null, signal: 'SIGKILL', code: 'ENOBUFS', stderr: 'x' });
   assert.equal(killed, 'exit=- signal=SIGKILL code=ENOBUFS | x');
   assert.equal(describeFfmpegFailure({ message: 'spawn ffmpeg ENOENT', code: 'ENOENT' }), 'exit=- signal=- code=ENOENT | spawn ffmpeg ENOENT');
