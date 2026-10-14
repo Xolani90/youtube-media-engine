@@ -45,6 +45,7 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
   let candidates = [];
   let discoveryFailed = false;
   let discoveryError = null;
+  let discoveryFailures = [];
   try {
     const discovery = await traceAsync(
       'research.discover', { provider: provider?.id },
@@ -52,6 +53,10 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
       (d) => ({ candidates: d?.candidates?.length, failures: d?.failures?.length })
     );
     candidates = discovery.candidates || [];
+    // Providers never throw: HTTP/network/parse problems arrive as failures[] with candidates [].
+    discoveryFailures = Array.isArray(discovery.failures)
+      ? discovery.failures.map((f) => String(f?.error ?? f)).slice(0, 5)
+      : [];
   } catch (err) {
     // Discovery failure is isolated: the acquisition run reports zero
     // acquired sources rather than throwing (v0.3 S3: three-way failure
@@ -115,5 +120,5 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
 
   const candidatesExhausted = candidatesVisited === candidates.length;
 
-  return { acquired, attemptsUsed, candidatesConsidered: candidates.length, candidatesExhausted, discoveryFailed, discoveryError };
+  return { acquired, attemptsUsed, candidatesConsidered: candidates.length, candidatesExhausted, discoveryFailed, discoveryError, discoveryFailures };
 }

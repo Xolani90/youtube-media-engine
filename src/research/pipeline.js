@@ -614,6 +614,17 @@ async function runResearchBody({
       return { project: storage.get('SELECT * FROM research_projects WHERE id = ?', [project.id]), stopReason: 'SOURCE_DISCOVERY_FAILED' };
     }
 
+    if ((acquisitionResult.candidatesConsidered ?? 0) === 0) {
+      // Log only: zero candidates must never be indistinguishable from "nothing to find".
+      const failureNote = Array.isArray(acquisitionResult.discoveryFailures) && acquisitionResult.discoveryFailures.length
+        ? ('provider_reported_failures: ' + acquisitionResult.discoveryFailures.join(' | ')).slice(0, 500)
+        : 'provider_returned_no_candidates';
+      logDecision(storage, {
+        runId, stage: RESEARCH_STAGE.SOURCE_DISCOVERY, subjectType: 'research_project', subjectId: project.id,
+        decision: 'NO_CANDIDATES', reason: failureNote, provider: sourceProvider?.id ?? null
+      });
+    }
+
     researchDiag = newResearchDiag();
     // ADR-0039: every acquired source, its decision rows and the
     // SOURCES_PERSISTED checkpoint commit atomically.

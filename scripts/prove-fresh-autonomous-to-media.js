@@ -245,8 +245,8 @@ async function main() {
     if (!allOk) process.exitCode = 1;
   } finally {
     try { storage.close(); } catch { /* ignore */ }
-    if (process.env.KEEP_TMP === '1') {
-      log(`KEEP_TMP=1: disposable dir KEPT for inspection: ${dir} (delete it yourself afterwards)`);
+    if (['1', 'true'].includes(String(process.env.KEEP_TMP ?? '').trim().toLowerCase())) {
+      log(`KEEP_TMP=${process.env.KEEP_TMP}: disposable dir KEPT for inspection: ${dir} (delete it yourself afterwards)`);
     } else {
       fs.rmSync(dir, { recursive: true, force: true });
       log('Disposable dir removed.');
