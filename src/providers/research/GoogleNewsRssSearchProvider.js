@@ -160,8 +160,44 @@ export class GoogleNewsRssSearchProvider extends ResearchSourceProvider {
       candidates.push(candidate);
     }
 
+    // Diagnostic visibility only -- no change to which items are excluded.
+    // When parsing yielded items but EVERY one was a Google News wrapper
+    // URL, "0 candidates, no failure" is indistinguishable from "feed was
+    // empty". Surface it through the existing `failures` contract.
+    // Ordinary deduplication (alreadyAcquiredUrls), missing links, or a mix
+    // of wrapper and other exclusions is NOT a provider failure.
+    if (candidates.length === 0) {
+      const counts = countParsedItemOutcomes(items, alreadySeen);
+      if (counts.wrapper === counts.parsed) {
+        return { candidates, failures: [{ error: describeAllWrapperExclusion(counts) }] };
+      }
+    }
+
     return { candidates, failures: [] };
   }
+}
+
+/**
+ * Classifies every parsed item (the whole feed, independent of the
+ * maxResults early-exit) by why it would not become a candidate. Wrapper is
+ * checked in the same order as the candidate loop: missing link first, then
+ * wrapper, then already-acquired.
+ */
+function countParsedItemOutcomes(items, alreadySeen) {
+  const counts = { parsed: items.length, wrapper: 0, missingLink: 0, alreadyAcquired: 0 };
+  for (const item of items) {
+    if (!item || typeof item.link !== 'string' || !item.link) counts.missingLink++;
+    else if (isGoogleNewsRssWrapperUrl(item.link)) counts.wrapper++;
+    else if (alreadySeen.has(item.link)) counts.alreadyAcquired++;
+  }
+  return counts;
+}
+
+function describeAllWrapperExclusion({ parsed, wrapper }) {
+  return `Google News RSS returned ${parsed} parsed item(s) but all ${wrapper} were excluded as ` +
+    'news.google.com/rss/articles wrapper URLs (unresolvable to publisher content); ' +
+    `0 usable candidates (parsed=${parsed}, wrapper=${wrapper}, missing_link=0, already_acquired=0). ` +
+    'This provider cannot produce candidates from the current feed; use a different research source provider.';
 }
 
 /**
