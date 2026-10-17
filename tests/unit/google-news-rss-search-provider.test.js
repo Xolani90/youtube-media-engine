@@ -191,8 +191,86 @@ test('wrapper candidates do not consume maxResults slots', async () => {
   assert.deepEqual(result.candidates.map((c) => c.url), ['https://example.com/a', 'https://example.com/b']);
 });
 
-test('feed of only wrapper URLs: zero candidates, no failure, no throw', async () => {
+test('feed of only wrapper URLs: zero candidates, one actionable failure with counts, no throw', async () => {
   const fetchImpl = async () => xmlResponse(200, feed([{ title: 'w', link: WRAPPER_URL }]));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.deepEqual(result.candidates, []);
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0].error, /all 1 were excluded as news\.google\.com\/rss\/articles wrapper URLs/);
+  assert.match(result.failures[0].error, /parsed=1, wrapper=1, missing_link=0, already_acquired=0/);
+});
+
+test('all-wrapper feed: counts cover the whole feed, not just maxResults; failure shape is { error } only', async () => {
+  const items = Array.from({ length: 102 }, (_, i) => ({ title: `w${i}`, link: `https://news.google.com/rss/articles/CBMi${i}?oc=5` }));
+  const fetchImpl = async () => xmlResponse(200, feed(items));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({ query: 'SECRET-LOOKING-QUERY', maxResults: 1 });
+  assert.deepEqual(result.candidates, []);
+  assert.equal(result.failures.length, 1);
+  assert.deepEqual(Object.keys(result.failures[0]), ['error']);
+  assert.match(result.failures[0].error, /returned 102 parsed item\(s\) but all 102 were excluded/);
+  assert.match(result.failures[0].error, /parsed=102, wrapper=102/);
+  // The diagnostic never echoes the query or request URL.
+  assert.equal(result.failures[0].error.includes('SECRET-LOOKING-QUERY'), false);
+});
+
+test('wrapper + usable publisher URL: candidates returned, no failure', async () => {
+  const fetchImpl = async () => xmlResponse(200, feed([
+    { title: 'w', link: WRAPPER_URL },
+    { title: 'p', link: 'https://www.publisher.com/story' }
+  ]));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.candidates.map((c) => c.url), ['https://www.publisher.com/story']);
+});
+
+test('wrapper + already-acquired publisher URL: zero candidates but dedup is not a provider failure', async () => {
+  const fetchImpl = async () => xmlResponse(200, feed([
+    { title: 'w', link: WRAPPER_URL },
+    { title: 'seen', link: 'https://www.publisher.com/story' }
+  ]));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({
+    query: 'q', maxResults: 5, alreadyAcquiredUrls: ['https://www.publisher.com/story']
+  });
+  assert.deepEqual(result.candidates, []);
+  assert.deepEqual(result.failures, []);
+});
+
+test('only already-acquired publisher URLs: zero candidates, no failure', async () => {
+  const fetchImpl = async () => xmlResponse(200, feed([
+    { title: 'a', link: 'https://example.com/a' },
+    { title: 'b', link: 'https://example.com/b' }
+  ]));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({
+    query: 'q', maxResults: 5, alreadyAcquiredUrls: ['https://example.com/a', 'https://example.com/b']
+  });
+  assert.deepEqual(result.candidates, []);
+  assert.deepEqual(result.failures, []);
+});
+
+test('wrapper + missing-link items (no usable or deduped publisher URL): not reported as an all-wrapper failure', async () => {
+  const fetchImpl = async () => xmlResponse(200, feed([
+    { title: 'w', link: WRAPPER_URL },
+    { title: 'No link' }
+  ]));
+  const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
+
+  const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
+  assert.deepEqual(result.candidates, []);
+  assert.deepEqual(result.failures, []);
+});
+
+test('only missing-link items: zero candidates, no failure', async () => {
+  const fetchImpl = async () => xmlResponse(200, feed([{ title: 'No link' }]));
   const provider = new GoogleNewsRssSearchProvider({ fetchImpl });
 
   const result = await provider.discoverCandidates({ query: 'q', maxResults: 5 });
