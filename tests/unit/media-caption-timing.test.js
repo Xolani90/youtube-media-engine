@@ -159,3 +159,28 @@ test('computeCaptionTiming: preserves caption text and ordering verbatim', () =>
   const timing = computeCaptionTiming(captions, 6);
   assert.deepEqual(timing.map((c) => c.text), captions);
 });
+
+// --- orphan-tail regression (pool-proof sheet showed a lone "target." caption) ---
+
+test('segmentCaptions: sentence barely over maxLength does not strand a one-word tail', () => {
+  const sentence = 'Even a simple lock slows a burglar down and makes the whole house a harder target.';
+  assert.equal(sentence.length, 82); // 2 over the 80 cap: the exact production case
+  const result = segmentCaptions(`A sturdy padlock on a front door is the first line of home security. ${sentence}`, 80);
+  assert.deepEqual(result, [
+    'A sturdy padlock on a front door is the first line of home security.',
+    'Even a simple lock slows a burglar down and makes the whole house a',
+    'harder target.',
+  ]);
+  assert.ok(result.every((c) => c.length <= 80));
+  assert.equal(result.slice(1).join(' '), sentence); // text preserved verbatim, in order
+});
+
+test('segmentCaptions: orphan-tail rebalance leaves fitting sentences and long splits untouched', () => {
+  assert.deepEqual(segmentCaptions('Short one. Another short one.', 80), ['Short one.', 'Another short one.']);
+  const long = 'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.';
+  const out = segmentCaptions(long, 40);
+  assert.equal(out.join(' '), long);
+  assert.ok(out.every((c) => c.length <= 40));
+  // a single word longer than maxLength is still kept whole
+  assert.deepEqual(segmentCaptions('Supercalifragilisticexpialidocious', 10), ['Supercalifragilisticexpialidocious']);
+});

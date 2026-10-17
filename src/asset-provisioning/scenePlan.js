@@ -99,6 +99,55 @@ function chunkSentences(sentences, k) {
 
 function round4(n) { return Math.round(n * 10000) / 10000; }
 
+/**
+ * Topic-aware chunking. chunkSentences() balances by characters only, so uneven
+ * sentence lengths can move a scene boundary into the middle of a topic (the second
+ * proof script put the solar sentence in the coffee scene). When there is exactly one
+ * curated visual term per scene and at least one sentence shares a word with a term,
+ * choose the contiguous split that maximises term<->sentence word overlap (term j is
+ * scored against chunk j, narrative order, as the lexical step below already assumes),
+ * breaking ties by character balance. Returns null when it does not apply, so the
+ * caller keeps the existing behaviour.
+ */
+function chunkByTerms(sentences, terms, k) {
+  const n = sentences.length;
+  if (terms.length !== k || n < k || k < 2) return null;
+  const termTok = terms.map((t) => new Set(tokens(t)));
+  const overlap = sentences.map((s) => {
+    const st = new Set(tokens(s));
+    return termTok.map((tt) => [...tt].filter((w) => st.has(w)).length);
+  });
+  if (!overlap.some((row) => row.some((v) => v > 0))) return null;
+  const chars = sentences.map((s) => s.length);
+  const total = chars.reduce((a, b) => a + b, 0);
+  const pre = [0]; chars.forEach((c) => pre.push(pre[pre.length - 1] + c));
+  const preO = termTok.map((_, j) => { const a = [0]; overlap.forEach((r) => a.push(a[a.length - 1] + r[j])); return a; });
+  // best[j][i]: best {score, dev} placing the first i sentences into chunks 0..j-1
+  const best = Array.from({ length: k + 1 }, () => Array(n + 1).fill(null));
+  best[0][0] = { score: 0, dev: 0, from: -1 };
+  for (let j = 1; j <= k; j++) {
+    for (let i = j; i <= n - (k - j); i++) {
+      for (let m = j - 1; m < i; m++) {
+        const prev = best[j - 1][m];
+        if (!prev) continue;
+        const score = prev.score + (preO[j - 1][i] - preO[j - 1][m]);
+        const share = (pre[i] - pre[m]) / total - 1 / k;
+        const dev = prev.dev + share * share;
+        const cur = best[j][i];
+        if (!cur || score > cur.score || (score === cur.score && dev < cur.dev - 1e-12)) best[j][i] = { score, dev, from: m };
+      }
+    }
+  }
+  if (!best[k][n]) return null;
+  const cuts = []; let i = n;
+  for (let j = k; j >= 1; j--) { const m = best[j][i].from; cuts.unshift([m, i]); i = m; }
+  return cuts.map(([a, b]) => ({
+    text: sentences.slice(a, b).join(' '),
+    span: { start: round4(pre[a] / total), end: round4(pre[b] / total) }
+  }));
+}
+
+
 function topKeywords(text, n = 2) {
   const freq = new Map();
   for (const t of tokens(text)) freq.set(t, (freq.get(t) ?? 0) + 1);
@@ -121,10 +170,10 @@ export function planScenes({ visualIdeas, scriptBody, fallbackQuery = null } = {
   const words = String(scriptBody).split(/\s+/).filter(Boolean).length;
   const estSeconds = words / o.WORDS_PER_SECOND;
   const k = Math.max(o.MIN_SCENES, Math.min(o.MAX_SCENES, Math.ceil(estSeconds / o.SECONDS_PER_SCENE), sentences.length));
-  const chunks = chunkSentences(sentences, k);
+  const terms = splitVisualTerms(visualIdeas);
+  const chunks = chunkByTerms(sentences, terms, k) ?? chunkSentences(sentences, k);
   if (chunks.length < o.MIN_SCENES) return [];
 
-  const terms = splitVisualTerms(visualIdeas);
   const chunkTokens = chunks.map((c) => new Set(tokens(c.text)));
   const termTokens = terms.map((t) => tokens(t));
 
