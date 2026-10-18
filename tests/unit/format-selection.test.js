@@ -74,14 +74,15 @@ test('segment exactly at the minimum is viable (boundary)', () => {
   assert.equal(r.viable.short, true);
 });
 
-test('neither format proven viable falls back to LONG_FORM_ONLY (pre-selector behaviour), flagged as fallback', () => {
+test('neither format proven viable falls back to UNDECIDED (legacy: both formats eligible), flagged as fallback', () => {
   const r = decideVideoFormat(signals({
     verifiedClaims: 0,
     shortSegment: { selected: false, reason: 'NO_VALID_SEGMENT' }
   }));
-  assert.equal(r.decision, FORMAT_DECISION.LONG_FORM_ONLY);
-  assert.equal(r.rule, 'FALLBACK_LONG_NO_FORMAT_PROVEN');
+  assert.equal(r.decision, FORMAT_DECISION.UNDECIDED);
+  assert.equal(r.rule, 'FALLBACK_NO_FORMAT_PROVEN');
   assert.deepEqual(r.viable, { long: false, short: false });
+  assert.deepEqual(formatsForDecision(r.decision), { longForm: true, shortForm: true });
 });
 
 test('zero verified claims is a real zero, not a missing signal', () => {

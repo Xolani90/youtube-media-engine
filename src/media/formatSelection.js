@@ -146,11 +146,13 @@ export function decideVideoFormat(signals, thresholds = FORMAT_SELECTION_THRESHO
     decision = FORMAT_DECISION.SHORT_FORM_ONLY;
     rule = 'SHORT_ONLY_LONG_NOT_VIABLE';
   } else {
-    // Neither proven viable: keep today's behaviour (long-form is what exists
-    // and what was published when no short segment could be cut).
-    decision = FORMAT_DECISION.LONG_FORM_ONLY;
-    rule = 'FALLBACK_LONG_NO_FORMAT_PROVEN';
-    reasons.push('neither format proven viable; falling back to long-form (pre-selector behaviour)');
+    // Neither proven viable: do NOT steer. Recording LONG_FORM_ONLY here would
+    // exclude every configured short-form publication provider, which the
+    // pre-selector engine did not do. UNDECIDED = legacy behaviour (both
+    // formats stay eligible; the short-form stage reports its own outcome).
+    decision = FORMAT_DECISION.UNDECIDED;
+    rule = 'FALLBACK_NO_FORMAT_PROVEN';
+    reasons.push('neither format proven viable; no format steering applied (pre-selector behaviour preserved)');
   }
 
   return { decision, rule, reasons, missingSignals, viable };

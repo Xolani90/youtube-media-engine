@@ -284,6 +284,50 @@ test('missing decisive signal (no research project): UNDECIDED, reason + missing
   }
 });
 
+test('neither format proven viable: UNDECIDED fallback keeps legacy behaviour (short stage runs, no short-form provider excluded)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  try {
+    // Thin evidence (0 claims) and a 10s narration: no viable long form, no viable short (< minimum).
+    const item = seedItem(storage, { state: 'FINAL_COMPLIANCE', verifiedClaims: 0, sources: 0 });
+    seedCraftedLongFormArtifact(storage, item, { durationSeconds: 10 });
+
+    // Baseline: legacy provider selection for an item with NO FORMAT_* decision.
+    const legacy = {};
+    for (const p of ['youtube', 'youtube_shorts', 'tiktok', 'facebook_reels']) {
+      legacy[p] = selectedBriefIds(selectEligiblePublications(storage, p));
+    }
+
+    let called = 0;
+    const out = runFormatAwareShortForm({
+      storage, contentBriefId: item.contentBriefId,
+      produceShortForm: () => { called += 1; return { outcome: OUTCOME.RENDERED }; }
+    });
+    assert.equal(out.outcome, OUTCOME.RENDERED);
+    assert.equal(called, 1, 'short-form production must still be attempted (legacy behaviour)');
+
+    const row = getFormatDecision(storage, item.contentVersionId);
+    assert.equal(row.decision, FORMAT_DECISION.UNDECIDED);
+    const snap = JSON.parse(row.config_snapshot);
+    assert.equal(snap.rule, 'FALLBACK_NO_FORMAT_PROVEN');
+    assert.deepEqual(snap.viable, { long: false, short: false });
+
+    // Same provider selection as the no-decision baseline, and the item is not excluded for any provider.
+    for (const p of Object.keys(legacy)) {
+      assert.deepEqual(selectedBriefIds(selectEligiblePublications(storage, p)), legacy[p], p);
+    }
+    for (const p of ['youtube_shorts', 'tiktok', 'facebook_reels']) {
+      assert.ok(selectedBriefIds(selectEligiblePublications(storage, p)).includes(item.contentBriefId), p);
+    }
+
+    // Idempotent: a second call records no second decision row.
+    runFormatAwareShortForm({ storage, contentBriefId: item.contentBriefId, produceShortForm: () => ({ outcome: OUTCOME.ALREADY_RENDERED }) });
+    assert.equal(storage.get(`SELECT COUNT(*) AS n FROM decision_log WHERE subject_id = ? AND decision LIKE 'FORMAT_%'`, [item.contentVersionId]).n, 1);
+  } finally {
+    cleanup(storage, dbPath);
+  }
+});
+
 test('invalid long-form render_spec (unparseable) -> UNDECIDED with narration_duration + short_segment missing; never throws', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
@@ -434,15 +478,18 @@ test('REAL render, SHORT_FORM_ONLY: ~25s narration + thin evidence -> real 1080x
   }
 });
 
-test('REAL render, LONG_FORM_ONLY: narration too short for a viable short (< min) and thin evidence -> fallback long-form, NO short rendered', async () => {
+test('REAL render, neither format proven (narration < min, thin evidence): UNDECIDED fallback -> legacy short-form production is attempted, not skipped', async () => {
   const r = await realRender({ verifiedClaims: 0, sources: 0 }, 1);
   try {
     const out = runFormatAwareShortForm({
       storage: r.storage, contentBriefId: r.item.contentBriefId, artifactsDir: r.mediaDir, produceShortForm: runShortFormProduction
     });
-    assert.equal(out.outcome, OUTCOME.SHORT_FORM_NOT_SELECTED);
-    assert.equal(getFormatDecision(r.storage, r.item.contentVersionId).decision, FORMAT_DECISION.LONG_FORM_ONLY);
-    assert.equal(r.storage.get('SELECT COUNT(*) AS n FROM short_form_media_artifacts').n, 0);
+    const row = getFormatDecision(r.storage, r.item.contentVersionId);
+    assert.equal(row.decision, FORMAT_DECISION.UNDECIDED);
+    assert.equal(JSON.parse(row.config_snapshot).rule, 'FALLBACK_NO_FORMAT_PROVEN');
+    // The selector must not have suppressed the legacy short-form stage; whatever it
+    // reports is its own, unchanged outcome.
+    assert.notEqual(out.outcome, OUTCOME.SHORT_FORM_NOT_SELECTED);
     assert.equal(r.storage.get('SELECT COUNT(*) AS n FROM media_artifacts').n, 1);
   } finally {
     cleanup(r.storage, r.dbPath, ...r.dirs);
