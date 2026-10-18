@@ -127,6 +127,20 @@ test('eligible diagnostics: equal scores among eligible candidates (exact tie) k
   assert.equal(r.skippedUsed, true);
 });
 
+test('eligible diagnostics: skipping an equally scored used candidate is not a skip of a higher score', () => {
+  // x was used by non-adjacent scene 0 and ranks first by index at scene 2; y has the same score.
+  const r = run3({ x: 0.7, m: 0.5, y: 0.7, z: 0.2 }, pool('x', 'y', 'z'));
+  assert.equal(r.pick, 'y');
+  assert.equal(r.skippedUsed, false); // no higher-scoring candidate was skipped
+  assert.equal(r.runnerUp, 'z');
+});
+
+test('eligible diagnostics: skippedUsed stays true when a strictly higher score was skipped', () => {
+  const r = run3({ x: 0.71, m: 0.5, y: 0.7, z: 0.2 }, pool('x', 'y', 'z'));
+  assert.equal(r.pick, 'y');
+  assert.equal(r.skippedUsed, true);
+});
+
 test('eligible diagnostics: zero scores are real scores, and zero spread is handled', () => {
   const allZero = run({ a: 0, b: 0, c: 0 });
   assert.equal(allZero.pick, 'a');
@@ -215,7 +229,7 @@ test('selection policy unchanged: picks equal the original rule over many seeded
       assert.ok(r.margin === null || r.margin >= 0);
       assert.ok(r.spread >= (r.margin ?? 0));
       assert.notEqual(r.runnerUp, r.pick);
-      if (r.skippedUsed) assert.ok(order[0].score >= r.score);
+      if (r.skippedUsed) assert.ok(order[0].score > r.score);
     }
   }
 });

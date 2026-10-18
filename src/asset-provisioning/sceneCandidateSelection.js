@@ -31,7 +31,8 @@
  * ELIGIBLE candidates only: scored candidates that were not used by a non-adjacent
  * earlier scene. A candidate skipped by the reuse rule is not a runner-up, is not part
  * of the margin or spread, and cannot make a pick look like a near-tie. `skippedUsed`
- * is true when one or more higher-scoring candidates were skipped for that reason, so a
+ * is true when one or more strictly higher-scoring candidates were skipped for that reason
+ * (an equally scored candidate that merely ranked first by index does not count), so a
  * pick forced by the reuse rule can be told apart from a genuinely close choice. If every
  * scored candidate was used earlier, none is excluded (the policy falls back to the top
  * score) and the diagnostics cover all scored candidates with skippedUsed false.
@@ -71,7 +72,7 @@ export function selectPerScene({ scenes, pools, scoreFor, nearTieFraction = NEAR
       firstHitScore: first ? first.score : null,
       reason: best.ci === 0 ? 'first_hit_is_best' : 'ranked_over_first_hit',
       reusesPrevious: si > 0 && chosen[si - 1]?.pick === best.id,
-      skippedUsed: unused.length > 0 && order[0].ci !== best.ci,
+      skippedUsed: unused.length > 0 && order[0].score > best.score,
       runnerUp: runnerUp ? runnerUp.id : null,
       runnerUpScore: runnerUp ? runnerUp.score : null,
       margin,
