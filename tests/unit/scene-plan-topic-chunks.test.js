@@ -51,3 +51,25 @@ test('no overlap with any term, or term count != scene count: behaviour unchange
   const three = planScenes({ visualIdeas: 'balloon; coffee; solar', scriptBody: body });
   assert.ok(three.length >= 2);
 });
+
+test('terms listed out of narrative order give the same scene cuts as terms in order', () => {
+  const body = SENTENCES.join(' ');
+  const inOrder = planScenes({ visualIdeas: IDEAS, scriptBody: body });
+  const shuffled = 'city night traffic; hot air balloon sky; solar panels field; mountain hiking trail; coffee beans roasting';
+  const plan = planScenes({ visualIdeas: shuffled, scriptBody: body });
+  assert.equal(plan.length, 5);
+  assert.deepEqual(plan.map((s) => s.span), inOrder.map((s) => s.span));
+  // each scene still leads with the term that matches its own text
+  assert.deepEqual(plan.map((s) => s.queries[0]),
+    ['hot air balloon sky', 'coffee beans roasting', 'solar panels field', 'city night traffic', 'mountain hiking trail']);
+});
+
+test('a term with no word overlap keeps its slot while the others are ordered by where they are mentioned', () => {
+  const body = SENTENCES.join(' ');
+  const ideas = 'solar panels field; zzzz; hot air balloon sky; mountain hiking trail; coffee beans roasting';
+  const plan = planScenes({ visualIdeas: ideas, scriptBody: body });
+  assert.equal(plan.length, 5);
+  const sc = plan.map((s) => s.span);
+  assert.equal(sc[0].start, 0); assert.equal(sc[4].end, 1);
+  for (let i = 1; i < 5; i++) assert.equal(sc[i].start, sc[i - 1].end);
+});
