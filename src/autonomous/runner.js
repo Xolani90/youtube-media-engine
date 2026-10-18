@@ -10,6 +10,7 @@ import { runProduction } from '../production/pipeline.js';
 import { runAssetProvisioning } from '../asset-provisioning/pipeline.js';
 import { runRightsVerification } from '../rights-verification/pipeline.js';
 import { runMediaProduction, runShortFormProduction } from '../media/pipeline.js';
+import { runFormatAwareShortForm } from '../media/formatSelection.js';
 import { runFinalCompliance } from '../compliance/pipeline.js';
 import { runPublication } from '../publication/pipeline.js';
 import { PROVIDER_REGISTRY } from '../publication/providerRegistry.js';
@@ -243,20 +244,37 @@ function buildStages(deps, startedMode) {
       // facebook_reels publication requires (resolveMediaForPublication,
       // target SHORT_FORM). Calls the existing, unmodified
       // runShortFormProduction; never transitions content_versions.state.
+      //
+      // Autonomous format selection (src/media/formatSelection.js) runs first,
+      // inside this stage: it records one FORMAT_* decision_log row per
+      // content_version (LONG_FORM_ONLY / SHORT_FORM_ONLY / BOTH / UNDECIDED)
+      // and the derivative is produced only when the decision includes it.
+      // SHORT_FORM_NOT_SELECTED is a normal completion (selector then skips
+      // the item), so the sweep terminates exactly as before.
       select: selectEligibleShortFormProductions,
       isSuccess: (result) =>
-        result?.outcome === MEDIA_OUTCOME.RENDERED || result?.outcome === MEDIA_OUTCOME.ALREADY_RENDERED,
+        result?.outcome === MEDIA_OUTCOME.RENDERED ||
+        result?.outcome === MEDIA_OUTCOME.ALREADY_RENDERED ||
+        result?.outcome === MEDIA_OUTCOME.SHORT_FORM_NOT_SELECTED,
       // Run-local pacing only (in-memory, this invocation): a failed render or
       // validation is not repeated on every sweep. Records no durable attempt.
       consumedRetryAttempt: (result) =>
         result?.outcome === MEDIA_OUTCOME.RENDER_FAILED || result?.outcome === MEDIA_OUTCOME.VALIDATION_FAILED,
       run: (item, runId) =>
-        (fn['short-form-production'] ?? runShortFormProduction)({
-          storage: deps.storage,
-          contentBriefId: item.contentBriefId,
-          artifactsDir: deps.media?.artifactsDir,
-          runId
-        })
+        fn['short-form-production']
+          ? fn['short-form-production']({
+              storage: deps.storage,
+              contentBriefId: item.contentBriefId,
+              artifactsDir: deps.media?.artifactsDir,
+              runId
+            })
+          : runFormatAwareShortForm({
+              storage: deps.storage,
+              contentBriefId: item.contentBriefId,
+              artifactsDir: deps.media?.artifactsDir,
+              runId,
+              produceShortForm: runShortFormProduction
+            })
     },
     {
       name: 'final-compliance',
