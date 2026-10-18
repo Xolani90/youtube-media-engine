@@ -63,3 +63,10 @@ test('scheduled-run.yml bounds the job with a timeout so a hung run cannot hold 
   const minutes = Number(m[1]);
   assert.ok(minutes >= 30 && minutes <= 120, `timeout-minutes (${minutes}) must leave room for a throttled run but stay bounded`);
 });
+
+// The application default narration provider is strict Kokoro (model download,
+// slow on CPU). The scheduled run stays on the espeak-ng this workflow installs.
+test('scheduled-run.yml pins NARRATION_PROVIDER to espeak-ng at job level', () => {
+  const yaml = readFileSync(workflowPath, 'utf8');
+  assert.match(yaml, /^ {6}NARRATION_PROVIDER: 'espeak-ng'\s*$/m);
+});

@@ -48,9 +48,14 @@ function runKokoro(text, outputWavPath, { timeoutMs = resolveKokoroTimeoutMs() }
   }
 }
 
-/** Provider policy from NARRATION_PROVIDER: 'espeak-ng' (default) | 'auto' | 'kokoro'. */
+// Default narration provider. 'kokoro' is strict: a Kokoro failure fails narration
+// (NARRATION_FAILED) instead of silently shipping the robotic espeak-ng voice.
+// Set to NARRATION_PROVIDER.AUTO to permit a recorded fallback to espeak-ng.
+export const DEFAULT_NARRATION_PROVIDER = NARRATION_PROVIDER.KOKORO;
+
+/** Provider policy from NARRATION_PROVIDER: 'kokoro' (default) | 'auto' | 'espeak-ng'. */
 export function resolveNarrationProviderMode(env = process.env) {
-  const v = (env.NARRATION_PROVIDER || NARRATION_PROVIDER.ESPEAK).trim().toLowerCase();
+  const v = (env.NARRATION_PROVIDER || DEFAULT_NARRATION_PROVIDER).trim().toLowerCase();
   if (![NARRATION_PROVIDER.ESPEAK, NARRATION_PROVIDER.AUTO, NARRATION_PROVIDER.KOKORO].includes(v)) {
     throw new Error(`NARRATION_PROVIDER must be one of espeak-ng, auto, kokoro (got "${v}")`);
   }
@@ -61,9 +66,9 @@ export function resolveNarrationProviderMode(env = process.env) {
  * Synthesizes narration audio for `text` to `outputWavPath`.
  *
  * Provider mode (NARRATION_PROVIDER, or opts.mode):
- *   espeak-ng  espeak-ng only (default until Kokoro is proven on the host)
+ *   espeak-ng  espeak-ng only (explicit opt-in; used by the test suite)
  *   auto       Kokoro preferred; ANY Kokoro failure falls back to espeak-ng
- *   kokoro     Kokoro only; a failure throws (no silent downgrade)
+ *   kokoro     Kokoro only (DEFAULT); a failure throws (no silent downgrade)
  *
  * Returns { provider, fallbackReason } where `provider` is the engine that
  * ACTUALLY produced the file, so callers can record it. Throws on failure of
