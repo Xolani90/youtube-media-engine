@@ -376,6 +376,11 @@ export function selectEligiblePublications(storage, provider = 'youtube') {
   // provider)) -- a YouTube quarantine must never exclude Facebook
   // selection, and vice versa; each provider retries/quarantines
   // independently.
+  // Format decision (formatSelection.js): a FORMAT_* decision that excludes THIS
+  // provider's target removes only items with no publications row for this
+  // provider. An existing row (PENDING / AMBIGUOUS / retryable FAILED) must stay
+  // selectable so the pipeline can still reconcile an attempt made before, or
+  // despite, the decision -- an AMBIGUOUS upload may really be live.
   return storage
     .all(
       `SELECT content_brief_id FROM content_versions
@@ -393,8 +398,9 @@ export function selectEligiblePublications(storage, provider = 'youtube') {
        AND id NOT IN (
              SELECT subject_id FROM decision_log
              WHERE subject_type = 'content_version' AND decision = ?
+               AND subject_id NOT IN (SELECT content_version_id FROM publications WHERE provider = ?)
            )`,
-      [provider, provider, excludingDecisionForProvider(provider)]
+      [provider, provider, excludingDecisionForProvider(provider), provider]
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }

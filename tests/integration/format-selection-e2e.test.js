@@ -380,6 +380,36 @@ test('legacy items with no FORMAT_* decision keep today\'s selection exactly (se
   }
 });
 
+test('format exclusion never hides an existing publication row for that provider (reconciliation stays selectable)', async () => {
+  const { storage, dbPath } = freshStorage();
+  await storage.migrate();
+  try {
+    // LONG_FORM_ONLY: deep material, first segment alone exceeds the short cap.
+    const item = seedItem(storage, { state: 'PRODUCED', verifiedClaims: 6, sources: 3 });
+    const mediaId = seedCraftedLongFormArtifact(storage, item, { durationSeconds: 300, segmentSeconds: 150 });
+    assert.equal(runFormatSelection({ storage, contentBriefId: item.contentBriefId }).decision, FORMAT_DECISION.LONG_FORM_ONLY);
+
+    const insertRow = (provider, status) =>
+      storage.run(
+        `INSERT INTO publications (id, content_version_id, media_artifact_id, provider, status, request_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, '{}', ?, ?)`,
+        [uuid(), item.contentVersionId, mediaId, provider, status, nowISO(), nowISO()]
+      );
+
+    // No row yet: the excluded short-form provider does not see the item.
+    assert.deepEqual(selectEligiblePublications(storage, 'youtube_shorts'), []);
+
+    // An AMBIGUOUS attempt for that provider already exists: it must still be selected.
+    insertRow('youtube_shorts', 'AMBIGUOUS');
+    assert.deepEqual(selectedBriefIds(selectEligiblePublications(storage, 'youtube_shorts')), [item.contentBriefId]);
+
+    // A row for a DIFFERENT provider is not an exemption: tiktok stays excluded.
+    assert.deepEqual(selectEligiblePublications(storage, 'tiktok'), []);
+  } finally {
+    cleanup(storage, dbPath);
+  }
+});
+
 test('analytics: availability only. Enough SUCCESS snapshots for BOTH formats flips the context flag but never the decision', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
