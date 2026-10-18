@@ -100,6 +100,26 @@ function chunkSentences(sentences, k) {
 function round4(n) { return Math.round(n * 10000) / 10000; }
 
 /**
+ * Returns a permutation of term indices: terms that appear in the script are placed in the
+ * order of their overlap-weighted mean sentence position (ties keep the original order);
+ * terms with no overlap stay at their original index. Identity when already in order.
+ */
+function orderTermsByMention(overlap, k) {
+  const pos = Array.from({ length: k }, (_, j) => {
+    let w = 0; let sum = 0;
+    overlap.forEach((row, i) => { w += row[j]; sum += row[j] * i; });
+    return w > 0 ? sum / w : null;
+  });
+  const movable = pos.map((p, j) => ({ j, p })).filter((x) => x.p !== null)
+    .sort((a, b) => a.p - b.p || a.j - b.j);
+  const out = Array(k).fill(-1);
+  pos.forEach((p, j) => { if (p === null) out[j] = j; });
+  let m = 0;
+  for (let slot = 0; slot < k; slot++) if (out[slot] < 0) out[slot] = movable[m++].j;
+  return out;
+}
+
+/**
  * Topic-aware chunking. chunkSentences() balances by characters only, so uneven
  * sentence lengths can move a scene boundary into the middle of a topic (the second
  * proof script put the solar sentence in the coffee scene). When there is exactly one
@@ -112,12 +132,18 @@ function round4(n) { return Math.round(n * 10000) / 10000; }
 function chunkByTerms(sentences, terms, k) {
   const n = sentences.length;
   if (terms.length !== k || n < k || k < 2) return null;
-  const termTok = terms.map((t) => new Set(tokens(t)));
-  const overlap = sentences.map((s) => {
+  const tokSets = terms.map((t) => new Set(tokens(t)));
+  const rawOverlap = sentences.map((s) => {
     const st = new Set(tokens(s));
-    return termTok.map((tt) => [...tt].filter((w) => st.has(w)).length);
+    return tokSets.map((tt) => [...tt].filter((w) => st.has(w)).length);
   });
-  if (!overlap.some((row) => row.some((v) => v > 0))) return null;
+  if (!rawOverlap.some((row) => row.some((v) => v > 0))) return null;
+  // The curated terms are not guaranteed to be listed in the order the script mentions them,
+  // and the scoring below pairs term j with chunk j. Order the terms by the overlap-weighted
+  // mean sentence position first; a term with no overlap keeps its own slot.
+  const order = orderTermsByMention(rawOverlap, k);
+  const termTok = order.map((j) => tokSets[j]);
+  const overlap = rawOverlap.map((row) => order.map((j) => row[j]));
   const chars = sentences.map((s) => s.length);
   const total = chars.reduce((a, b) => a + b, 0);
   const pre = [0]; chars.forEach((c) => pre.push(pre[pre.length - 1] + c));
