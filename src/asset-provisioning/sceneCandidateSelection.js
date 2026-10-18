@@ -22,10 +22,24 @@
  *
  * Near-tie diagnostics (report only, never changes a pick): each scored scene also
  * records runnerUp / runnerUpScore, margin (best minus runner-up), spread (best
- * minus worst score in that pool) and nearTie (margin <= nearTieFraction * spread).
+ * minus worst score) and nearTie (spread > 0 and margin <= nearTieFraction * spread).
  * nearTieFraction is a diagnostic flag threshold, not a selection rule; it is not
  * calibrated, and is meant to show how fragile a pick was until real data justifies
  * an actual tie rule.
+ *
+ * Diagnostics describe the decision actually made, so they are computed over the
+ * ELIGIBLE candidates only: scored candidates that were not used by a non-adjacent
+ * earlier scene. A candidate skipped by the reuse rule is not a runner-up, is not part
+ * of the margin or spread, and cannot make a pick look like a near-tie. `skippedUsed`
+ * is true when one or more higher-scoring candidates were skipped for that reason, so a
+ * pick forced by the reuse rule can be told apart from a genuinely close choice. If every
+ * scored candidate was used earlier, none is excluded (the policy falls back to the top
+ * score) and the diagnostics cover all scored candidates with skippedUsed false.
+ *
+ * Exact ties: nearTie is relative to the pool spread. When the eligible scores are all
+ * identical (spread 0) the ranking carries no signal at all, the pick falls to the lowest
+ * index, and nearTie stays false by design (pinned by scene-candidate-near-tie.test.js).
+ * That state is still visible as margin 0 with spread 0.
  */
 export const NEAR_TIE_FRACTION = 0.1;
 
@@ -43,16 +57,21 @@ export function selectPerScene({ scenes, pools, scoreFor, nearTieFraction = NEAR
     }
     const usedEarlier = new Set(chosen.slice(0, Math.max(0, si - 1)).map((c) => c.pick).filter(Boolean));
     const order = [...scored].sort((a, b) => (b.score - a.score) || (a.ci - b.ci));
-    const best = order.find((e) => !usedEarlier.has(e.id)) ?? order[0];
+    const unused = order.filter((e) => !usedEarlier.has(e.id));
+    // Eligible = candidates the reuse rule allows; when none is left the policy keeps the
+    // top score, so every scored candidate is eligible.
+    const eligible = unused.length > 0 ? unused : order;
+    const best = eligible[0];
     const first = scored.find((e) => e.ci === 0) ?? null;
-    const runnerUp = order.find((e) => e.ci !== best.ci) ?? null;
-    const spread = order[0].score - order[order.length - 1].score;
-    const margin = runnerUp ? round6(order[0].score - runnerUp.score) : null;
+    const runnerUp = eligible[1] ?? null;
+    const spread = best.score - eligible[eligible.length - 1].score;
+    const margin = runnerUp ? round6(best.score - runnerUp.score) : null;
     chosen.push({
       scene: si, pick: best.id, ci: best.ci, score: best.score,
       firstHitScore: first ? first.score : null,
       reason: best.ci === 0 ? 'first_hit_is_best' : 'ranked_over_first_hit',
       reusesPrevious: si > 0 && chosen[si - 1]?.pick === best.id,
+      skippedUsed: unused.length > 0 && order[0].ci !== best.ci,
       runnerUp: runnerUp ? runnerUp.id : null,
       runnerUpScore: runnerUp ? runnerUp.score : null,
       margin,
