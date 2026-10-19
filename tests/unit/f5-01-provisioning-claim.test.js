@@ -10,6 +10,10 @@ import { PROVISIONING_CLAIM } from '../../src/asset-provisioning/constants.js';
 import { AssetProvenanceRepository } from '../../src/state/AssetProvenance.js';
 import { AssetSourceProvider } from '../../src/providers/asset/AssetSourceProvider.js';
 
+// This file pins the single-asset stage contract. Multi-scene visuals (default on) are covered by
+// asset-provisioning-multiscene.test.js and multi-scene-default-e2e.test.js.
+process.env.MULTI_SCENE_VISUALS = 'off';
+
 // F5-01 (Owner-authorized Candidate A): schema, domain-invariant, and
 // concurrency coverage for 0014_asset_usages_provisioning_claim.sql and
 // the pipeline/repository changes that populate it. Mirrors the harness

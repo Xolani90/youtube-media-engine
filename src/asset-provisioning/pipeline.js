@@ -56,7 +56,7 @@ function sanitizeProviderFailure(f) {
 }
 
 
-// Multi-scene extension (opt-in, MULTI_SCENE_VISUALS=on). The partial UNIQUE
+// Multi-scene extension (default on; MULTI_SCENE_VISUALS=off restores single-asset). The partial UNIQUE
 // index from 0014 only constrains rows whose provisioning_claim IS NOT NULL, so
 // the one claim row stays unique per content_version while additional scene
 // assets are ordinary usage rows (claim NULL) carrying their span in
@@ -71,6 +71,7 @@ function assetFingerprints(asset) {
 async function provisionAdditionalScenes({ storage, repo, provider, contentVersionId, scenePlan, firstAsset, runId, nowISO }) {
   const seen = new Set(assetFingerprints(firstAsset));
   const added = [];
+  const skipped = [];
   for (const scene of scenePlan.slice(1)) {
     // The last query is the unchanged whole-video query, which would only re-find scene 1's asset.
     const queries = scene.queries.slice(0, -1).slice(0, MAX_EXTRA_QUERY_ATTEMPTS);
@@ -119,10 +120,37 @@ async function provisionAdditionalScenes({ storage, repo, provider, contentVersi
         runId, subjectType: 'content_version', subjectId: contentVersionId,
         decision: 'SCENE_ASSET_SKIPPED', reason: `scene_${scene.index + 1}_${skipReason}`
       }, nowISO);
+      skipped.push({ scene: scene.index + 1, reason: skipReason });
     }
-    if (stop) break;
+    if (stop) {
+      // Scenes never attempted because the provider rate-limited are still on the record.
+      for (const rest of scenePlan.slice(scene.index + 1)) skipped.push({ scene: rest.index + 1, reason: 'not_attempted_rate_limited' });
+      break;
+    }
   }
-  return added;
+  return { added, skipped };
+}
+
+/**
+ * Honest account of what scene provisioning achieved. Persisted as a decision_log
+ * row (SCENE_PROVISIONING_SUMMARY, JSON) so Media Production can report on it.
+ * fallback_reason: null (every planned scene got an asset), multi_scene_disabled,
+ * no_scene_plan, scene_assets_unavailable (only scene 1) or some_scene_assets_unavailable.
+ */
+function buildSceneReport({ multiScene, planned, accepted, skipped }) {
+  let fallbackReason = null;
+  if (!multiScene) fallbackReason = 'multi_scene_disabled';
+  else if (planned === 0) fallbackReason = 'no_scene_plan';
+  else if (accepted <= 1) fallbackReason = 'scene_assets_unavailable';
+  else if (accepted < planned) fallbackReason = 'some_scene_assets_unavailable';
+  return { planned_scenes: planned, accepted_assets: accepted, skipped_scenes: skipped, fallback_reason: fallbackReason };
+}
+
+function recordSceneSummary(storage, { runId, contentVersionId, report }, nowISO) {
+  logDecision(storage, {
+    runId, subjectType: 'content_version', subjectId: contentVersionId,
+    decision: 'SCENE_PROVISIONING_SUMMARY', reason: JSON.stringify(report)
+  }, nowISO);
 }
 
 /**
@@ -233,7 +261,7 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
     return { outcome: OUTCOME.NO_VISUAL_CONTEXT, asset: null };
   }
 
-  // Opt-in multi-scene plan. Any planning problem (e.g. an unparseable script
+  // Multi-scene plan (default on). Any planning problem (e.g. an unparseable script
   // body) silently keeps the unchanged single-query behaviour.
   let scenePlan = [];
   if (multiScene) {
@@ -384,13 +412,20 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
   }, nowISO);
 
   const asset = repo.getAsset(outcome.assetId);
+  let additionalAssets = [];
+  let skipped = [];
   if (scenePlan.length > 1) {
-    const additionalAssets = await provisionAdditionalScenes({
+    ({ added: additionalAssets, skipped } = await provisionAdditionalScenes({
       storage, repo, provider, contentVersionId: contentVersion.id, scenePlan, firstAsset: asset, runId, nowISO
-    });
-    return { outcome: OUTCOME.PROVISIONED, asset, additionalAssets };
+    }));
   }
-  return { outcome: OUTCOME.PROVISIONED, asset };
+  const sceneReport = buildSceneReport({
+    multiScene, planned: scenePlan.length, accepted: 1 + additionalAssets.length, skipped
+  });
+  recordSceneSummary(storage, { runId, contentVersionId: contentVersion.id, report: sceneReport }, nowISO);
+  return scenePlan.length > 1
+    ? { outcome: OUTCOME.PROVISIONED, asset, additionalAssets, sceneReport }
+    : { outcome: OUTCOME.PROVISIONED, asset, sceneReport };
 }
 
 export default runAssetProvisioning;
