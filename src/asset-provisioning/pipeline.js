@@ -141,7 +141,7 @@ function buildSceneReport({ multiScene, planned, accepted, skipped }) {
   let fallbackReason = null;
   if (!multiScene) fallbackReason = 'multi_scene_disabled';
   else if (planned === 0) fallbackReason = 'no_scene_plan';
-  else if (accepted <= 1) fallbackReason = 'scene_assets_unavailable';
+  else if (planned > 1 && accepted <= 1) fallbackReason = 'scene_assets_unavailable';
   else if (accepted < planned) fallbackReason = 'some_scene_assets_unavailable';
   return { planned_scenes: planned, accepted_assets: accepted, skipped_scenes: skipped, fallback_reason: fallbackReason };
 }
