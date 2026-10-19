@@ -9,6 +9,10 @@ import { runAssetProvisioning } from '../../src/asset-provisioning/pipeline.js';
 import { AssetProvenanceRepository } from '../../src/state/AssetProvenance.js';
 import { AssetSourceProvider } from '../../src/providers/asset/AssetSourceProvider.js';
 
+// This file pins the single-asset stage contract. Multi-scene visuals (default on) are covered by
+// asset-provisioning-multiscene.test.js and multi-scene-default-e2e.test.js.
+process.env.MULTI_SCENE_VISUALS = 'off';
+
 function freshStorage() {
   const dbPath = path.join(os.tmpdir(), `asset-provisioning-${Date.now()}-${Math.random()}.db`);
   return { storage: new SqliteStorageDriver({ dbPath }), dbPath };

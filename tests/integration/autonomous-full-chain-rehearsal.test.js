@@ -19,6 +19,10 @@ import researchPolicy from '../../config/research_policy.json' with { type: 'jso
 import briefPolicy from '../../config/brief_policy.json' with { type: 'json' };
 import scriptPolicy from '../../config/script_policy.json' with { type: 'json' };
 
+// These rehearsals pin the stage chain's one-provider-call-per-item contract. Multi-scene visuals
+// (default on) are covered by tests/integration/multi-scene-default-e2e.test.js, so pin the single-asset path here.
+process.env.MULTI_SCENE_VISUALS = 'off';
+
 /**
  * FULL-CHAIN SIMULATION REHEARSAL (Owner-authorized, test-only).
  *

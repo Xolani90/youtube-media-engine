@@ -119,7 +119,7 @@ function multiProvider(dir) {
   return { provider, calls };
 }
 
-test('multi-scene off (default): exactly one asset, unchanged b-roll context', async () => {
+test('multi-scene off (explicit): exactly one asset, unchanged b-roll context', async () => {
   const { storage, dbPath } = freshStorage();
   await storage.migrate();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms-'));

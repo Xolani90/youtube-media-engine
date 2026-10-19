@@ -1,6 +1,6 @@
 /**
- * Multi-scene visual planning for Asset Provisioning (opt-in; see
- * resolveMultiSceneEnabled). Pure and deterministic: no LLM, no network, no
+ * Multi-scene visual planning for Asset Provisioning (on by default; MULTI_SCENE_VISUALS=off
+ * restores the single-asset path; see resolveMultiSceneEnabled). Pure and deterministic: no LLM, no network, no
  * clock, no randomness.
  *
  * Design lineage: the per-segment "several alternative queries, fall back
@@ -37,11 +37,13 @@ const STOPWORDS = new Set((
   'new says said say using use used make makes made'
 ).split(/\s+/));
 
-/** 'on' | 'off' (default). Anything else is a configuration error, never silently coerced. */
+/** 'on' (default) | 'off' (explicit single-asset override). Anything else is a configuration error, never silently coerced. */
 export function resolveMultiSceneEnabled(env = process.env) {
-  const v = String(env.MULTI_SCENE_VISUALS ?? 'off').trim().toLowerCase();
-  if (v === '' || v === 'off' || v === '0' || v === 'false') return false;
-  if (v === 'on' || v === '1' || v === 'true') return true;
+  const raw = env.MULTI_SCENE_VISUALS;
+  if (raw === undefined || raw === null) return true;
+  const v = String(raw).trim().toLowerCase();
+  if (v === 'off' || v === '0' || v === 'false') return false;
+  if (v === '' || v === 'on' || v === '1' || v === 'true') return true;
   throw new Error(`MULTI_SCENE_VISUALS must be one of on, off (got "${v}")`);
 }
 
