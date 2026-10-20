@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import {
   MOTION_MODE, MOTION_LIMITS, MOTION_PRESETS, MotionError,
   planMotion, validateMotion, motionWindowAt, motionFrameCount, buildMotionFilter,
-  renderMotionClip, annotateTimingWithMotion, prepareMotionClips, resolveMotionEnabled
+  renderMotionClip, describeFfmpegFailure, annotateTimingWithMotion, prepareMotionClips, resolveMotionEnabled
 } from '../../src/media/motion.js';
 import { RENDER_DEFAULTS } from '../../src/media/constants.js';
 import { computeVisualTiming } from '../../src/media/visualTiming.js';
@@ -261,4 +261,26 @@ test('F4. KEN_BURNS_MOTION toggle: on by default, explicit off honoured, garbage
   assert.equal(resolveMotionEnabled({ KEN_BURNS_MOTION: 'on' }), true);
   for (const v of ['off', 'OFF', '0', 'false', 'none']) assert.equal(resolveMotionEnabled({ KEN_BURNS_MOTION: v }), false);
   assert.throws(() => resolveMotionEnabled({ KEN_BURNS_MOTION: 'maybe' }), (e) => e instanceof MotionError && e.reason === 'CONFIG_INVALID');
+});
+
+
+test('F2b. describeFfmpegFailure records status/signal/code and keeps head and tail of long stderr', () => {
+  const stderr = Array.from({ length: 20 }, (_, i) => `line${i}`).join('\n');
+  const msg = describeFfmpegFailure({ status: 1, signal: null, code: undefined, stderr });
+  assert.match(msg, /^exit=1 signal=- code=- \| line0 \| line1 \| line2 \| \.\.\. \| line14 \| line15 \| line16 \| line17 \| line18 \| line19$/);
+  const killed = describeFfmpegFailure({ status: null, signal: 'SIGKILL', code: 'ENOBUFS', stderr: 'x' });
+  assert.equal(killed, 'exit=- signal=SIGKILL code=ENOBUFS | x');
+  assert.equal(describeFfmpegFailure({ message: 'spawn ffmpeg ENOENT', code: 'ENOENT' }), 'exit=- signal=- code=ENOENT | spawn ffmpeg ENOENT');
+});
+
+test('F2c. a real FFmpeg failure message carries exit status and the encoder error', () => {
+  const dir = tmp();
+  try {
+    const img = makeImage(dir);
+    const motion = planMotion({ assetId: 'a', segmentIndex: 0 });
+    assert.throws(
+      () => renderMotionClip({ imagePath: img, outputPath: path.join(dir, 'o.mp4'), motion, width: 320, height: 180, fps: 24, durationSeconds: 1, videoEncoder: 'no_such_encoder' }),
+      (e) => e instanceof MotionError && /exit=\d+ signal=- code=-/.test(e.message)
+    );
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

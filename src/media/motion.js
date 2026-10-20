@@ -2,6 +2,10 @@ import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { describeFfmpegFailure } from './ffmpegFailure.js';
+
+// Re-exported so existing importers of motion.js keep working.
+export { describeFfmpegFailure };
 
 /**
  * Ken Burns / deterministic still-image motion (worker capability).
@@ -224,6 +228,9 @@ export function buildMotionFilter({ motion, width, height, fps, durationSeconds 
   ].join(',');
 }
 
+const MOTION_FFMPEG_MAX_BUFFER = 64 * 1024 * 1024;
+
+
 function probeJson(file, extraArgs = []) {
   const out = execFileSync(
     'ffprobe',
@@ -262,14 +269,13 @@ export function renderMotionClip({ imagePath, outputPath, motion, width, height,
   try {
     execFileSync(
       'ffmpeg',
-      ['-y', '-i', imagePath, '-vf', vf, '-frames:v', String(frames), '-r', String(fps), '-an',
+      ['-y', '-hide_banner', '-nostats', '-i', imagePath, '-vf', vf, '-frames:v', String(frames), '-r', String(fps), '-an',
         '-c:v', videoEncoder, '-pix_fmt', 'yuv420p', path.resolve(outputPath)],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
+      { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: MOTION_FFMPEG_MAX_BUFFER }
     );
   } catch (err) {
     fs.rmSync(outputPath, { force: true });
-    const tail = String(err.stderr ?? err.message).trim().split('\n').slice(-3).join(' | ');
-    throw new MotionError('FFMPEG_FAILED', tail);
+    throw new MotionError('FFMPEG_FAILED', describeFfmpegFailure(err));
   }
 
   // FFmpeg exiting 0 is never sufficient: confirm the clip is what was asked for.
