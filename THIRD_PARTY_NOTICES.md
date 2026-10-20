@@ -9,7 +9,7 @@ Only components that ship with or are fetched by the engine's own runtime are li
 | @huggingface/transformers (dep of kokoro-js) | 3.8.1 | Apache-2.0 | npm |
 | phonemizer (dep of kokoro-js) | 1.2.1 | Apache-2.0 | npm |
 | onnxruntime-node (dep of transformers.js) | see package-lock.json | MIT | npm |
-| Kokoro-82M ONNX model weights | onnx-community/Kokoro-82M-v1.0-ONNX | Apache-2.0 per the kokoro-js README ("Apache-licensed weights"); not independently re-verified from the model card | Hugging Face |
+| Kokoro-82M ONNX model weights | onnx-community/Kokoro-82M-v1.0-ONNX (fetched from the `main` revision, not pinned; observed at commit 1939ad2 on 2026-10-20) | Apache-2.0, declared in that repository's own README front matter (`license: apache-2.0`, `base_model: hexgrad/Kokoro-82M`). The original hexgrad/Kokoro-82M card also declares Apache-2.0. The conversion repository has no separate LICENSE file and no conversion-specific notice | Hugging Face |
 
 Used via `src/media/kokoroWorker.js`, a child process called by `src/media/narration.js`. Licenses for the npm packages were read from their installed `package.json` files.
 
@@ -39,7 +39,7 @@ Anyone who redistributes an FFmpeg binary together with this engine takes on tha
 ## whisper.cpp (optional ASR caption timing; off by default)
 | Component | Version | License | Source |
 |---|---|---|---|
-| whisper.cpp | operator-supplied (recorded in the transcript artifact via `WHISPER_CPP_VERSION`) | MIT as stated in `src/media/asrWorker.js`; not independently re-verified | https://github.com/ggml-org/whisper.cpp |
+| whisper.cpp | operator-supplied (recorded in the transcript artifact via `WHISPER_CPP_VERSION`) | MIT, verified 2026-10-20 from the LICENSE file at https://github.com/ggml-org/whisper.cpp ("Copyright (c) 2023-2026 The ggml authors") | https://github.com/ggml-org/whisper.cpp |
 
 Invoked as an external CLI by `src/media/asrWorker.js` only when `ASR_PROVIDER=whisper.cpp` and `WHISPER_CPP_MODEL` are set. The engine reads the model from a local path and downloads nothing. The licence of the model weights the operator supplies is not recorded here and is the operator's to verify.
 
