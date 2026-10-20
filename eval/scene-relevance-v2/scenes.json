@@ -1,0 +1,381 @@
+{
+  "schema": "scene-relevance-v2-scenes",
+  "version": 1,
+  "notes": "FROZEN before any model score exists. Descriptions are one-sentence scene lines. searchQuery is a short keyword query (<=100 chars). visualTarget and acceptableProxies are fixed in advance: a candidate may not be retro-fitted to a scene. split is derived by the stratified SHA-256 rule in PREREGISTRATION.md and re-verified by the tooling.",
+  "candidatePickRule": "One Pixabay search per scene (image_type=photo, safesearch=true, per_page=20, default order). Eight candidates at evenly spaced 0-based positions floor(i*n/8), i=0..7 (0,2,5,7,10,12,15,17 when n=20). Fixed in advance; does not use SigLIP.",
+  "scenes": [
+    {
+      "id": "A01",
+      "category": "A",
+      "categoryName": "Concrete physical scenes",
+      "description": "Wind turbines turning on a ridge at sunrise.",
+      "searchQuery": "wind turbines ridge sunrise",
+      "visualTarget": "Several wind turbines on a ridge or hill, low sunrise light.",
+      "acceptableProxies": [
+        "wind turbines at dawn or golden hour on high ground"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "A02",
+      "category": "A",
+      "categoryName": "Concrete physical scenes",
+      "description": "A crane lifting steel beams over a partially built skyscraper.",
+      "searchQuery": "crane steel beams skyscraper construction",
+      "visualTarget": "A tower crane with a steel beam or load at a high-rise under construction.",
+      "acceptableProxies": [
+        "tower crane lifting a load at an unfinished tall building"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "A03",
+      "category": "A",
+      "categoryName": "Concrete physical scenes",
+      "description": "Passengers queuing in an airport check-in hall.",
+      "searchQuery": "passengers queue airport check-in",
+      "visualTarget": "A line of travellers at check-in desks inside an airport terminal.",
+      "acceptableProxies": [
+        "queue at airport check-in or baggage drop"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "A04",
+      "category": "A",
+      "categoryName": "Concrete physical scenes",
+      "description": "A coal train crossing open plains.",
+      "searchQuery": "coal train open plains",
+      "visualTarget": "A freight train with coal wagons crossing flat open land.",
+      "acceptableProxies": [
+        "long train of loaded coal wagons in open landscape"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "A05",
+      "category": "A",
+      "categoryName": "Concrete physical scenes",
+      "description": "Rescue workers wading through a flooded street.",
+      "searchQuery": "rescue workers flooded street",
+      "visualTarget": "People in rescue gear walking through floodwater in a street.",
+      "acceptableProxies": [
+        "rescuers or emergency workers in flooded urban or village street"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "B01",
+      "category": "B",
+      "categoryName": "Finance and economics",
+      "description": "A bank teller counting banknotes.",
+      "searchQuery": "bank teller counting banknotes",
+      "visualTarget": "A person counting paper banknotes, ideally at a bank counter.",
+      "acceptableProxies": [
+        "cashier or teller counting cash by hand or machine"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "B02",
+      "category": "B",
+      "categoryName": "Finance and economics",
+      "description": "Shoppers comparing prices on supermarket shelves.",
+      "searchQuery": "shoppers supermarket shelves prices",
+      "visualTarget": "People looking at products or price labels on supermarket shelves.",
+      "acceptableProxies": [
+        "customers reading shelf price tags in a grocery store"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "B03",
+      "category": "B",
+      "categoryName": "Finance and economics",
+      "description": "A for-sale sign outside a house.",
+      "searchQuery": "for sale sign house",
+      "visualTarget": "A real-estate for-sale sign in front of a house.",
+      "acceptableProxies": [
+        "for-sale or sold board in the front garden of a home"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "B04",
+      "category": "B",
+      "categoryName": "Finance and economics",
+      "description": "A jeweller weighing gold bars.",
+      "searchQuery": "jeweller weighing gold bars",
+      "visualTarget": "Gold bars or ingots on a scale or being handled by a jeweller or dealer.",
+      "acceptableProxies": [
+        "gold bullion being weighed or inspected"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "B05",
+      "category": "B",
+      "categoryName": "Finance and economics",
+      "description": "A currency exchange board displaying rates.",
+      "searchQuery": "currency exchange board rates",
+      "visualTarget": "A board or screen listing currency exchange rates.",
+      "acceptableProxies": [
+        "bureau de change rate display with several currencies"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "C01",
+      "category": "C",
+      "categoryName": "Technology",
+      "description": "A developer coding on multiple monitors.",
+      "searchQuery": "developer coding multiple monitors",
+      "visualTarget": "A person at a desk with several monitors showing code.",
+      "acceptableProxies": [
+        "programmer with two or more screens of code"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "C02",
+      "category": "C",
+      "categoryName": "Technology",
+      "description": "A robot arm assembling electronics.",
+      "searchQuery": "robot arm assembling electronics",
+      "visualTarget": "An industrial robot arm handling or assembling electronic components.",
+      "acceptableProxies": [
+        "robotic arm on an electronics production line"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "C03",
+      "category": "C",
+      "categoryName": "Technology",
+      "description": "A smartphone displaying a social media feed.",
+      "searchQuery": "smartphone social media feed",
+      "visualTarget": "A phone screen showing a social-media feed or app.",
+      "acceptableProxies": [
+        "hand holding phone with social network timeline visible"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "C04",
+      "category": "C",
+      "categoryName": "Technology",
+      "description": "Fibre-optic cables in a network cabinet.",
+      "searchQuery": "fibre optic cables network cabinet",
+      "visualTarget": "Fibre-optic or patch cables connected in a server or network rack.",
+      "acceptableProxies": [
+        "rack with illuminated fibre or patch cables"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "C05",
+      "category": "C",
+      "categoryName": "Technology",
+      "description": "A drone flying over farmland.",
+      "searchQuery": "drone flying over farmland",
+      "visualTarget": "A drone in the air above agricultural fields.",
+      "acceptableProxies": [
+        "agricultural drone above crops or fields"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "D01",
+      "category": "D",
+      "categoryName": "Science, health, environment and agriculture",
+      "description": "A surgical team in an operating theatre.",
+      "searchQuery": "surgical team operating theatre",
+      "visualTarget": "Surgeons and staff operating on a patient in a theatre.",
+      "acceptableProxies": [
+        "surgeons in scrubs around an operating table"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "D02",
+      "category": "D",
+      "categoryName": "Science, health, environment and agriculture",
+      "description": "Researchers sampling a polluted river.",
+      "searchQuery": "researchers sampling polluted river water",
+      "visualTarget": "People taking water samples from a river, with visible pollution or testing equipment.",
+      "acceptableProxies": [
+        "scientists collecting river water samples",
+        "visibly polluted river with sampling activity"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "D03",
+      "category": "D",
+      "categoryName": "Science, health, environment and agriculture",
+      "description": "A greenhouse containing rows of tomato plants.",
+      "searchQuery": "greenhouse rows tomato plants",
+      "visualTarget": "Rows of tomato plants inside a greenhouse.",
+      "acceptableProxies": [
+        "tomato crop in a polytunnel or glasshouse"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "D04",
+      "category": "D",
+      "categoryName": "Science, health, environment and agriculture",
+      "description": "An astronomer observing through a telescope at night.",
+      "searchQuery": "astronomer telescope night observatory",
+      "visualTarget": "A person at a telescope under a night sky or inside an observatory.",
+      "acceptableProxies": [
+        "observer at a large telescope in darkness"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "D05",
+      "category": "D",
+      "categoryName": "Science, health, environment and agriculture",
+      "description": "A glacier melting into a lake.",
+      "searchQuery": "glacier melting lake",
+      "visualTarget": "A glacier ending in a lake, with ice or meltwater visible.",
+      "acceptableProxies": [
+        "glacier terminus in a proglacial lake",
+        "icebergs calving into a glacial lake"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "E01",
+      "category": "E",
+      "categoryName": "Institutions and society",
+      "description": "A courtroom with a judge and lawyers.",
+      "searchQuery": "courtroom judge lawyers",
+      "visualTarget": "A courtroom with a judge, lawyers or a hearing in progress.",
+      "acceptableProxies": [
+        "judge on the bench with counsel present"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "E02",
+      "category": "E",
+      "categoryName": "Institutions and society",
+      "description": "Voters queuing at a polling station.",
+      "searchQuery": "voters queue polling station",
+      "visualTarget": "People lined up to vote at a polling place.",
+      "acceptableProxies": [
+        "queue of voters outside or inside a polling station"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "E03",
+      "category": "E",
+      "categoryName": "Institutions and society",
+      "description": "A parliament chamber during a debate.",
+      "searchQuery": "parliament chamber debate",
+      "visualTarget": "A legislative chamber with members seated or speaking in a session.",
+      "acceptableProxies": [
+        "members of parliament in session in the chamber"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "E04",
+      "category": "E",
+      "categoryName": "Institutions and society",
+      "description": "Police directing a crowd at a protest.",
+      "searchQuery": "police directing crowd protest",
+      "visualTarget": "Police officers managing or guiding a protest crowd.",
+      "acceptableProxies": [
+        "police line or officers with protesters"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "E05",
+      "category": "E",
+      "categoryName": "Institutions and society",
+      "description": "A teacher addressing a classroom of children.",
+      "searchQuery": "teacher addressing classroom children",
+      "visualTarget": "A teacher at the front of a class talking to seated children.",
+      "acceptableProxies": [
+        "teacher teaching pupils in a classroom"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "F01",
+      "category": "F",
+      "categoryName": "Abstract concepts",
+      "description": "Inflation squeezing household budgets.",
+      "searchQuery": "inflation household budget prices",
+      "visualTarget": "Everyday-money pressure shown through shopping, price tags, bills, receipts, coins or a calculator.",
+      "acceptableProxies": [
+        "shopper looking at high prices",
+        "grocery receipt or bills with calculator",
+        "hand counting few coins over groceries",
+        "price tags on food"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "F02",
+      "category": "F",
+      "categoryName": "Abstract concepts",
+      "description": "A data breach and loss of trust.",
+      "searchQuery": "data breach hacker security",
+      "visualTarget": "Cyber-security breach shown through hacker imagery, a broken padlock, exposed data or a distressed user at a screen.",
+      "acceptableProxies": [
+        "hooded hacker at a computer",
+        "open or broken padlock on a keyboard",
+        "warning on screen about compromised data"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "F03",
+      "category": "F",
+      "categoryName": "Abstract concepts",
+      "description": "Supply-chain disruption.",
+      "searchQuery": "supply chain disruption port containers",
+      "visualTarget": "Logistics under strain: stacked containers, congested ports, empty shelves or stalled lorries.",
+      "acceptableProxies": [
+        "congested container port",
+        "ships waiting at port",
+        "empty shelves in shops",
+        "lorries queuing"
+      ],
+      "split": "calibration"
+    },
+    {
+      "id": "F04",
+      "category": "F",
+      "categoryName": "Abstract concepts",
+      "description": "Misinformation spreading online.",
+      "searchQuery": "fake news misinformation social media",
+      "visualTarget": "Misinformation shown through fake-news imagery, social-media feeds, rumours or a person doubting a screen.",
+      "acceptableProxies": [
+        "phone or screen showing fake-news headline",
+        "social network icons with warning",
+        "person reading questionable online news"
+      ],
+      "split": "heldout"
+    },
+    {
+      "id": "F05",
+      "category": "F",
+      "categoryName": "Abstract concepts",
+      "description": "Inequality between rich and poor neighbourhoods.",
+      "searchQuery": "rich poor neighbourhood inequality",
+      "visualTarget": "Contrast between wealthy and poor housing or districts in the same view.",
+      "acceptableProxies": [
+        "slum next to luxury high-rises",
+        "contrasting housing quality side by side"
+      ],
+      "split": "calibration"
+    }
+  ]
+}

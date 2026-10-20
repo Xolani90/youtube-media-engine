@@ -1,0 +1,15 @@
+{
+  "_note": "TEMPLATE ONLY. Replace images/scenes with your own licensed fixtures; every real image needs license and source. Scene texts and expectations must be written before looking at scores.",
+  "images": [
+    { "id": "stock-screen", "file": "stock-screen.png", "license": "own screenshot", "source": "local" },
+    { "id": "cabinet-room", "file": "cabinet-room.png", "license": "REPLACE", "source": "REPLACE" },
+    { "id": "solar-farm", "file": "solar-farm.png", "license": "REPLACE", "source": "REPLACE" },
+    { "id": "corrupt-1", "file": "unused", "kind": "corrupt" },
+    { "id": "missing-1", "file": "unused", "kind": "missing" }
+  ],
+  "scenes": [
+    { "id": "s1", "text": "government ministers seated around a cabinet table", "relevant": ["cabinet-room"], "hardNegatives": ["stock-screen"] },
+    { "id": "s2", "text": "workers installing solar panels on a solar farm", "relevant": ["solar-farm"], "hardNegatives": [] },
+    { "id": "s3", "text": "a deep sea submarine exploring the ocean floor", "relevant": [], "hardNegatives": ["stock-screen"] }
+  ]
+}

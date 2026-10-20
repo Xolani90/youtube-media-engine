@@ -1,0 +1,154 @@
+{
+  "schema": "scene-relevance-v2-negatives",
+  "version": 1,
+  "notes": "NOT FROZEN until the freeze script writes judgments-manifest.json (this file is hashed then). Interpretation: the cross-category items are SUPPLEMENTARY GROSS-MISMATCH SANITY CHECKS. They are mostly easy negatives (unrelated subjects) and must not be presented as evidence of fine-grained visual discrimination. The near-miss items are provisional and are reported in two separate groups: ordinary near-misses (conditionType 'visual') and absence/negation cases (conditionType 'absence': NM02, NM04, NM06, NM08), which test whether a model handles 'empty' or 'no one' and must not be merged into a headline claim about ordinary scene relevance. The near-miss split is stratified by conditionType with SHA-256 of 'nmsplit:'+id (see PREREGISTRATION.md section 4): 2 absence + 3 ordinary items in each of calibration and held-out. Cross-category items reuse existing candidates (no extra downloads): the description of one scene is judged against the eight candidates of a scene from a different category. Near-miss items need 10 extra searches and up to 80 downloads (Stage C, not Stage A): the description names a specific visual condition and the query deliberately returns the opposite or unaffected condition. The reviewer decides in the blind sheet whether any candidate fits; a pair where the reviewer marks any candidate relevant is reported as contaminated and excluded from negative metrics, with the count disclosed.",
+  "crossCategory": {
+    "rule": "Within each split sort scene IDs ascending by sha256('xneg:'+id); the first 5 per split are description scenes. For description scene d the image scene is the scene in a DIFFERENT category with the lowest sha256('xneg-img:'+d+':'+m).",
+    "items": [
+      {
+        "id": "XN01",
+        "descriptionScene": "F05",
+        "imageScene": "C04",
+        "split": "calibration"
+      },
+      {
+        "id": "XN02",
+        "descriptionScene": "C05",
+        "imageScene": "A03",
+        "split": "calibration"
+      },
+      {
+        "id": "XN03",
+        "descriptionScene": "C03",
+        "imageScene": "E05",
+        "split": "calibration"
+      },
+      {
+        "id": "XN04",
+        "descriptionScene": "A03",
+        "imageScene": "D02",
+        "split": "calibration"
+      },
+      {
+        "id": "XN05",
+        "descriptionScene": "F03",
+        "imageScene": "C03",
+        "split": "calibration"
+      },
+      {
+        "id": "XN06",
+        "descriptionScene": "E04",
+        "imageScene": "B04",
+        "split": "heldout"
+      },
+      {
+        "id": "XN07",
+        "descriptionScene": "F02",
+        "imageScene": "E01",
+        "split": "heldout"
+      },
+      {
+        "id": "XN08",
+        "descriptionScene": "B01",
+        "imageScene": "E04",
+        "split": "heldout"
+      },
+      {
+        "id": "XN09",
+        "descriptionScene": "D04",
+        "imageScene": "A03",
+        "split": "heldout"
+      },
+      {
+        "id": "XN10",
+        "descriptionScene": "C04",
+        "imageScene": "D01",
+        "split": "heldout"
+      }
+    ]
+  },
+  "nearMiss": {
+    "items": [
+      {
+        "id": "NM01",
+        "description": "Drought-damaged maize wilting in a cracked, dry field.",
+        "searchQuery": "green healthy maize field",
+        "visualTarget": "Wilted, brown or cracked-earth crop damage.",
+        "conditionType": "visual",
+        "split": "calibration"
+      },
+      {
+        "id": "NM02",
+        "description": "Empty supermarket shelves after panic buying.",
+        "searchQuery": "fully stocked supermarket shelves",
+        "visualTarget": "Bare, emptied shelves.",
+        "conditionType": "absence",
+        "split": "heldout"
+      },
+      {
+        "id": "NM03",
+        "description": "A flooded street with water up to the car windows.",
+        "searchQuery": "dry city street sunny day",
+        "visualTarget": "Floodwater covering a street and cars.",
+        "conditionType": "visual",
+        "split": "heldout"
+      },
+      {
+        "id": "NM04",
+        "description": "An empty operating theatre with no staff or patient.",
+        "searchQuery": "surgeons operating theatre team",
+        "visualTarget": "An unoccupied operating room.",
+        "conditionType": "absence",
+        "split": "calibration"
+      },
+      {
+        "id": "NM05",
+        "description": "A wildfire burning through a forest at night.",
+        "searchQuery": "green forest summer trees",
+        "visualTarget": "Flames or fire in woodland.",
+        "conditionType": "visual",
+        "split": "heldout"
+      },
+      {
+        "id": "NM06",
+        "description": "A courtroom with an empty bench and nobody present.",
+        "searchQuery": "judge lawyers courtroom hearing",
+        "visualTarget": "An empty courtroom with no people.",
+        "conditionType": "absence",
+        "split": "calibration"
+      },
+      {
+        "id": "NM07",
+        "description": "A cargo ship battling a storm at sea.",
+        "searchQuery": "cargo ship calm sea",
+        "visualTarget": "A ship in rough, stormy water.",
+        "conditionType": "visual",
+        "split": "calibration"
+      },
+      {
+        "id": "NM08",
+        "description": "An empty polling station with no voters.",
+        "searchQuery": "voters queuing polling station",
+        "visualTarget": "A polling place with no people in it.",
+        "conditionType": "absence",
+        "split": "heldout"
+      },
+      {
+        "id": "NM09",
+        "description": "A smartphone with a shattered, cracked screen.",
+        "searchQuery": "smartphone social media feed",
+        "visualTarget": "A phone with a visibly cracked screen.",
+        "conditionType": "visual",
+        "split": "heldout"
+      },
+      {
+        "id": "NM10",
+        "description": "A snow-covered city street during a blizzard.",
+        "searchQuery": "city street summer sunshine",
+        "visualTarget": "Heavy snow on a city street.",
+        "conditionType": "visual",
+        "split": "calibration"
+      }
+    ]
+  }
+}

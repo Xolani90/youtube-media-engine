@@ -4,7 +4,8 @@ import path from 'node:path';
 import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS, SHORT_FORM_RENDER_DEFAULTS, ASR_PROVIDER, TIMING_SOURCE } from './constants.js';
 import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets } from './visualTiming.js';
-import { computeVisualSequencing } from './visualSequencing.js';
+import { computeVisualSequencing, computeSequenceSlotTexts } from './visualSequencing.js';
+import { resolveSceneAssignmentMode, assignAssetsForSlots } from './sceneAssignment.js';
 import { computeSceneSequencing } from './sceneSequencing.js';
 import { parseSceneUsageContext } from '../asset-provisioning/scenePlan.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
@@ -402,8 +403,14 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   // equal-share division. Falls back to the plain equal-division
   // timeline unchanged when there's no caption structure to key off of.
   const sceneTiming = computeSceneSequencing(visualAssets, captionTiming, narrationDurationSeconds);
+  // Opt-in (SCENE_RELEVANCE_ASSIGN=on|batch|batch-all|global, default off): on the
+  // fallback path only (no scene plan), reorder assets so each slot gets its
+  // best-ranked asset. Scene-aligned timing keeps the planned order. Off => identical to main.
+  const sequencingAssets = (sceneTiming === null && resolveSceneAssignmentMode() !== 'off')
+    ? assignAssetsForSlots(visualAssets, computeSequenceSlotTexts(captionTiming))
+    : visualAssets;
   const sequencedTiming = sceneTiming
-    ?? computeVisualSequencing(visualAssets, captionTiming, narrationDurationSeconds);
+    ?? computeVisualSequencing(sequencingAssets, captionTiming, narrationDurationSeconds);
   const sceneReport = buildSceneReport({
     visualAssets, timing: sequencedTiming, aligned: sceneTiming !== null,
     provisioning: readSceneProvisioningSummary(storage, contentVersion.id)
