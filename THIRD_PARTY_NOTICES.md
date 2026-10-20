@@ -29,6 +29,20 @@ Pinned artifacts (verified 2026-10-10): Xenova/siglip-base-patch16-224 at revisi
 ## espeak-ng (fallback narration)
 Invoked as an external CLI (GPL-3.0-or-later); not bundled or linked into this repository.
 
+## FFmpeg and ffprobe (rendering, motion, caption burn-in, media QA)
+Invoked as external CLIs (`src/media/render.js`, `motion.js`, `qaWorker.js`); not bundled, linked or redistributed by this repository. The licence is that of the build installed on the host, not of this repository:
+- Local proofs ran on the Windows "full" build 9.0.2 from gyan.dev, configured with `--enable-gpl --enable-version3`, so that build is GPL-licensed (version 3). Confirm the exact terms with `ffmpeg -L`.
+- The CI job installs `ffmpeg` from the Ubuntu package archive; its licence is that of the distribution package and has not been independently verified here.
+
+Anyone who redistributes an FFmpeg binary together with this engine takes on that build's licence obligations. Merely invoking an externally installed `ffmpeg` does not.
+
+## whisper.cpp (optional ASR caption timing; off by default)
+| Component | Version | License | Source |
+|---|---|---|---|
+| whisper.cpp | operator-supplied (recorded in the transcript artifact via `WHISPER_CPP_VERSION`) | MIT as stated in `src/media/asrWorker.js`; not independently re-verified | https://github.com/ggml-org/whisper.cpp |
+
+Invoked as an external CLI by `src/media/asrWorker.js` only when `ASR_PROVIDER=whisper.cpp` and `WHISPER_CPP_MODEL` are set. The engine reads the model from a local path and downloads nothing. The licence of the model weights the operator supplies is not recorded here and is the operator's to verify.
+
 ## Thumbnail canvas worker (primary thumbnail renderer; FFmpeg is the fallback)
 | Component | Version | License | Source |
 |---|---|---|---|
