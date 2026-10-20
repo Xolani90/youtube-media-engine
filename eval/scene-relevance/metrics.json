@@ -1,0 +1,92 @@
+{
+  "scenesInDataset": 10,
+  "scenesEvaluated": 10,
+  "excluded": [],
+  "candidates": {
+    "total": 50,
+    "scored": 50,
+    "preprocessFailures": [],
+    "rankingFailures": []
+  },
+  "top1Relevant": {
+    "count": 8,
+    "of": 10
+  },
+  "top1RelevantAmongScenesWithAnyRelevant": {
+    "count": 8,
+    "of": 9
+  },
+  "top3Relevant": {
+    "count": 9,
+    "of": 9
+  },
+  "bestRankedFirst": {
+    "count": 4,
+    "of": 6
+  },
+  "obviousFailures": [
+    "S02"
+  ],
+  "topRelevantButClearlyBetterExists": [
+    "S06",
+    "S10"
+  ],
+  "noSuitableCandidate": 1,
+  "pairwiseAccuracy": 0.8913043478260869,
+  "context": {
+    "randomOrderExpectedTop1": 0.4222222222222222,
+    "pixabaySearchOrderTop1": {
+      "count": 5,
+      "of": 9
+    }
+  },
+  "latencyMs": {
+    "perCall": [
+      22372,
+      11852,
+      11872,
+      12807,
+      24564,
+      15737,
+      13276,
+      11284,
+      12005,
+      11968
+    ],
+    "mean": 14773.7,
+    "median": 12406,
+    "min": 11284,
+    "max": 24564,
+    "total": 147737
+  },
+  "calibration": {
+    "sceneId": "S01",
+    "oneImageMs": [
+      4847,
+      4821
+    ],
+    "allImagesMs": [
+      11704,
+      12972
+    ],
+    "imagesInFullCall": 5,
+    "estimatedPerImageMs": 1876,
+    "estimatedFixedLoadMs": 2958,
+    "sameRankingAcrossRepeats": true
+  },
+  "recommendation": "PROMISING",
+  "recommendationBasis": [
+    "top-1 relevant 8/10 (80%) and pairwise accuracy 89% meet the pre-set thresholds (>= 70% / >= 75%)"
+  ],
+  "rule": {
+    "minScenes": 8,
+    "promising": {
+      "top1": 0.7,
+      "pairwise": 0.75
+    },
+    "notPromising": {
+      "top1AtMost": 0.4,
+      "pairwiseAtMost": 0.55
+    }
+  }
+}
