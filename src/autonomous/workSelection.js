@@ -1,4 +1,5 @@
 import { BRIEF_STAGE } from '../brief/constants.js';
+import { FORMAT_DECISION, excludingDecisionForProvider } from '../media/formatSelection.js';
 import { selectEligibleKeyClaims } from '../brief/claims.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
 import { VISUAL_ASSET_TYPES, MEDIA_STAGE, DECISION_LOG_DECISION as MEDIA_DECISION } from '../media/constants.js';
@@ -287,7 +288,12 @@ export function selectEligibleShortFormProductions(storage) {
       `SELECT content_brief_id FROM content_versions
        WHERE state IN ('PRODUCED', 'FINAL_COMPLIANCE')
        AND id IN (SELECT content_version_id FROM media_artifacts)
-       AND id NOT IN (SELECT content_version_id FROM short_form_media_artifacts)`
+       AND id NOT IN (SELECT content_version_id FROM short_form_media_artifacts)
+       AND id NOT IN (
+             SELECT subject_id FROM decision_log
+             WHERE subject_type = 'content_version' AND decision = ?
+           )`,
+      [FORMAT_DECISION.LONG_FORM_ONLY]
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }
@@ -370,6 +376,11 @@ export function selectEligiblePublications(storage, provider = 'youtube') {
   // provider)) -- a YouTube quarantine must never exclude Facebook
   // selection, and vice versa; each provider retries/quarantines
   // independently.
+  // Format decision (formatSelection.js): a FORMAT_* decision that excludes THIS
+  // provider's target removes only items with no publications row for this
+  // provider. An existing row (PENDING / AMBIGUOUS / retryable FAILED) must stay
+  // selectable so the pipeline can still reconcile an attempt made before, or
+  // despite, the decision -- an AMBIGUOUS upload may really be live.
   return storage
     .all(
       `SELECT content_brief_id FROM content_versions
@@ -383,8 +394,13 @@ export function selectEligiblePublications(storage, provider = 'youtube') {
              SELECT subject_id FROM stage_retry_state
              WHERE stage = 'PUBLICATION' AND provider = ? AND quarantined_at IS NOT NULL
            )
-       AND id NOT IN (SELECT content_version_id FROM publications WHERE status = 'FAILED' AND failure_reason = 'VISIBILITY_MISMATCH')`,
-      [provider, provider]
+       AND id NOT IN (SELECT content_version_id FROM publications WHERE status = 'FAILED' AND failure_reason = 'VISIBILITY_MISMATCH')
+       AND id NOT IN (
+             SELECT subject_id FROM decision_log
+             WHERE subject_type = 'content_version' AND decision = ?
+               AND subject_id NOT IN (SELECT content_version_id FROM publications WHERE provider = ?)
+           )`,
+      [provider, provider, excludingDecisionForProvider(provider), provider]
     )
     .map((row) => ({ contentBriefId: row.content_brief_id }));
 }

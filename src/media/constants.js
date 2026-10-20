@@ -35,7 +35,11 @@ export const OUTCOME = Object.freeze({
   // exists within SHORT_FORM_RENDER_DEFAULTS.MAX_DURATION_SECONDS (e.g.
   // the source's very first caption/visual segment already exceeds the
   // cap) -- see shortFormSelection.js. Fails safely; never invented.
-  NO_VALID_SEGMENT: 'NO_VALID_SEGMENT'
+  NO_VALID_SEGMENT: 'NO_VALID_SEGMENT',
+  // Format selection (formatSelection.js) decided the short-form derivative is
+  // not part of this item's delivery: a normal, completed outcome of the
+  // short-form stage, not a failure.
+  SHORT_FORM_NOT_SELECTED: 'SHORT_FORM_NOT_SELECTED'
 });
 
 export const DECISION_LOG_DECISION = Object.freeze({

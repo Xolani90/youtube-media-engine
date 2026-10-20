@@ -25,6 +25,7 @@ export function segmentCaptions(text, maxLength = DEFAULT_MAX_LENGTH) {
       captions.push(sentence);
       continue;
     }
+    const startIndex = captions.length;
     const words = sentence.split(' ');
     let current = '';
     for (const word of words) {
@@ -37,8 +38,31 @@ export function segmentCaptions(text, maxLength = DEFAULT_MAX_LENGTH) {
       }
     }
     if (current) captions.push(current);
+    avoidOrphanTail(captions, startIndex, maxLength);
   }
   return captions;
+}
+
+/**
+ * A sentence only a few characters over maxLength is split greedily, which
+ * can strand its final word as a one-word caption ("... a harder" / "target.").
+ * Rebalance by moving the previous chunk's last word down so the tail has two
+ * words. Applies only to a sentence that was split into 2+ chunks whose last
+ * chunk is a single word; never exceeds maxLength; whole-sentence captions
+ * and every other split are untouched.
+ */
+function avoidOrphanTail(captions, startIndex, maxLength) {
+  const last = captions.length - 1;
+  if (last - startIndex < 1) return;
+  const tail = captions[last];
+  if (tail.includes(' ')) return;
+  const prev = captions[last - 1];
+  const cut = prev.lastIndexOf(' ');
+  if (cut === -1) return;
+  const moved = `${prev.slice(cut + 1)} ${tail}`;
+  if (moved.length > maxLength) return;
+  captions[last - 1] = prev.slice(0, cut);
+  captions[last] = moved;
 }
 
 /**

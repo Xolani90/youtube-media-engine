@@ -70,6 +70,10 @@ jobs:
       # unchanged. Candidates not evaluated this run are picked up by later
       # runs via the discovery evaluation schedule.
       DISCOVERY_FRESH_EVALUATION_BUDGET: '5'
+      # Narration engine pinned explicitly: the application default is strict Kokoro,
+      # which downloads a model and is slow on CPU runners. The scheduled run keeps
+      # the espeak-ng this workflow installs.
+      NARRATION_PROVIDER: 'espeak-ng'
       # ADR-0036: publicly-authorized Discovery RSS sources (not secret
       # configuration — public feed URLs).
       RSS_FEED_URLS: 'https://openai.com/news/rss.xml,https://blog.google/technology/ai/rss/,https://techcrunch.com/category/artificial-intelligence/feed/,https://arstechnica.com/ai/feed/'

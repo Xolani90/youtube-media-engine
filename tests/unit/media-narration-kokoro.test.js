@@ -15,8 +15,9 @@ const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest
 const throwingKokoro = () => { throw new Error('kokoro failed: injected fault'); };
 
 // ---- provider mode resolution ------------------------------------------------
-test('mode: defaults to espeak-ng; auto/kokoro accepted; anything else rejected', () => {
-  assert.equal(resolveNarrationProviderMode({}), 'espeak-ng');
+test('mode: defaults to kokoro; auto/espeak-ng accepted; anything else rejected', () => {
+  assert.equal(resolveNarrationProviderMode({}), 'kokoro');
+  assert.equal(resolveNarrationProviderMode({ NARRATION_PROVIDER: 'espeak-ng' }), 'espeak-ng');
   assert.equal(resolveNarrationProviderMode({ NARRATION_PROVIDER: 'AUTO' }), 'auto');
   assert.equal(resolveNarrationProviderMode({ NARRATION_PROVIDER: 'kokoro' }), 'kokoro');
   assert.throws(() => resolveNarrationProviderMode({ NARRATION_PROVIDER: 'elevenlabs' }));

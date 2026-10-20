@@ -97,7 +97,7 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
    */
   constructor({
     fetchImpl = fetch,
-    apiKeyProvider = () => process.env.PIXABAY_API_KEY,
+    apiKeyProvider = () => process.env.PIXABAY_API_KEY?.trim(),
     downloadDir = path.join(os.tmpdir(), 'ame-pixabay-assets'),
     fsImpl = fs
   } = {}) {

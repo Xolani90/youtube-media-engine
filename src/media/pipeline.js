@@ -6,6 +6,8 @@ import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets } from './visualTiming.js';
 import { computeVisualSequencing, computeSequenceSlotTexts } from './visualSequencing.js';
 import { resolveSceneAssignmentMode, assignAssetsForSlots } from './sceneAssignment.js';
+import { computeSceneSequencing } from './sceneSequencing.js';
+import { parseSceneUsageContext } from '../asset-provisioning/scenePlan.js';
 import { segmentCaptions, computeCaptionTiming } from './captionTiming.js';
 import { buildRenderSpec, renderSpecChecksum } from './renderSpec.js';
 import { synthesizeNarration, probeDurationSeconds } from './narration.js';
@@ -50,13 +52,23 @@ function runDiagnosticQa(videoPath, context) {
   }
 }
 
+/** Adds the scene report (and a scene_alignment WARN finding when degraded) to a QA report. */
+function withSceneReport(report, sceneReport) {
+  if (!sceneReport) return report;
+  const findings = [...(report.findings ?? [])];
+  if (sceneReport.degraded) {
+    findings.push({ check: 'scene_alignment', severity: 'WARN', enforced: false, detail: `scene_alignment_degraded: ${sceneReport.fallback_reason}` });
+  }
+  return { ...report, findings, scene_report: sceneReport, clean: report.clean && findings.length === 0 };
+}
+
 /** Writes the checksum-bound report beside the promoted artifact and records one decision_log row. Never throws. */
-function recordDiagnosticQa(storage, { runId, contentVersionId, qa, artifactPath, filename }, nowISO) {
+function recordDiagnosticQa(storage, { runId, contentVersionId, qa, artifactPath, filename, sceneReport = null }, nowISO) {
   if (!qa) return;
   try {
     let reason;
     if (qa.report) {
-      const written = writeQaReportArtifact({ dir: path.dirname(artifactPath), filename, report: qa.report, artifactPath });
+      const written = writeQaReportArtifact({ dir: path.dirname(artifactPath), filename, report: withSceneReport(qa.report, sceneReport), artifactPath });
       reason = written.written
         ? `artifact_${written.artifactChecksum}_report_${written.checksum}_status_${qa.report.status}`
         : `report_not_written_${written.reason}`;
@@ -71,6 +83,47 @@ function recordDiagnosticQa(storage, { runId, contentVersionId, qa, artifactPath
       }, nowISO);
     }
   } catch { /* evidence-only: a QA persistence problem must never alter the media outcome */ }
+}
+
+/**
+ * Honest scene report for the render (JSON-pure). `provisioning` is the parsed
+ * SCENE_PROVISIONING_SUMMARY decision_log row, or null if none was recorded.
+ * degraded = a multi-scene plan existed but the render could not be narration-aligned
+ * (a deliberate single-asset configuration is NOT degraded).
+ */
+function buildSceneReport({ visualAssets, timing, aligned, provisioning }) {
+  const counts = visualAssets.map((a) => parseSceneUsageContext(a.usage_context)?.count ?? 0);
+  const planned = Math.max(provisioning?.planned_scenes ?? 0, ...counts);
+  const distinct = new Set(timing.map((t) => t.asset_id)).size;
+  let fallbackReason = null;
+  let degraded = false;
+  if (!aligned) {
+    if (provisioning?.fallback_reason === 'multi_scene_disabled') fallbackReason = 'multi_scene_disabled';
+    else if (planned > 1) {
+      fallbackReason = visualAssets.length < 2 ? 'scene_assets_unavailable' : 'scene_sequencing_unavailable';
+      degraded = true;
+    } else fallbackReason = provisioning?.fallback_reason ?? 'no_scene_plan';
+  }
+  return {
+    mode: aligned ? 'scene_aligned' : (visualAssets.length === 1 ? 'single_asset' : 'cyclic'),
+    narration_aligned: aligned,
+    planned_scenes: planned,
+    accepted_assets: visualAssets.length,
+    rendered_scenes: aligned ? timing.length : distinct,
+    distinct_rendered_assets: distinct,
+    fallback_reason: fallbackReason,
+    degraded
+  };
+}
+
+function readSceneProvisioningSummary(storage, contentVersionId) {
+  try {
+    const row = storage.get(
+      `SELECT reason FROM decision_log WHERE subject_id = ? AND decision = 'SCENE_PROVISIONING_SUMMARY' ORDER BY created_at DESC, rowid DESC`,
+      [contentVersionId]
+    );
+    return row ? JSON.parse(row.reason) : null;
+  } catch { return null; }
 }
 
 /** D-G2 assets currently attached to this content_version, with usage_context merged in. Read-only. Identical helper to src/production/pipeline.js's own (deliberately re-implemented, per the existing per-stage decoupling convention). */
@@ -349,13 +402,19 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   // (computed just above) as scene-cut candidates instead of a flat
   // equal-share division. Falls back to the plain equal-division
   // timeline unchanged when there's no caption structure to key off of.
-  // Opt-in (SCENE_RELEVANCE_ASSIGN=on, default off): reorder assets so each
-  // slot gets its best-ranked unused asset. Off => byte-identical to before.
-  // SCENE_RELEVANCE_ASSIGN=batch does the same with one worker call per video.
-  const sequencingAssets = resolveSceneAssignmentMode() === 'off'
-    ? visualAssets
-    : assignAssetsForSlots(visualAssets, computeSequenceSlotTexts(captionTiming));
-  const sequencedTiming = computeVisualSequencing(sequencingAssets, captionTiming, narrationDurationSeconds);
+  const sceneTiming = computeSceneSequencing(visualAssets, captionTiming, narrationDurationSeconds);
+  // Opt-in (SCENE_RELEVANCE_ASSIGN=on|batch|batch-all|global, default off): on the
+  // fallback path only (no scene plan), reorder assets so each slot gets its
+  // best-ranked asset. Scene-aligned timing keeps the planned order. Off => identical to main.
+  const sequencingAssets = (sceneTiming === null && resolveSceneAssignmentMode() !== 'off')
+    ? assignAssetsForSlots(visualAssets, computeSequenceSlotTexts(captionTiming))
+    : visualAssets;
+  const sequencedTiming = sceneTiming
+    ?? computeVisualSequencing(sequencingAssets, captionTiming, narrationDurationSeconds);
+  const sceneReport = buildSceneReport({
+    visualAssets, timing: sequencedTiming, aligned: sceneTiming !== null,
+    provisioning: readSceneProvisioningSummary(storage, contentVersion.id)
+  });
 
   // --- Ken Burns motion (worker capability; src/media/motion.js) ---
   // Runs strictly AFTER the rights/checksum/existence gates above and AFTER
@@ -526,6 +585,16 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
       runId, subjectType: 'content_version', subjectId: contentVersion.id,
       decision: DECISION_LOG_DECISION.RENDERED, reason: `media_artifact_persisted_${mediaArtifactId}`
     }, nowISO);
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: 'SCENE_SEQUENCING_REPORT', reason: JSON.stringify(sceneReport)
+    }, nowISO);
+    if (sceneReport.degraded) {
+      logDecision(storage, {
+        runId, subjectType: 'content_version', subjectId: contentVersion.id,
+        decision: 'SCENE_ALIGNMENT_DEGRADED', reason: sceneReport.fallback_reason
+      }, nowISO);
+    }
 
     return { mediaArtifactId };
   });
@@ -535,9 +604,9 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     return { outcome: OUTCOME.ALREADY_RENDERED, mediaArtifact: existing ?? null, ...(asr ? { asr } : {}) };
   }
 
-  recordDiagnosticQa(storage, { runId, contentVersionId: contentVersion.id, qa, artifactPath: finalVideoPath, filename: 'media-qa.json' }, nowISO);
+  recordDiagnosticQa(storage, { runId, contentVersionId: contentVersion.id, qa, artifactPath: finalVideoPath, filename: 'media-qa.json', sceneReport }, nowISO);
   const mediaArtifact = storage.get('SELECT * FROM media_artifacts WHERE id = ?', [outcome.mediaArtifactId]);
-  return { outcome: OUTCOME.RENDERED, mediaArtifact, ...(asr ? { asr } : {}) };
+  return { outcome: OUTCOME.RENDERED, mediaArtifact, sceneReport, ...(asr ? { asr } : {}) };
 }
 
 /**
