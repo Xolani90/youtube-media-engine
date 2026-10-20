@@ -355,3 +355,39 @@ test('defense in depth: an over-long legacy visual_ideas still yields a query of
   assert.ok(legacy.length > 100);
   assert.ok(q.length <= PIXABAY_MAX_QUERY_LENGTH);
 });
+
+test('default key provider trims whitespace/newlines from PIXABAY_API_KEY before building the request', async () => {
+  const saved = process.env.PIXABAY_API_KEY;
+  let requestedUrl = null;
+  const fetchImpl = async (url) => {
+    requestedUrl = String(url);
+    return jsonResponse(200, { total: 0, totalHits: 0, hits: [] });
+  };
+  try {
+    process.env.PIXABAY_API_KEY = '  key123\r\n';
+    const provider = new PixabayAssetSourceProvider({ fetchImpl });
+    await provider.acquireVisualAsset({ query: 'server room', assetTypes: ['image'] });
+    assert.ok(requestedUrl, 'a request should have been made');
+    assert.equal(new URL(requestedUrl).searchParams.get('key'), 'key123');
+    assert.ok(!/%0A|%0D|%20|\+/.test(new URL(requestedUrl).searchParams.get('key') + requestedUrl.split('key=')[1].split('&')[0]));
+  } finally {
+    if (saved === undefined) delete process.env.PIXABAY_API_KEY;
+    else process.env.PIXABAY_API_KEY = saved;
+  }
+});
+
+test('default key provider: a whitespace-only PIXABAY_API_KEY is treated as missing (MISSING_API_KEY), no network call', async () => {
+  const saved = process.env.PIXABAY_API_KEY;
+  let fetchCalls = 0;
+  const fetchImpl = async () => { fetchCalls++; throw new Error('should not be called'); };
+  try {
+    process.env.PIXABAY_API_KEY = ' \r\n';
+    const provider = new PixabayAssetSourceProvider({ fetchImpl });
+    const result = await provider.acquireVisualAsset({ query: 'server room', assetTypes: ['image'] });
+    assert.equal(result.failure.kind, 'MISSING_API_KEY');
+    assert.equal(fetchCalls, 0);
+  } finally {
+    if (saved === undefined) delete process.env.PIXABAY_API_KEY;
+    else process.env.PIXABAY_API_KEY = saved;
+  }
+});
