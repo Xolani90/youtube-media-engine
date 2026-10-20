@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "notes": "Descriptions are written like video-scene lines (one sentence, well under SigLIP's 64-token text limit). searchQuery is a short keyword query for Pixabay; it is deliberately NOT the description, because the real pipeline searches with keywords. visualTarget is what a human reviewer should look for.",
+  "candidatePickRule": "One Pixabay search per scene (image_type=photo, safesearch=true, per_page=20, default order). Candidates are taken at evenly spaced result positions (0-based 0,4,8,12,16 when 20 hits are returned) so the set mixes strong and weaker matches. The rule is fixed in advance and does not use SigLIP.",
+  "scenes": [
+    {
+      "id": "S01",
+      "description": "A crowded stock exchange trading floor where traders shout and watch rows of screens.",
+      "visualTarget": "Many people on a trading floor with screens or trading posts; not a single laptop chart or a generic office.",
+      "searchQuery": "stock exchange trading floor"
+    },
+    {
+      "id": "S02",
+      "description": "Workers installing solar panels on a large solar farm.",
+      "visualTarget": "People physically installing or working on panels in a utility-scale array; not a lone rooftop panel or a close-up of one cell.",
+      "searchQuery": "solar farm installation workers"
+    },
+    {
+      "id": "S03",
+      "description": "A crane loading shipping containers onto a cargo ship at a commercial port.",
+      "visualTarget": "Containers, a crane or gantry, and a vessel at a working port; not an empty beach or a single parked truck.",
+      "searchQuery": "container ship port crane loading"
+    },
+    {
+      "id": "S04",
+      "description": "Engineers in hard hats inspecting industrial machinery in a factory.",
+      "visualTarget": "People inspecting heavy equipment in an industrial setting; not a stock-style office handshake or a machine with nobody near it.",
+      "searchQuery": "engineers inspecting machinery factory"
+    },
+    {
+      "id": "S05",
+      "description": "A farmer examining drought-damaged crops in a dry field.",
+      "visualTarget": "A person looking at wilted or dried crops on parched ground; not healthy green fields or an empty cracked-earth close-up.",
+      "searchQuery": "farmer drought crops"
+    },
+    {
+      "id": "S06",
+      "description": "A data centre filled with long rows of server racks.",
+      "visualTarget": "An interior of server racks in rows; not a single desktop PC or an abstract network illustration.",
+      "searchQuery": "data center server racks"
+    },
+    {
+      "id": "S07",
+      "description": "An aerial view of heavy traffic congestion on the roads of a major city.",
+      "visualTarget": "Elevated or drone view of dense, slow or stopped traffic in a city; not a ground-level view of a single car.",
+      "searchQuery": "aerial traffic jam city"
+    },
+    {
+      "id": "S08",
+      "description": "A laboratory technician examining samples with a microscope.",
+      "visualTarget": "A person in a lab examining samples (microscope, test tubes, slides); not a bare lab bench or a classroom.",
+      "searchQuery": "laboratory technician samples"
+    },
+    {
+      "id": "S09",
+      "description": "A warehouse where automated equipment sorts packages on conveyor belts.",
+      "visualTarget": "Conveyors or robotic sorting of parcels in a warehouse; not shelves with nobody and nothing moving, not a delivery van.",
+      "searchQuery": "warehouse automated sorting conveyor"
+    },
+    {
+      "id": "S10",
+      "description": "An electricity transmission substation with transformers and high-voltage power lines.",
+      "visualTarget": "A substation yard with transformers or switchgear and lines; not a single pylon in a landscape or a household socket.",
+      "searchQuery": "electrical substation transmission"
+    }
+  ]
+}

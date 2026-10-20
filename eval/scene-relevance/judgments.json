@@ -1,0 +1,117 @@
+{
+  "judgedAt": "2026-10-11T08:32:55.860Z",
+  "scenes": {
+    "S01": {
+      "reviewed": true,
+      "relevant": [],
+      "best": [],
+      "noneSuitable": true,
+      "notes": "all illustrations or graphics, no trading floor"
+    },
+    "S02": {
+      "reviewed": true,
+      "relevant": [
+        "S02-B"
+      ],
+      "best": [],
+      "noneSuitable": false,
+      "notes": "B = cleaning, not installing. A = worker posing on rooftop. C = aerial farm, no people. D, E = illustrations. Labels suggested by Claude, confirmed by me."
+    },
+    "S03": {
+      "reviewed": true,
+      "relevant": [
+        "S03-A",
+        "S03-B",
+        "S03-C",
+        "S03-D"
+      ],
+      "best": [
+        "S03-A",
+        "S03-C"
+      ],
+      "noneSuitable": false,
+      "notes": "A-D = port cranes + containers; A and C show crane beside ship (best). E = inland canal, no ship. No image shows loading in progress. Labels suggested by Claude, confirmed by me."
+    },
+    "S04": {
+      "reviewed": true,
+      "relevant": [
+        "S04-B"
+      ],
+      "best": [],
+      "noneSuitable": false,
+      "notes": "B = hard-hatted workers posing in factory, not inspecting (closest). D = posed engineer portrait, no hard hat, left out. A, C, E = machinery, nobody near it. No image shows inspection. Labels suggested by Claude, confirmed by me."
+    },
+    "S05": {
+      "reviewed": true,
+      "relevant": [
+        "S05-A"
+      ],
+      "best": [],
+      "noneSuitable": false,
+      "notes": "A = farmer in dry golden field, looks like harvest, drought damage not clearly visible (closest). B = healthy wheat close-up. C = green field with sprayer. D = passion fruit in hands. E = wet ground. Labels suggested by Claude, confirmed by me."
+    },
+    "S06": {
+      "reviewed": true,
+      "relevant": [
+        "S06-A",
+        "S06-B",
+        "S06-E"
+      ],
+      "best": [
+        "S06-E"
+      ],
+      "noneSuitable": false,
+      "notes": "E = corridor of cabinets in rows, but tags say electrical cabinet so could be switchgear (best, uncertain). A = hand in single rack, B = close-up of server hardware. C = 3D render. D = dog. Labels suggested by Claude, confirmed by me."
+    },
+    "S07": {
+      "reviewed": true,
+      "relevant": [
+        "S07-B",
+        "S07-D"
+      ],
+      "best": [
+        "S07-D",
+        "S07-B"
+      ],
+      "noneSuitable": false,
+      "notes": "D = aerial NYC street packed with cabs (best). B = aerial interchange, traffic moderate. A = skyline, no visible traffic. C = night skyline. E = ground-level queue, real congestion but not aerial. Labels suggested by Claude, confirmed by me."
+    },
+    "S08": {
+      "reviewed": true,
+      "relevant": [
+        "S08-A",
+        "S08-D",
+        "S08-E"
+      ],
+      "best": [
+        "S08-E"
+      ],
+      "noneSuitable": false,
+      "notes": "E = technician examining a flask in lab (best), looks stylised/possibly rendered. A, D = hands handling sample tubes. B = pipette tips, C = sample cups, no person. No image shows a microscope. Labels suggested by Claude, confirmed by me."
+    },
+    "S09": {
+      "reviewed": true,
+      "relevant": [
+        "S09-B",
+        "S09-A"
+      ],
+      "best": [
+        "S09-B"
+      ],
+      "noneSuitable": false,
+      "notes": "B = cartons on roller conveyor (best), close-up, no warehouse context. A = conveyor curve in industrial hall, no parcels. C = overhead conveyor in factory, borderline, left out. D = bottling line. E = static shelving. Labels suggested by Claude, confirmed by me."
+    },
+    "S10": {
+      "reviewed": true,
+      "relevant": [
+        "S10-C",
+        "S10-E"
+      ],
+      "best": [
+        "S10-E"
+      ],
+      "noneSuitable": false,
+      "notes": "E = substation gantry structure and equipment (best). C = rows of transformer-type equipment, tight crop. A = single pylon, excluded by target. B = insulator close-up, left out. D = power station, left out. Labels suggested by Claude, confirmed by me."
+    }
+  }
+}

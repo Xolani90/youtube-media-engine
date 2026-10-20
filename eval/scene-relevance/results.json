@@ -1,0 +1,422 @@
+{
+  "meta": {
+    "startedAt": "2026-10-11T08:42:21.912Z",
+    "node": "v22.16.0",
+    "platform": "win32",
+    "gitHead": "34e02a72fbc2b5369f45b8fc3b7ed22816738086",
+    "modelDirName": "siglip-base-patch16-224",
+    "dtype": "q8 (worker default)",
+    "preprocessorConfig": {
+      "do_normalize": true,
+      "do_rescale": true,
+      "do_resize": true,
+      "image_processor_type": "SiglipImageProcessor",
+      "image_mean": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "processor_class": "SiglipProcessor",
+      "resample": 3,
+      "rescale_factor": 0.00392156862745098,
+      "size": {
+        "height": 224,
+        "width": 224
+      },
+      "image_std": [
+        0.5,
+        0.5,
+        0.5
+      ]
+    },
+    "workerPath": "default (src/media/sceneRelevanceWorker.js)",
+    "finishedAt": "2026-10-11T08:45:24.065Z"
+  },
+  "scenes": [
+    {
+      "sceneId": "S01",
+      "description": "A crowded stock exchange trading floor where traders shout and watch rows of screens.",
+      "candidateCount": 5,
+      "ms": 22372,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S01-B",
+          "score": 0.045772,
+          "rank": 0
+        },
+        {
+          "candidateId": "S01-D",
+          "score": 0.044036,
+          "rank": 1
+        },
+        {
+          "candidateId": "S01-A",
+          "score": 0.004416,
+          "rank": 2
+        },
+        {
+          "candidateId": "S01-E",
+          "score": -0.023155,
+          "rank": 3
+        },
+        {
+          "candidateId": "S01-C",
+          "score": -0.036998,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    },
+    {
+      "sceneId": "S02",
+      "description": "Workers installing solar panels on a large solar farm.",
+      "candidateCount": 5,
+      "ms": 11852,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S02-C",
+          "score": 0.089483,
+          "rank": 0
+        },
+        {
+          "candidateId": "S02-B",
+          "score": 0.088425,
+          "rank": 1
+        },
+        {
+          "candidateId": "S02-E",
+          "score": 0.081714,
+          "rank": 2
+        },
+        {
+          "candidateId": "S02-A",
+          "score": 0.080142,
+          "rank": 3
+        },
+        {
+          "candidateId": "S02-D",
+          "score": 0.017224,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    },
+    {
+      "sceneId": "S03",
+      "description": "A crane loading shipping containers onto a cargo ship at a commercial port.",
+      "candidateCount": 5,
+      "ms": 11872,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S03-C",
+          "score": 0.10776,
+          "rank": 0
+        },
+        {
+          "candidateId": "S03-A",
+          "score": 0.097769,
+          "rank": 1
+        },
+        {
+          "candidateId": "S03-E",
+          "score": 0.085886,
+          "rank": 2
+        },
+        {
+          "candidateId": "S03-B",
+          "score": 0.079488,
+          "rank": 3
+        },
+        {
+          "candidateId": "S03-D",
+          "score": 0.069625,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    },
+    {
+      "sceneId": "S04",
+      "description": "Engineers in hard hats inspecting industrial machinery in a factory.",
+      "candidateCount": 5,
+      "ms": 12807,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S04-B",
+          "score": 0.106644,
+          "rank": 0
+        },
+        {
+          "candidateId": "S04-D",
+          "score": 0.0293,
+          "rank": 1
+        },
+        {
+          "candidateId": "S04-A",
+          "score": 0.028394,
+          "rank": 2
+        },
+        {
+          "candidateId": "S04-C",
+          "score": -0.004719,
+          "rank": 3
+        },
+        {
+          "candidateId": "S04-E",
+          "score": -0.004886,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    },
+    {
+      "sceneId": "S05",
+      "description": "A farmer examining drought-damaged crops in a dry field.",
+      "candidateCount": 5,
+      "ms": 24564,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S05-A",
+          "score": 0.124437,
+          "rank": 0
+        },
+        {
+          "candidateId": "S05-E",
+          "score": 0.046968,
+          "rank": 1
+        },
+        {
+          "candidateId": "S05-B",
+          "score": 0.035343,
+          "rank": 2
+        },
+        {
+          "candidateId": "S05-C",
+          "score": 0.025862,
+          "rank": 3
+        },
+        {
+          "candidateId": "S05-D",
+          "score": 0.0087,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    },
+    {
+      "sceneId": "S06",
+      "description": "A data centre filled with long rows of server racks.",
+      "candidateCount": 5,
+      "ms": 15737,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S06-A",
+          "score": 0.074542,
+          "rank": 0
+        },
+        {
+          "candidateId": "S06-E",
+          "score": 0.073758,
+          "rank": 1
+        },
+        {
+          "candidateId": "S06-B",
+          "score": 0.064649,
+          "rank": 2
+        },
+        {
+          "candidateId": "S06-C",
+          "score": 0.03729,
+          "rank": 3
+        },
+        {
+          "candidateId": "S06-D",
+          "score": -0.077022,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    },
+    {
+      "sceneId": "S07",
+      "description": "An aerial view of heavy traffic congestion on the roads of a major city.",
+      "candidateCount": 5,
+      "ms": 13276,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S07-B",
+          "score": 0.107459,
+          "rank": 0
+        },
+        {
+          "candidateId": "S07-E",
+          "score": 0.080729,
+          "rank": 1
+        },
+        {
+          "candidateId": "S07-D",
+          "score": 0.076348,
+          "rank": 2
+        },
+        {
+          "candidateId": "S07-C",
+          "score": 0.015981,
+          "rank": 3
+        },
+        {
+          "candidateId": "S07-A",
+          "score": -0.024902,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    },
+    {
+      "sceneId": "S08",
+      "description": "A laboratory technician examining samples with a microscope.",
+      "candidateCount": 5,
+      "ms": 11284,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S08-E",
+          "score": 0.084146,
+          "rank": 0
+        },
+        {
+          "candidateId": "S08-A",
+          "score": 0.057503,
+          "rank": 1
+        },
+        {
+          "candidateId": "S08-D",
+          "score": 0.056845,
+          "rank": 2
+        },
+        {
+          "candidateId": "S08-B",
+          "score": 0.009952,
+          "rank": 3
+        },
+        {
+          "candidateId": "S08-C",
+          "score": -0.02614,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    },
+    {
+      "sceneId": "S09",
+      "description": "A warehouse where automated equipment sorts packages on conveyor belts.",
+      "candidateCount": 5,
+      "ms": 12005,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S09-B",
+          "score": 0.087723,
+          "rank": 0
+        },
+        {
+          "candidateId": "S09-E",
+          "score": 0.082478,
+          "rank": 1
+        },
+        {
+          "candidateId": "S09-A",
+          "score": 0.074793,
+          "rank": 2
+        },
+        {
+          "candidateId": "S09-C",
+          "score": 0.064067,
+          "rank": 3
+        },
+        {
+          "candidateId": "S09-D",
+          "score": 0.00943,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    },
+    {
+      "sceneId": "S10",
+      "description": "An electricity transmission substation with transformers and high-voltage power lines.",
+      "candidateCount": 5,
+      "ms": 11968,
+      "ok": true,
+      "fallback": false,
+      "reason": null,
+      "ranking": [
+        {
+          "candidateId": "S10-C",
+          "score": 0.1016,
+          "rank": 0
+        },
+        {
+          "candidateId": "S10-E",
+          "score": 0.099839,
+          "rank": 1
+        },
+        {
+          "candidateId": "S10-D",
+          "score": 0.089336,
+          "rank": 2
+        },
+        {
+          "candidateId": "S10-B",
+          "score": 0.070829,
+          "rank": 3
+        },
+        {
+          "candidateId": "S10-A",
+          "score": 0.055591,
+          "rank": 4
+        }
+      ],
+      "imageErrors": []
+    }
+  ],
+  "calibration": {
+    "sceneId": "S01",
+    "oneImageMs": [
+      4847,
+      4821
+    ],
+    "allImagesMs": [
+      11704,
+      12972
+    ],
+    "imagesInFullCall": 5,
+    "estimatedPerImageMs": 1876,
+    "estimatedFixedLoadMs": 2958,
+    "sameRankingAcrossRepeats": true
+  }
+}
