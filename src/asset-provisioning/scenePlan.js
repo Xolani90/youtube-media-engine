@@ -47,7 +47,7 @@ export function resolveMultiSceneEnabled(env = process.env) {
   throw new Error(`MULTI_SCENE_VISUALS must be one of on, off (got "${v}")`);
 }
 
-function tokens(text) {
+export function tokens(text) {
   return String(text ?? '')
     .toLowerCase()
     .split(/[^a-z0-9]+/)
@@ -176,9 +176,14 @@ function chunkByTerms(sentences, terms, k) {
 }
 
 
+// Discourse/time words that survive the stopword list but make useless stock-photo queries
+// (a probe produced "pilot among" and "again end" for scenes with no curated term).
+const WEAK_QUERY_WORDS = new Set(('among again end however still around against later next year years week weeks month months ' +
+  'time times first second third early late recent report reports percent cent plan plans said according').split(/\s+/));
+
 function topKeywords(text, n = 2) {
   const freq = new Map();
-  for (const t of tokens(text)) freq.set(t, (freq.get(t) ?? 0) + 1);
+  for (const t of tokens(text)) if (t.length >= 5 && !WEAK_QUERY_WORDS.has(t)) freq.set(t, (freq.get(t) ?? 0) + 1);
   return [...freq.entries()]
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .slice(0, n)
@@ -238,10 +243,13 @@ export function planScenes({ visualIdeas, scriptBody, fallbackQuery = null } = {
     // Script keywords are a weak query; use them only for a scene that got no curated visual term.
     if (assigned[ci].length === 0) {
       const kw = topKeywords(chunk.text, 2);
+      // Anchor on the brief's first curated term so a weak keyword cannot drift off-topic
+      // (and varies the result set versus scene 1, which uses that term alone).
+      if (kw.length && terms.length) push(`${terms[0]} ${kw[0]}`);
       if (kw.length) push(kw.join(' '));
     }
     push(fallbackQuery ?? visualIdeas); // unchanged whole-video query: the old behaviour is always the last resort
-    return { index: ci, total: chunks.length, span: chunk.span, queries: queries.slice(0, o.MAX_QUERIES_PER_SCENE) };
+    return { index: ci, total: chunks.length, span: chunk.span, text: chunk.text, queries: queries.slice(0, o.MAX_QUERIES_PER_SCENE) };
   });
 }
 
