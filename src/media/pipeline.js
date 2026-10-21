@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS, SHORT_FORM_RENDER_DEFAULTS, ASR_PROVIDER, TIMING_SOURCE } from './constants.js';
+import { MEDIA_STAGE, OUTCOME, DECISION_LOG_DECISION, RENDER_DEFAULTS, CAPTION_DEFAULTS, SHORT_FORM_RENDER_DEFAULTS, SHORT_FORM_CAPTION_DEFAULTS, ASR_PROVIDER, TIMING_SOURCE } from './constants.js';
 import { resolveProductionForMedia } from './eligibility.js';
 import { selectVisualAssets } from './visualTiming.js';
 import { computeVisualSequencing, computeSequenceSlotTexts } from './visualSequencing.js';
@@ -764,7 +764,12 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
       videoEncoder: RENDER_DEFAULTS.VIDEO_ENCODER,
       listPath: concatListTmpPath,
       outputPath: silentVideoTmpPath,
-      subtitlesPath: captionsSrtTmpPath
+      subtitlesPath: captionsSrtTmpPath,
+      captionStyle: {
+        fontSizePx: SHORT_FORM_CAPTION_DEFAULTS.FONT_SIZE_PX,
+        marginVPx: SHORT_FORM_CAPTION_DEFAULTS.MARGIN_V_PX,
+        marginHPx: SHORT_FORM_CAPTION_DEFAULTS.MARGIN_H_PX
+      }
     }));
     traceSync('child.ffmpeg.mux.short', {}, () => muxNarration({
       silentVideoPath: silentVideoTmpPath,

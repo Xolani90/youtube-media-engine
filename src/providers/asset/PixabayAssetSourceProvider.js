@@ -126,7 +126,7 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
    * failure, malformed body) and from a download failure after a good
    * search. The API key is never placed in a failure.
    */
-  async acquireVisualAsset({ query, assetTypes } = {}) {
+  async acquireVisualAsset({ query, assetTypes, screenHit } = {}) {
     if (!query || typeof query !== 'string' || !query.trim()) {
       throw new Error('PixabayAssetSourceProvider.acquireVisualAsset requires a non-empty query');
     }
@@ -192,15 +192,36 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
       return fail(ASSET_FAILURE_KIND.EMPTY_RESULT, { status: res.status, hitCount: 0 });
     }
 
-    const hit = data.hits[0];
-    const candidate =
-      assetType === 'image' ? this._selectImageCandidate(hit) : this._selectVideoCandidate(hit);
+    // Optional deterministic screen (src/asset-provisioning/candidateGate.js): the search already
+    // returned up to per_page hits in ONE request, so the first hit that passes is the only one
+    // downloaded. Without a screen the behaviour is unchanged: hits[0] only. A screen that throws
+    // rejects the hit (fail closed). The screen can reject, never promote; rights stay UNVERIFIED.
+    const screen = typeof screenHit === 'function' ? screenHit : null;
+    const rejected = [];
+    let hit = null;
+    let candidate = null;
+    const pool = screen ? data.hits : data.hits.slice(0, 1);
+    for (const h of pool) {
+      const c = assetType === 'image' ? this._selectImageCandidate(h) : this._selectVideoCandidate(h);
+      if (!c) { rejected.push({ id: h?.id ?? null, reason: 'no_usable_download_url' }); continue; }
+      if (screen) {
+        let verdict;
+        try {
+          verdict = screen({ id: h.id ?? null, pageURL: h.pageURL ?? null, tags: h.tags ?? '', user: h.user ?? null });
+        } catch {
+          verdict = { accept: false, reason: 'screen_threw' };
+        }
+        if (!verdict || verdict.accept !== true) { rejected.push({ id: h.id ?? null, reason: verdict?.reason ?? 'rejected' }); continue; }
+      }
+      hit = h; candidate = c; break;
+    }
     if (!candidate) {
-      // Hits exist but the selected one carries no usable download URL.
       return fail(ASSET_FAILURE_KIND.EMPTY_RESULT, {
         status: res.status,
         hitCount: data.hits.length,
-        cause: 'first hit has no usable download URL'
+        cause: screen
+          ? `no_hit_passed_screen: ${rejected.map((r) => `${r.id}:${r.reason}`).join('|')}`.slice(0, 200)
+          : 'first hit has no usable download URL'
       });
     }
 
@@ -222,7 +243,7 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
       attributionRequired: false,
       attributionText: hit.user ? `Image/video by ${hit.user} on Pixabay` : null,
       usageRestrictions: PIXABAY_USAGE_RESTRICTIONS,
-      provenanceNotes: this._buildProvenanceNotes({ hit, assetType, candidate }),
+      provenanceNotes: this._buildProvenanceNotes({ hit, assetType, candidate, query: boundedQuery, rejected: screen ? rejected : null }),
       verificationStatus: 'UNVERIFIED'
     };
   }
@@ -345,7 +366,7 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
     }
   }
 
-  _buildProvenanceNotes({ hit, assetType, candidate }) {
+  _buildProvenanceNotes({ hit, assetType, candidate, query = null, rejected = null }) {
     const parts = [
       `provider=pixabay`,
       `pixabayId=${hit.id ?? 'unknown'}`,
@@ -353,6 +374,13 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
     ];
     if (candidate.pageURL) parts.push(`sourceUrl=${candidate.pageURL}`);
     parts.push(`license=${PIXABAY_LICENSE_NAME}`);
+    // Search evidence (only when a screen ran, so unscreened notes are byte-identical to before):
+    // makes "which query / tags / rejected hits led to this asset" recoverable from the DB.
+    if (rejected) {
+      parts.push(`query=${query}`);
+      if (hit.tags) parts.push(`tags=${String(hit.tags).slice(0, 120)}`);
+      if (rejected.length) parts.push(`screenRejected=${rejected.map((r) => `${r.id}:${r.reason}`).join('|').slice(0, 200)}`);
+    }
     return parts.join('; ');
   }
 }

@@ -4,6 +4,7 @@ import { resolveProducedContentForProvisioning } from './eligibility.js';
 import { deriveVisualQuery } from './visualQuery.js';
 import { validateAcquiredAsset } from './validate.js';
 import { planScenes, resolveMultiSceneEnabled, formatSceneUsageContext } from './scenePlan.js';
+import { buildHitScreen, resolveCandidateGateEnabled } from './candidateGate.js';
 import { scriptBodyToNarrationText } from '../media/scriptText.js';
 import { VISUAL_ASSET_TYPES } from '../media/constants.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
@@ -62,14 +63,15 @@ function sanitizeProviderFailure(f) {
 // assets are ordinary usage rows (claim NULL) carrying their span in
 // usage_context. No schema change. Additional scenes are best-effort: scene 1
 // is the stage's contract; a missing later scene only narrows the sequencing.
-const MAX_EXTRA_QUERY_ATTEMPTS = 2;
+const MAX_EXTRA_QUERY_ATTEMPTS = 3;
 
 function assetFingerprints(asset) {
   return [asset.checksum && `c:${asset.checksum}`, asset.location && `l:${asset.location}`, asset.origin && `o:${asset.origin}`].filter(Boolean);
 }
 
-async function provisionAdditionalScenes({ storage, repo, provider, contentVersionId, scenePlan, firstAsset, runId, nowISO }) {
+async function provisionAdditionalScenes({ storage, repo, provider, contentVersionId, scenePlan, firstAsset, runId, nowISO, gate = resolveCandidateGateEnabled() }) {
   const seen = new Set(assetFingerprints(firstAsset));
+  const attachedOrigins = new Set([firstAsset.origin].filter(Boolean));
   const added = [];
   const skipped = [];
   for (const scene of scenePlan.slice(1)) {
@@ -80,7 +82,10 @@ async function provisionAdditionalScenes({ storage, repo, provider, contentVersi
     for (const q of queries) {
       let result;
       try {
-        result = await provider.acquireVisualAsset({ query: q, assetTypes: [...VISUAL_ASSET_TYPES] });
+        result = await provider.acquireVisualAsset({
+          query: q, assetTypes: [...VISUAL_ASSET_TYPES],
+          ...(gate ? { screenHit: buildHitScreen({ sceneText: scene.text ?? '', query: q, excludeOrigins: attachedOrigins }) } : {})
+        });
       } catch (err) {
         skipReason = 'provider_threw'; continue;
       }
@@ -107,6 +112,7 @@ async function provisionAdditionalScenes({ storage, repo, provider, contentVersi
         return id;
       });
       assetFingerprints(result).forEach((f) => seen.add(f));
+      if (result.origin) attachedOrigins.add(result.origin);
       added.push(repo.getAsset(assetId));
       logDecision(storage, {
         runId, subjectType: 'content_version', subjectId: contentVersionId,
@@ -290,7 +296,10 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
 
   let result;
   try {
-    result = await provider.acquireVisualAsset({ query: primaryQuery, assetTypes: [...VISUAL_ASSET_TYPES] });
+    result = await provider.acquireVisualAsset({
+      query: primaryQuery, assetTypes: [...VISUAL_ASSET_TYPES],
+      ...(resolveCandidateGateEnabled() ? { screenHit: buildHitScreen({ sceneText: scenePlan[0]?.text ?? '', query: primaryQuery }) } : {})
+    });
   } catch (err) {
     // A provider THROW is not a provider result: the in-repo provider never
     // throws for operational failures (it returns null), so a throw is a

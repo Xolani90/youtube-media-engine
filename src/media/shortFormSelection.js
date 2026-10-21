@@ -18,6 +18,9 @@
  * visualSequencing.js already uses for its own cut points.
  */
 
+// Terminal . ! ? (optionally followed by closing quote/bracket) at the end of a caption chunk.
+const SENTENCE_END = /[.!?]['"\u2019\u201D)\]]*\s*$/;
+
 function round3(n) {
   return Math.round(n * 1000) / 1000;
 }
@@ -62,7 +65,18 @@ export function selectShortFormSegment({ visualTiming, captionTiming, narrationD
     return { selected: false, reason: 'NO_VALID_SEGMENT' };
   }
 
-  const endSeconds = Math.max(...boundaries);
+  // Prefer a cut where a SENTENCE ends. Caption chunks are sub-sentence
+  // fragments, so cutting at the last chunk boundary can stop the narration
+  // mid-sentence (observed: "...while long-term sector-specific resource").
+  // Only caption entries that carry text can be tested; without any, or with
+  // no sentence end inside the cap, the previous boundary rule applies.
+  const sentenceEnds = [];
+  for (const c of captionTiming ?? []) {
+    if (typeof c.text !== 'string' || !SENTENCE_END.test(c.text)) continue;
+    const end = round3(c.start_seconds + c.duration_seconds);
+    if (end > 0 && end <= maxDurationSeconds) sentenceEnds.push(end);
+  }
+  const endSeconds = sentenceEnds.length > 0 ? Math.max(...sentenceEnds) : Math.max(...boundaries);
   return { selected: true, startSeconds: 0, endSeconds };
 }
 

@@ -2,6 +2,34 @@ import { runFfmpeg } from './ffmpegFailure.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CAPTION_DEFAULTS } from './constants.js';
+
+// libass lays out SRT-derived subtitles on a 288-unit-high canvas and scales to the frame.
+const LIBASS_SRT_PLAY_RES_Y = 288;
+
+/**
+ * Builds the subtitles filter force_style string. With no captionStyle the
+ * long-form CAPTION_DEFAULTS are used unchanged. With captionStyle
+ * ({fontSizePx, marginVPx, marginHPx}) the pixel values are converted to
+ * libass units for the given frame height.
+ */
+export function buildCaptionForceStyle({ height, captionStyle = null }) {
+  const toUnits = (px) => Math.max(1, Math.round((px * LIBASS_SRT_PLAY_RES_Y) / height));
+  const parts = [
+    `FontName=${CAPTION_DEFAULTS.FONT_NAME}`,
+    `FontSize=${captionStyle ? toUnits(captionStyle.fontSizePx) : CAPTION_DEFAULTS.FONT_SIZE}`,
+    `PrimaryColour=${CAPTION_DEFAULTS.PRIMARY_COLOUR}`,
+    `OutlineColour=${CAPTION_DEFAULTS.OUTLINE_COLOUR}`,
+    `BorderStyle=${CAPTION_DEFAULTS.BORDER_STYLE}`,
+    `Outline=${CAPTION_DEFAULTS.OUTLINE}`,
+    `Alignment=${CAPTION_DEFAULTS.ALIGNMENT}`,
+    `MarginV=${captionStyle ? toUnits(captionStyle.marginVPx) : CAPTION_DEFAULTS.MARGIN_V}`
+  ];
+  if (captionStyle?.marginHPx) {
+    const h = toUnits(captionStyle.marginHPx);
+    parts.push(`MarginL=${h}`, `MarginR=${h}`);
+  }
+  return parts.join(',');
+}
 import { buildMusicMixFilter } from './audioMix.js';
 
 /**
@@ -17,7 +45,7 @@ import { buildMusicMixFilter } from './audioMix.js';
  * quirk: the last file's `duration` is otherwise not honored) — that
  * repetition is applied here, not left to the caller.
  */
-export function renderSilentVideo({ visualTiming, width, height, fps, videoEncoder, listPath, outputPath, subtitlesPath = null }) {
+export function renderSilentVideo({ visualTiming, width, height, fps, videoEncoder, listPath, outputPath, subtitlesPath = null, captionStyle = null }) {
   if (!visualTiming || visualTiming.length === 0) {
     throw new Error('renderSilentVideo requires at least one visual timing segment');
   }
@@ -56,16 +84,7 @@ export function renderSilentVideo({ visualTiming, width, height, fps, videoEncod
   if (subtitlesPath) {
     ffmpegCwd = path.dirname(subtitlesPath);
     const subtitlesBasename = escapeFilterPath(path.basename(subtitlesPath));
-    const forceStyle = [
-      `FontName=${CAPTION_DEFAULTS.FONT_NAME}`,
-      `FontSize=${CAPTION_DEFAULTS.FONT_SIZE}`,
-      `PrimaryColour=${CAPTION_DEFAULTS.PRIMARY_COLOUR}`,
-      `OutlineColour=${CAPTION_DEFAULTS.OUTLINE_COLOUR}`,
-      `BorderStyle=${CAPTION_DEFAULTS.BORDER_STYLE}`,
-      `Outline=${CAPTION_DEFAULTS.OUTLINE}`,
-      `Alignment=${CAPTION_DEFAULTS.ALIGNMENT}`,
-      `MarginV=${CAPTION_DEFAULTS.MARGIN_V}`
-    ].join(',');
+    const forceStyle = buildCaptionForceStyle({ height, captionStyle });
     vf += `,subtitles='${subtitlesBasename}':force_style='${forceStyle}'`;
   }
 

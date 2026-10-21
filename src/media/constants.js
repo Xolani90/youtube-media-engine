@@ -156,3 +156,15 @@ export const SHORT_FORM_RENDER_DEFAULTS = Object.freeze({
   HEIGHT: 1920,
   MAX_DURATION_SECONDS: 60
 });
+// Short-form caption layout, in OUTPUT PIXELS. libass scales a force_style
+// FontSize/MarginV by (frame height / 288), so the long-form values in
+// CAPTION_DEFAULTS (tuned for 720p) render ~2.7x too large on the 1920-high
+// portrait frame (~120px text, 4-5 lines covering the picture). These are
+// converted to libass units in render.js#buildCaptionForceStyle. MARGIN_V_PX
+// keeps captions above the bottom ~22% that Shorts/Reels/TikTok overlay with
+// their own UI.
+export const SHORT_FORM_CAPTION_DEFAULTS = Object.freeze({
+  FONT_SIZE_PX: 66,
+  MARGIN_V_PX: 420,
+  MARGIN_H_PX: 90
+});
