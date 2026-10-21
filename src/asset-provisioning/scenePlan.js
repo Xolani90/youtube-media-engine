@@ -22,7 +22,7 @@
  */
 
 export const MULTI_SCENE_DEFAULTS = Object.freeze({
-  MAX_SCENES: 6,
+  MAX_SCENES: 12,
   MIN_SCENES: 2,
   SECONDS_PER_SCENE: 10,
   WORDS_PER_SECOND: 2.5,
