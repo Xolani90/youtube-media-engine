@@ -52,16 +52,59 @@ export function tokens(text) {
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((w) => w.length >= 3 && !STOPWORDS.has(w))
-    .map((w) => (w.length > 4 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w));
+    .map(stem);
 }
 
-function splitSentences(body) {
+/**
+ * Light plural folding used only for matching (never shown in a query). The old rule stripped one
+ * trailing "s" from every long word, which produced "businesse", "classe" and "glasse".
+ */
+function stem(w) {
+  if (w.length <= 4) return w;
+  if (w.endsWith('ies')) return `${w.slice(0, -3)}y`;
+  if (/(ss|sh|ch|x|z)es$/.test(w)) return w.slice(0, -2);
+  if (w.endsWith('s') && !/(ss|us|is)$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+
+function rawSentences(body) {
   return String(body ?? '')
     .replace(/\s+/g, ' ')
     .trim()
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+const HEADING_SMALL_WORDS = new Set(['and', 'of', 'the', 'to', 'for', 'in', 'on', 'with', 'a', 'an', 'vs']);
+
+/** A short Title Case line with no comma or inner sentence punctuation ("Advisor Training and Workshops."). */
+export function isHeading(sentence) {
+  const s = String(sentence ?? '').trim();
+  if (!/[A-Za-z]/.test(s) || /[?!]$/.test(s) || /[.!?;:,]\s/.test(s) || s.includes(',')) return false;
+  const words = s.replace(/\.$/, '').split(/\s+/);
+  if (words.length < 2 || words.length > 7) return false;
+  if (!/^[A-Z]/.test(words[0])) return false;
+  return words.every((w) => HEADING_SMALL_WORDS.has(w.toLowerCase()) || /^[A-Z0-9]/.test(w));
+}
+
+/**
+ * Sentences with headings folded into the sentence they introduce, so a heading never becomes its own
+ * ~2 second scene. A trailing heading folds into the previous sentence.
+ */
+function splitSentences(body) {
+  const out = [];
+  let pending = [];
+  for (const s of rawSentences(body)) {
+    if (isHeading(s)) { pending.push(s); continue; }
+    out.push([...pending, s].join(' '));
+    pending = [];
+  }
+  if (pending.length) {
+    if (out.length) out[out.length - 1] = [out[out.length - 1], ...pending].join(' ');
+    else out.push(pending.join(' '));
+  }
+  return out;
 }
 
 export function splitVisualTerms(visualIdeas) {
@@ -181,13 +224,78 @@ function chunkByTerms(sentences, terms, k) {
 const WEAK_QUERY_WORDS = new Set(('among again end however still around against later next year years week weeks month months ' +
   'time times first second third early late recent report reports percent cent plan plans said according').split(/\s+/));
 
-function topKeywords(text, n = 2) {
+// Abstract words with no photographable subject. Alone they mislead stock search ("access" -> padlock,
+// "baseline" -> baseball base, "beyond" -> Ouija board, "artificial" -> plastic flowers).
+const ABSTRACT_WORDS = new Set(('access beyond initial baseline baselines artificial development practical pathway valuable guidance ' +
+  'structured specialized specific direct continued ongoing approximately several various varying combining ensure ' +
+  'effectively safely increasingly major designed support plans planned established receive provide help gain ' +
+  'capabilities capability participation participants initiatives initiative rollout pilot sector well complete furthermore ' +
+  'aiming national technological navigate lean organizations across within').split(/\s+/));
+
+/**
+ * Scene concept lexicon: narration patterns -> concrete, photographable stock queries. Generic business/tech
+ * explainer vocabulary, not tied to one script. `queries[n]` are interchangeable variants; a repeat of the
+ * same concept in a later scene takes the next variant so scenes do not all ask for the same picture.
+ */
+const CONCEPTS = Object.freeze([
+  { id: 'training', re: /\b(train(?:ing|ers?|ed|s)?|workshops?|advisors?|coach(?:ing|es)?|mentor(?:ing|s)?|seminars?|classroom|lessons?|curriculum|academy|learning)\b/, queries: ['business training workshop', 'people attending seminar'] },
+  { id: 'partnership', re: /\b(partnerships?|partner(?:s|ed)?|collaborat\w*|alliance|agreements?|co-?develop\w*|joint)\b/, queries: ['business handshake partnership', 'two people shaking hands'] },
+  { id: 'ai', re: /\b(ai|artificial intelligence|machine learning|automation|chatgpt|technolog\w*|digital tools?)\b/, queries: ['artificial intelligence technology', 'person using laptop computer'] },
+  { id: 'tools', re: /\b(tools?|software|platforms?|subscriptions?|free access|hands-on|capabilit\w*)\b/, queries: ['person using laptop computer', 'typing on laptop keyboard'] },
+  { id: 'resources', re: /\b(playbooks?|resources?|guides?|toolkits?|templates?|handbooks?|guidelines?)\b/, queries: ['business planning notebook', 'open notebook pen desk'] },
+  { id: 'growth', re: /\b(long-term|scale|scaling|expand\w*|growth|grow\w*|rollout|roll out)\b/, queries: ['business growth chart', 'growing plant seedling'] },
+  { id: 'report', re: /\b(reports?|surveys?|stud(?:y|ies)|trends?|statistics|findings)\b/, queries: ['business analytics chart', 'data charts on screen'] },
+  { id: 'global', re: /\b(global\w*|worldwide|across the globe|international|nationwide|national)\b/, queries: ['world map network', 'globe connections'] },
+  { id: 'hurdles', re: /\b(hurdles?|challenges?|limited time|obstacles?|barriers?|struggl\w*|risks?|pressure)\b/, queries: ['busy business owner desk', 'stressed worker office'] },
+  { id: 'security', re: /\b(privacy|security|secure|reliab\w*|protect\w*|confidential\w*)\b/, queries: ['data security padlock', 'cyber security shield'] },
+  { id: 'team', re: /\b(employees?|staff|teams?|workers?|workforce)\b/, queries: ['small business team office', 'colleagues working together'] },
+  { id: 'local', re: /\b(local|neighbou?rhood|main street)\b/, queries: ['local shop owner', 'main street shops'] }
+]);
+
+function countMatches(re, text) {
+  return (text.match(new RegExp(re.source, 'gi')) ?? []).length;
+}
+
+/** Ranks concepts for one scene: narration hits count once, heading hits twice. Highest first, lexicon order breaks ties. */
+function sceneConcepts(chunkText) {
+  const sentences = rawSentences(chunkText);
+  return CONCEPTS.map((c, order) => {
+    const score = sentences.reduce((n, s) => n + countMatches(c.re, s) * (isHeading(s) ? 2 : 1), 0);
+    return { c, score, order };
+  }).filter((x) => x.score > 0);
+}
+
+/**
+ * A concrete two-word noun phrase taken from the scene itself ("training workshops"). Single words are never
+ * produced: isolated keywords are exactly what produced padlocks and Ouija boards. Acronyms, brand-style
+ * mixed-case words, mid-sentence proper nouns, abstract and discourse words break a phrase.
+ */
+function derivePhrase(chunkText) {
   const freq = new Map();
-  for (const t of tokens(text)) if (t.length >= 5 && !WEAK_QUERY_WORDS.has(t)) freq.set(t, (freq.get(t) ?? 0) + 1);
-  return [...freq.entries()]
-    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
-    .slice(0, n)
-    .map(([w]) => w);
+  const pairs = [];
+  rawSentences(chunkText).forEach((sentence, si) => {
+    const heading = isHeading(sentence);
+    const words = sentence.split(/[^A-Za-z0-9'-]+/).filter(Boolean);
+    let prev = null;
+    words.forEach((raw, wi) => {
+      if (raw.includes('-')) { prev = null; return; } // hyphenated compounds (in-person, long-term) are not phrase parts
+      const w = raw.replace(/'s$/i, '').toLowerCase();
+      const proper = /^[A-Z]{2,}$/.test(raw) || /[a-z][A-Z]/.test(raw) || (!heading && wi > 0 && /^[A-Z]/.test(raw));
+      const content = !proper && w.length >= 4 && !/^\d+$/.test(w) && !STOPWORDS.has(w) && !WEAK_QUERY_WORDS.has(w) &&
+        !ABSTRACT_WORDS.has(w) && !w.endsWith('ly');
+      if (!content) { prev = null; return; }
+      const key = stem(w);
+      freq.set(key, (freq.get(key) ?? 0) + (heading ? 2 : 1));
+      if (prev) pairs.push({ phrase: `${prev.w} ${w}`, order: si * 1000 + wi, a: prev.key, b: key });
+      prev = { w, key };
+    });
+  });
+  let best = null;
+  for (const p of pairs) {
+    const score = (freq.get(p.a) ?? 0) + (freq.get(p.b) ?? 0);
+    if (!best || score > best.score || (score === best.score && p.order < best.order)) best = { ...p, score };
+  }
+  return best ? best.phrase : null;
 }
 
 /**
@@ -210,11 +318,13 @@ export function planScenes({ visualIdeas, scriptBody, fallbackQuery = null } = {
   const chunkTokens = chunks.map((c) => new Set(tokens(c.text)));
   const termTokens = terms.map((t) => tokens(t));
 
-  // 1. Lexical alignment: a visual term goes to the chunk whose text mentions it most.
+  // 1. Lexical alignment: a visual term goes to the chunk whose text mentions it most (a term that shares
+  //    no word with any scene is NOT forced onto an unrelated scene here; see the fallback below).
   const pairs = [];
+  const overlapOf = new Map();
   terms.forEach((_, ti) => chunks.forEach((_, ci) => {
     const score = termTokens[ti].filter((w) => chunkTokens[ci].has(w)).length;
-    if (score > 0) pairs.push({ ti, ci, score });
+    if (score > 0) { pairs.push({ ti, ci, score }); overlapOf.set(`${ti}:${ci}`, score); }
   }));
   pairs.sort((a, b) => b.score - a.score || a.ti - b.ti || a.ci - b.ci);
   const assigned = chunks.map(() => []);
@@ -224,33 +334,69 @@ export function planScenes({ visualIdeas, scriptBody, fallbackQuery = null } = {
     assigned[ci].push(ti);
     termUsed.add(ti);
   }
-  // 2. Remaining terms fill still-empty scenes in narrative order, then the lightest scenes.
+
+  // 2. Scene-specific candidates from the narration itself: concept queries (with repeat control) and one
+  //    derived noun phrase.
+  const conceptUse = new Map();
+  const specific = chunks.map((chunk) => {
+    const ranked = sceneConcepts(chunk.text)
+      .map((x) => ({ ...x, adj: x.score - 0.75 * (conceptUse.get(x.c.id) ?? 0) }))
+      .sort((a, b) => b.adj - a.adj || a.order - b.order)
+      .slice(0, 2);
+    const conceptQueries = ranked.map(({ c }) => {
+      const n = conceptUse.get(c.id) ?? 0;
+      conceptUse.set(c.id, n + 1);
+      return c.queries[n % c.queries.length];
+    });
+    // A derived phrase is allowed from a heading (an explicit topic label) or as the only scene-specific
+    // signal; next to concept queries it only adds noise.
+    const headings = rawSentences(chunk.text).filter(isHeading);
+    const phrase = headings.length ? derivePhrase(headings.join(' ')) : (conceptQueries.length ? null : derivePhrase(chunk.text));
+    return { conceptQueries, phrase };
+  });
+
+  // 3. Terms nothing in the narration supports fill only scenes that have no scene-specific query at all,
+  //    in narrative order (the old behaviour, now a last resort rather than the default).
   for (let ti = 0; ti < terms.length; ti++) {
     if (termUsed.has(ti)) continue;
-    let ci = assigned.findIndex((a) => a.length === 0);
-    if (ci < 0) ci = assigned.reduce((best, a, i) => (a.length < assigned[best].length ? i : best), 0);
+    const ci = chunks.findIndex((_, i) => assigned[i].length === 0 && !specific[i].conceptQueries.length && !specific[i].phrase);
+    if (ci < 0) break;
     assigned[ci].push(ti);
     termUsed.add(ti);
   }
 
-  return chunks.map((chunk, ci) => {
+  const MAX_SPECIFIC = Math.max(1, o.MAX_QUERIES_PER_SCENE - 1); // the last slot is reserved for the whole-video query
+  const fallbackUse = new Map();
+  const firstQueries = [];
+  const plans = chunks.map((chunk, ci) => {
     const queries = [];
     const push = (q) => {
       const t = String(q ?? '').trim();
       if (t && !queries.some((x) => x.toLowerCase() === t.toLowerCase())) queries.push(t);
     };
-    for (const ti of assigned[ci].sort((a, b) => a - b)) push(terms[ti]);
-    // Script keywords are a weak query; use them only for a scene that got no curated visual term.
-    if (assigned[ci].length === 0) {
-      const kw = topKeywords(chunk.text, 2);
-      // Anchor on the brief's first curated term so a weak keyword cannot drift off-topic
-      // (and varies the result set versus scene 1, which uses that term alone).
-      if (kw.length && terms.length) push(`${terms[0]} ${kw[0]}`);
-      if (kw.length) push(kw.join(' '));
+    const mine = [...assigned[ci]].sort((a, b) => a - b);
+    // A curated term the narration mostly mentions leads; one that only brushes it follows the scene's own concepts.
+    const strong = mine.filter((ti) => (overlapOf.get(`${ti}:${ci}`) ?? 0) >= Math.ceil(termTokens[ti].length / 2));
+    const weak = mine.filter((ti) => !strong.includes(ti));
+    strong.forEach((ti) => push(terms[ti]));
+    specific[ci].conceptQueries.forEach(push);
+    weak.forEach((ti) => push(terms[ti]));
+    push(specific[ci].phrase);
+    // Generic but topic-relevant fallback: a curated term, rotated so neighbouring scenes differ.
+    if (queries.length < 2 && terms.length) {
+      const avoid = new Set([firstQueries[ci - 1]].filter(Boolean).map((q) => q.toLowerCase()));
+      const pick = terms.map((t, ti) => ({ t, ti, n: fallbackUse.get(ti) ?? 0 }))
+        .filter((x) => !avoid.has(x.t.toLowerCase()) && !queries.some((q) => q.toLowerCase() === x.t.toLowerCase()))
+        .sort((a, b) => a.n - b.n || a.ti - b.ti)[0];
+      if (pick) { push(pick.t); fallbackUse.set(pick.ti, pick.n + 1); }
     }
-    push(fallbackQuery ?? visualIdeas); // unchanged whole-video query: the old behaviour is always the last resort
-    return { index: ci, total: chunks.length, span: chunk.span, text: chunk.text, queries: queries.slice(0, o.MAX_QUERIES_PER_SCENE) };
+    const head = queries.slice(0, MAX_SPECIFIC);
+    firstQueries[ci] = head[0] ?? null;
+    const whole = String(fallbackQuery ?? visualIdeas ?? '').trim();
+    if (whole && !head.some((x) => x.toLowerCase() === whole.toLowerCase())) head.push(whole); // unchanged whole-video query stays the last resort
+    return { index: ci, total: chunks.length, span: chunk.span, text: chunk.text, queries: head };
   });
+  return plans;
 }
 
 /** After acquisition, closes gaps left by scenes that found no asset so spans tile [0,1] exactly. */
