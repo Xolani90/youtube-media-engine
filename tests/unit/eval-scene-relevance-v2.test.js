@@ -488,13 +488,15 @@ test('judgment mapping fails closed: wrong key, unknown ids, swapped candidate s
 });
 
 test('fetch script: dry run makes no network call; real runs need the approval flag and a key', () => {
-  const dry = run('fetch', ['--group', 'positive', '--dry-run'], { PIXABAY_API_KEY: '' });
+  const dir = fetchFixture(); const E = { EVAL_DIR: dir };
+  const dry = run('fetch', ['--group', 'positive', '--dry-run'], { ...E, PIXABAY_API_KEY: '' });
   assert.equal(dry.status, 0, dry.stderr); assert.match(dry.stdout, /30 searches, up to 240 downloads\. No network call made/);
-  const nm = run('fetch', ['--group', 'nearmiss', '--dry-run'], {}); assert.match(nm.stdout, /10 searches, up to 80 downloads/);
-  const noFlag = run('fetch', ['--group', 'positive'], { PIXABAY_API_KEY: 'k' }); assert.equal(noFlag.status, 1); assert.match(noFlag.stderr, /confirm-stage-approved/);
-  const noKey = run('fetch', ['--group', 'positive', '--confirm-stage-approved'], { PIXABAY_API_KEY: '' }); assert.equal(noKey.status, 1); assert.match(noKey.stderr, /PIXABAY_API_KEY is not set/);
-  const noGroup = run('fetch', [], {}); assert.equal(noGroup.status, 1);
-  const pilot = run('fetch', ['--only', 'A01,C01,F01', '--dry-run'], {}); assert.match(pilot.stdout, /3 searches, up to 24 downloads/);
+  const nm = run('fetch', ['--group', 'nearmiss', '--dry-run'], E); assert.match(nm.stdout, /10 searches, up to 80 downloads/);
+  const noFlag = run('fetch', ['--group', 'positive'], { ...E, PIXABAY_API_KEY: 'k' }); assert.equal(noFlag.status, 1); assert.match(noFlag.stderr, /confirm-stage-approved/);
+  const noKey = run('fetch', ['--group', 'positive', '--confirm-stage-approved'], { ...E, PIXABAY_API_KEY: '' }); assert.equal(noKey.status, 1); assert.match(noKey.stderr, /PIXABAY_API_KEY is not set/);
+  const noGroup = run('fetch', [], E); assert.equal(noGroup.status, 1);
+  const pilot = run('fetch', ['--only', 'A01,C01,F01', '--dry-run'], E); assert.match(pilot.stdout, /3 searches, up to 24 downloads/);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('report: PROMISING path end to end on synthetic data; rule frozen from calibration only', () => {
