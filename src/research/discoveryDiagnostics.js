@@ -24,8 +24,9 @@ import { safeUrl } from '../diagnostics/trace.js';
  * sanitizer below removes the credential shapes this repository can plausibly
  * produce -- URL userinfo/query/fragment, Bearer/Basic tokens, and
  * `<name containing key|token|secret|password|authorization|signature|credential> = / : value`
- * pairs -- then bounds length. A secret in free prose with no such label is NOT
- * detected. Do not describe this as guaranteed secret removal.
+ * pairs -- then bounds length. Well-known key prefixes and long mixed
+ * letter/digit tokens are also redacted; any other unlabelled secret in free
+ * prose is NOT detected. Do not describe this as guaranteed secret removal.
  */
 
 export const DISCOVERY_OUTCOME = Object.freeze({
@@ -50,6 +51,12 @@ const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
 const BEARER_RE = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 const LABELLED_SECRET_RE =
   /(["']?[\w-]*(?:key|token|secret|passw(?:or)?d|authorization|signature|credential)[\w-]*["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s&,;}"')\]]+)/gi;
+// "HTTP <status>: <body>" keeps the status and drops the provider's raw body.
+const HTTP_BODY_RE = /(\bHTTP\s+\d{3})\s*:[\s\S]*$/i;
+// Unlabelled credential shapes: well-known key prefixes, then long mixed letter+digit tokens.
+const KEY_PREFIX_RE = /\b(?:sk|tvly|AIza|ghp|gho|xox[abp])[-_A-Za-z0-9]{10,}/g;
+const LONG_TOKEN_RE = /\b[A-Za-z0-9_-]{32,}\b/g;
+const looksOpaque = (t) => /\d/.test(t) && /[A-Za-z]/.test(t);
 
 /** Reduces any value to a short, single-line, credential-scrubbed string. Never throws. */
 export function sanitizeDiscoveryText(value, max = MAX_DIAGNOSTIC_TEXT) {
@@ -57,6 +64,7 @@ export function sanitizeDiscoveryText(value, max = MAX_DIAGNOSTIC_TEXT) {
     if (value === null || value === undefined) return null;
     let text = typeof value === 'string' ? value : String(value);
     text = text.slice(0, PRE_REDACTION_CAP);
+    text = text.replace(HTTP_BODY_RE, '$1 (response body omitted)');
     text = text.replace(URL_RE, (match) => {
       // Trailing sentence punctuation is not part of the URL.
       const trailing = match.match(/[.,;:!?)\]}]+$/)?.[0] ?? '';
@@ -65,6 +73,8 @@ export function sanitizeDiscoveryText(value, max = MAX_DIAGNOSTIC_TEXT) {
     });
     text = text.replace(BEARER_RE, 'Bearer [REDACTED]');
     text = text.replace(LABELLED_SECRET_RE, '$1[REDACTED]');
+    text = text.replace(KEY_PREFIX_RE, '[REDACTED]')
+      .replace(LONG_TOKEN_RE, (t) => (looksOpaque(t) ? '[REDACTED]' : t));
     text = text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (text.length > max) text = `${text.slice(0, max)}…`;
     return text;
