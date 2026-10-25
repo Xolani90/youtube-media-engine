@@ -471,6 +471,11 @@ export async function runAutonomousOperation(deps) {
   }
   const { storage, mode, onStageError } = deps;
   const recorder = deps.systemRunRecorder ?? new SystemRunRecorder(storage);
+  // Forwarded to finish() only when the caller supplied one (see src/index.js);
+  // otherwise the key is absent and the column is never touched.
+  const ceilingSummaryOption = Object.prototype.hasOwnProperty.call(deps, 'ceilingSummary')
+    ? { ceilingSummary: deps.ceilingSummary }
+    : {};
 
   const { id: runId, mode: startedMode } = recorder.start(mode ? { mode } : {});
   const stages = buildStages(deps, startedMode);
@@ -563,13 +568,12 @@ export async function runAutonomousOperation(deps) {
     // supplied one keeps every other/test caller of runAutonomousOperation
     // byte-for-byte unaffected (SystemRunRecorder.finish only writes the
     // column when the option key is explicitly present).
-    recorder.finish(runId, {
-      status,
-      stopReason,
-      ...(Object.prototype.hasOwnProperty.call(deps, 'ceilingSummary') ? { ceilingSummary: deps.ceilingSummary } : {})
-    });
+    recorder.finish(runId, { status, stopReason, ...ceilingSummaryOption });
   } catch (err) {
-    recorder.finish(runId, { status: 'FAILED', stopReason: err.message });
+    // The same option is forwarded on the failure release so a run that fails
+    // after the caller computed its ceilingSummary (e.g. Discovery funnel
+    // stats) still persists it. Status and stop_reason are unchanged.
+    recorder.finish(runId, { status: 'FAILED', stopReason: err.message, ...ceilingSummaryOption });
     throw err;
   }
 
