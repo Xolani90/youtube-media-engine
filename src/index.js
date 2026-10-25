@@ -89,6 +89,10 @@ export async function runAutonomousEntrypoint(deps = {}) {
   const recorder = new SystemRunRecorder(storage);
   let guard = null;
   let released = false;
+  // Built as soon as Discovery's stats exist (see below) so the outer failure
+  // release can persist it too. Stays null when Discovery itself never
+  // returned, in which case no summary is written (column left untouched).
+  let ceilingSummary = null;
 
   try {
     await traceAsync('entrypoint.migrate', {}, () => storage.migrate());
@@ -241,6 +245,32 @@ export async function runAutonomousEntrypoint(deps = {}) {
       freshEvaluationBudget
     }), (r) => ({ selected: r?.stats?.selected, scored: r?.stats?.scored })));
 
+    // ADR-0038: run-level structured ceiling summary combining RSS admission
+    // and Discovery dedup workload ceilings, persisted on this run's
+    // system_runs row (via runAutonomousOperation -> recorder.finish) so the
+    // autonomous orchestration layer can distinguish normal/exhaustive
+    // Discovery completion from workload-bounded Discovery completion. The
+    // exact shape is an implementation detail -- not decided by ADR-0038.
+    //
+    // `discoveryStats` is the existing, unmodified `discoveryResult.stats`
+    // (candidates/dedupRejected/eligibilityRejected/featureRejected/scored/
+    // selected/...). It rides the same persistence path as the rest of the
+    // summary (system_runs.ceiling_summary via finish()), so the funnel of every
+    // run is queryable after the fact instead of living only in the CI log. The
+    // summary is built BEFORE outcome recording so that a failure from there on
+    // (outcome recording, the runner) can still release the run with it.
+    ceilingSummary = {
+      rss: rssCeilings ?? { perFeedCapReached: [], globalCapReached: false },
+      dedup: discoveryResult.ceilings ?? { l2ComparisonCapReached: false, l3SemanticCallCapReached: false },
+      bounded: Boolean(
+        (rssCeilings?.perFeedCapReached?.length > 0) ||
+        rssCeilings?.globalCapReached ||
+        discoveryResult.ceilings?.l2ComparisonCapReached ||
+        discoveryResult.ceilings?.l3SemanticCallCapReached
+      ),
+      discoveryStats: discoveryResult.stats ?? null
+    };
+
     // Record outcomes only after Discovery returned successfully. If
     // Discovery threw, the rows stay NOT_EVALUATED (non-suppressing). A
     // failed write fails closed: the runner does not start.
@@ -250,23 +280,6 @@ export async function runAutonomousEntrypoint(deps = {}) {
       discoveryResult,
       now: deps.discovery?.now
     }));
-
-    // ADR-0038: run-level structured ceiling summary combining RSS admission
-    // and Discovery dedup workload ceilings, persisted on this run's
-    // system_runs row (via runAutonomousOperation -> recorder.finish) so the
-    // autonomous orchestration layer can distinguish normal/exhaustive
-    // Discovery completion from workload-bounded Discovery completion. The
-    // exact shape is an implementation detail -- not decided by ADR-0038.
-    const ceilingSummary = {
-      rss: rssCeilings ?? { perFeedCapReached: [], globalCapReached: false },
-      dedup: discoveryResult.ceilings ?? { l2ComparisonCapReached: false, l3SemanticCallCapReached: false },
-      bounded: Boolean(
-        (rssCeilings?.perFeedCapReached?.length > 0) ||
-        rssCeilings?.globalCapReached ||
-        discoveryResult.ceilings?.l2ComparisonCapReached ||
-        discoveryResult.ceilings?.l3SemanticCallCapReached
-      )
-    };
 
     const runnerResult = await traceAsync('runner.operation', {}, () => runAutonomousOperation({
       ...deps,
@@ -338,7 +351,13 @@ export async function runAutonomousEntrypoint(deps = {}) {
     // RUNNING row remains and the next invocation refuses (fail closed).
     if (guard && !released) {
       try {
-        recorder.finish(guard.id, { status: 'FAILED', stopReason: err.message });
+        recorder.finish(guard.id, {
+          status: 'FAILED',
+          stopReason: err.message,
+          // Only when Discovery's stats were already computed; otherwise the
+          // option is omitted and the column stays untouched.
+          ...(ceilingSummary ? { ceilingSummary } : {})
+        });
       } catch {
         // fail closed: RUNNING evidence stays for Owner reclamation
       }
