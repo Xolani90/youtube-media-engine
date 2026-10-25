@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { RESEARCH_STAGE, RESEARCH_PROJECT_STATUS, RETRIEVAL_STATUS, EVIDENCE_STATUS, CLAIM_TYPE, CONTRADICTION_RESULT, CONTRADICTION_EXECUTION_STATE } from './constants.js';
 import { acquireSources } from './acquisition.js';
+import { describeDiscoveryOutcome, sanitizeDiscoveryText } from './discoveryDiagnostics.js';
 import { classifySourceRole, assessEvidenceAdmissibility } from './sourceClassification.js';
 import { buildSourceProvenance } from './sourceProvenance.js';
 import { buildEvidenceQueries, discoverWithCascade, newEvidenceSearchDiag } from './evidenceSearch.js';
@@ -42,6 +43,26 @@ function logDecision(storage, { runId = null, stage, subjectType, subjectId, dec
     [id, runId, subjectType, subjectId, decision, reason, provider, configSnapshot ? JSON.stringify(configSnapshot) : null, confidence, resultingState, nowISO(), stage]
   );
   return id;
+}
+
+/**
+ * Audit-only record that discovery produced no candidates, with WHY (provider
+ * failure vs. genuinely empty vs. malformed). Same discipline as the
+ * diagnostics-gated trace block near the end of this file: it must never
+ * affect research, so a problem here is swallowed. It changes no state:
+ * resulting_state is intentionally NULL because the project stays RESEARCHING
+ * and no new state value is introduced.
+ */
+function logNoCandidates(storage, { runId, projectId, diagnostics }) {
+  try {
+    const diag = diagnostics && typeof diagnostics === 'object' ? diagnostics : null;
+    logDecision(storage, {
+      runId, stage: RESEARCH_STAGE.SOURCE_DISCOVERY, subjectType: 'research_project', subjectId: projectId,
+      decision: 'NO_CANDIDATES', reason: describeDiscoveryOutcome(diag),
+      provider: typeof diag?.provider === 'string' ? diag.provider : null,
+      configSnapshot: diag ? { discovery: diag } : null
+    });
+  } catch { /* diagnostics must never affect research */ }
 }
 
 /**
@@ -607,7 +628,7 @@ async function runResearchBody({
     if (acquisitionResult.discoveryFailed) {
       logDecision(storage, {
         runId, stage: RESEARCH_STAGE.SOURCE_DISCOVERY, subjectType: 'research_project', subjectId: project.id,
-        decision: 'FAILED', reason: acquisitionResult.discoveryError, resultingState: RESEARCH_PROJECT_STATUS.FAILED
+        decision: 'FAILED', reason: sanitizeDiscoveryText(acquisitionResult.discoveryError) ?? 'discovery_failed', resultingState: RESEARCH_PROJECT_STATUS.FAILED
       });
       storage.run('UPDATE research_projects SET status = ?, stop_reason = ?, completed_at = ? WHERE id = ?',
         [RESEARCH_PROJECT_STATUS.FAILED, 'SOURCE_DISCOVERY_FAILED', new Date().toISOString(), project.id]);
@@ -618,6 +639,9 @@ async function runResearchBody({
     // ADR-0039: every acquired source, its decision rows and the
     // SOURCES_PERSISTED checkpoint commit atomically.
     storage.transaction(() => {
+    if (acquisitionResult.candidatesConsidered === 0) {
+      logNoCandidates(storage, { runId, projectId: project.id, diagnostics: acquisitionResult.discoveryDiagnostics });
+    }
     for (const acquired of acquisitionResult.acquired) {
       const roleResult = classifySourceRole(acquired.url, classification);
       const admissibility = assessEvidenceAdmissibility(acquired.status, roleResult.role, acquired.content);
@@ -650,7 +674,9 @@ async function runResearchBody({
           attemptsUsed: acquisitionResult.attemptsUsed ?? 0,
           candidatesConsidered: acquisitionResult.candidatesConsidered ?? 0,
           candidatesExhausted: acquisitionResult.candidatesExhausted === true,
-          researchDiag
+          researchDiag,
+          // Additive and optional: absent in checkpoints written before this field existed.
+          discovery: acquisitionResult.discoveryDiagnostics ?? null
         }
       });
     });
