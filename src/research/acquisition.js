@@ -1,6 +1,7 @@
 import { RETRIEVAL_STATUS } from './constants.js';
 import { retrieveSource } from './retrieval.js';
 import { traceAsync, safeHost } from '../diagnostics/trace.js';
+import { summarizeDiscovery } from './discoveryDiagnostics.js';
 
 /**
  * Orchestrates bounded source acquisition (Research Subsystem
@@ -24,7 +25,10 @@ import { traceAsync, safeHost } from '../diagnostics/trace.js';
  * @param {object} deps.policy - research_policy.json
  * @param {function} [deps.retrieveImpl] - injectable for testing (defaults to retrieveSource)
  * @param {function} [deps.fetchImpl] - forwarded to retrieveImpl
- * @returns {Promise<{acquired: Array, attemptsUsed: number, candidatesConsidered: number, candidatesExhausted: boolean, discoveryFailed: boolean, discoveryError: string|null}>}
+ * @returns {Promise<{acquired: Array, attemptsUsed: number, candidatesConsidered: number, candidatesExhausted: boolean, discoveryFailed: boolean, discoveryError: string|null, discoveryDiagnostics: object}>}
+ *   `discoveryDiagnostics` (additive, read-only; see discoveryDiagnostics.js): a bounded,
+ *   credential-scrubbed summary of what the provider returned. It never influences retries,
+ *   counters, candidate exhaustion or admissibility, and `discoveryError` is unchanged.
  *   `acquired` entries: { url, title, snippet, publishedAt, status, content, error, attemptCount }
  *   `candidatesExhausted`: true iff every discovered candidate was visited
  *   by the loop below — i.e. the loop ran out of candidates on its own,
@@ -45,8 +49,9 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
   let candidates = [];
   let discoveryFailed = false;
   let discoveryError = null;
+  let discovery = null;
   try {
-    const discovery = await traceAsync(
+    discovery = await traceAsync(
       'research.discover', { provider: provider?.id },
       () => provider.discoverCandidates({ query, maxResults: maxSources, alreadyAcquiredUrls: [] }),
       (d) => ({ candidates: d?.candidates?.length, failures: d?.failures?.length })
@@ -58,8 +63,15 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
     // distinction — this is the "discovery failure" case).
     discoveryFailed = true;
     discoveryError = err.message;
-    return { acquired: [], attemptsUsed: 0, candidatesConsidered: 0, candidatesExhausted: false, discoveryFailed, discoveryError };
+    return {
+      acquired: [], attemptsUsed: 0, candidatesConsidered: 0, candidatesExhausted: false, discoveryFailed, discoveryError,
+      discoveryDiagnostics: summarizeDiscovery({ provider, thrown: err })
+    };
   }
+  // Computed once, outside the try above (so a diagnostics problem can never be
+  // mistaken for a discovery failure), and before the loop (so it reflects what the
+  // provider returned, not what acquisition did with it). summarizeDiscovery never throws.
+  const discoveryDiagnostics = summarizeDiscovery({ provider, discovery });
 
   const acquired = [];
   let attemptsUsed = 0;
@@ -115,5 +127,5 @@ export async function acquireSources({ provider, query, policy, retrieveImpl = r
 
   const candidatesExhausted = candidatesVisited === candidates.length;
 
-  return { acquired, attemptsUsed, candidatesConsidered: candidates.length, candidatesExhausted, discoveryFailed, discoveryError };
+  return { acquired, attemptsUsed, candidatesConsidered: candidates.length, candidatesExhausted, discoveryFailed, discoveryError, discoveryDiagnostics };
 }
