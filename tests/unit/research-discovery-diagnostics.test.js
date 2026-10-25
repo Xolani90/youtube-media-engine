@@ -57,8 +57,22 @@ test('sanitize: a credential straddling the final length cap leaves no partial s
   assert.ok(!out.includes('SECR'), `partial secret leaked: ${out.slice(-30)}`);
 });
 
-test('sanitize: DOCUMENTED LIMIT - an unlabelled secret in free prose is NOT detected (this is best-effort, not complete redaction)', () => {
-  assert.equal(sanitizeDiscoveryText('the provider echoed sk-bare-token-123 in prose'), 'the provider echoed sk-bare-token-123 in prose');
+test('sanitize: DOCUMENTED LIMIT - well-known key prefixes and long opaque tokens are redacted; other unlabelled secrets are NOT (best-effort)', () => {
+  assert.ok(!sanitizeDiscoveryText('echoed sk-bare-token-123 in prose').includes('sk-bare'));
+  assert.ok(!sanitizeDiscoveryText('key tvly-ABCDEF1234567890XYZ rejected').includes('tvly-ABC'));
+  assert.ok(!sanitizeDiscoveryText('opaque ' + 'a1B2c3D4'.repeat(6)).includes('a1B2c3D4a1B2'));
+  // Still undetected: a short, unprefixed secret in prose.
+  assert.equal(sanitizeDiscoveryText('the provider echoed hunter2 in prose'), 'the provider echoed hunter2 in prose');
+});
+
+test('sanitize: an HTTP status keeps the code and drops the raw response body', () => {
+  assert.equal(sanitizeDiscoveryText('Tavily HTTP 401: {"detail":"invalid key"} trailing'), 'Tavily HTTP 401 (response body omitted)');
+  assert.equal(sanitizeDiscoveryText('HTTP 503'), 'HTTP 503');
+});
+
+test('sanitize: long hyphenated words and URL slugs are not mistaken for tokens', () => {
+  const t = 'see example.com/how-to-build-a-widget-in-five-easy-steps-today';
+  assert.equal(sanitizeDiscoveryText(t), t);
 });
 
 test('sanitize: null/undefined -> null; non-strings coerced; hostile objects never throw', () => {
@@ -91,10 +105,10 @@ test('summarize: genuinely empty result (no candidates, no failures, no malforma
 });
 
 test('summarize: provider-reported failure with zero candidates', () => {
-  const s = summarizeDiscovery({ provider: { id: 'p1' }, discovery: { candidates: [], failures: [{ error: 'Tavily HTTP 401: nope' }] } });
+  const s = summarizeDiscovery({ provider: { id: 'p1' }, discovery: { candidates: [], failures: [{ error: 'Tavily HTTP 401 (response body omitted)' }] } });
   assert.equal(s.outcome, O.PROVIDER_REPORTED_FAILURE);
   assert.equal(s.failureCount, 1);
-  assert.equal(s.failures[0].error, 'Tavily HTTP 401: nope');
+  assert.equal(s.failures[0].error, 'Tavily HTTP 401 (response body omitted)');
 });
 
 test('summarize: failures are bounded (count and length) but failureCount is the true total', () => {

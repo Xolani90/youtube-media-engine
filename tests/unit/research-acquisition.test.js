@@ -244,7 +244,7 @@ test('diagnostics: zero candidates WITH a provider failure is distinguishable fr
   const failing = await acquireSources({ provider: new ScriptedProvider({ candidates: [], failures: [{ error: 'Tavily HTTP 401: nope' }] }), query: 'q', policy: policyWith(), retrieveImpl: okRetrieve });
   const empty = await acquireSources({ provider: new ScriptedProvider({ candidates: [], failures: [] }), query: 'q', policy: policyWith(), retrieveImpl: okRetrieve });
   assert.equal(failing.discoveryDiagnostics.outcome, 'provider_reported_failure');
-  assert.equal(failing.discoveryDiagnostics.failures[0].error, 'Tavily HTTP 401: nope');
+  assert.equal(failing.discoveryDiagnostics.failures[0].error, 'Tavily HTTP 401 (response body omitted)');
   assert.equal(empty.discoveryDiagnostics.outcome, 'empty_result');
   // Same observable acquisition result either way (including the legacy vacuous candidatesExhausted=true).
   assert.deepEqual(withoutDiagnostics(failing), withoutDiagnostics(empty));
