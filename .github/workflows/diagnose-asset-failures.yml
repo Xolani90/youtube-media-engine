@@ -1,0 +1,301 @@
+# Diagnose ASSET_PROVISIONING failures (read-only, aggregate-only).
+#
+# PROPOSAL. Not authorized to run. Adding this file to the default branch and
+# dispatching it are two separate Owner decisions.
+#
+# Two parts, with different network behavior:
+#   1. Restore step (actions/cache/restore, pinned to a commit). This DOES use the network: it
+#      contacts the GitHub Actions cache service using the runner's own cache
+#      credentials and downloads the entry media-engine-sqlite-40185575692-1
+#      (the SQLite file plus the two run-state directories saved with it). It
+#      is restore-only: it never saves or modifies a cache entry.
+#   2. Diagnostic script (inline Python). This makes NO network calls and
+#      imports no network or subprocess module. It opens the restored database
+#      read-only and immutable, validates the schema, and prints only fixed
+#      labels, integer counts and YYYY-MM-DD dates for ASSET_PROVISIONING
+#      failures. It uses no secrets and never prints a free-form database
+#      value (titles, prompts, URLs, paths, reasons, provider messages,
+#      exception messages, config_snapshot text, identifiers).
+#
+# The job never checks out the repository, uploads artifacts or writes to the
+# database.
+#
+# Snapshot consistency (from the repository source at 2d916fe):
+#   scheduled-run.yml and reclaim-orphaned-guard.yml both save this key
+#   pattern, and only after PRAGMA wal_checkpoint(TRUNCATE) reports busy=0;
+#   a failed checkpoint withholds the save. Only the main database file is
+#   cached, so a saved entry should carry no -wal/-shm state. immutable=1
+#   makes SQLite ignore any WAL, so the script aborts if a non-empty -wal or
+#   -shm sidecar is present after restore. Which workflow saved this exact key
+#   is NOT verified, and the checkpoint guarantee is read from the workflow
+#   source, not observed on the real file.
+#
+# Requirements and unverified assumptions:
+#   * A workflow_dispatch workflow can only be dispatched once it exists on the
+#     default branch. The entry was observed on refs/heads/main; re-check
+#     existence and ref before dispatch.
+#   * The cache key's provenance and current existence are NOT verified here.
+#   * The restore path list must equal the list the entry was saved with (same
+#     three paths, same order as scheduled-run.yml), because actions/cache
+#     scopes entries by key AND path list.
+#   * permissions: {} with actions/cache/restore is UNPROVEN until a real
+#     run. If the restore step is rejected, stop and review; do not widen
+#     scopes.
+#   * The restore action is pinned to commit 0057852b…, the revision that the
+#     v4 and v4.3.0 tags of actions/cache resolved to when reviewed. Other
+#     workflows in this repository still use the @v4 tag.
+
+name: Diagnose Asset Failures (read-only)
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: diagnose-asset-failures
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Same conventions and same order as .github/workflows/scheduled-run.yml.
+      SQLITE_PATH: ${{ github.workspace }}/data/media-engine.db
+      MEDIA_ARTIFACTS_DIR: ${{ github.workspace }}/data/media_artifacts
+      ASSET_DOWNLOAD_DIR: ${{ github.workspace }}/data/asset_downloads
+    steps:
+      - name: Restore exact cache entry (read-only)
+        # Reviewed v4.3.0 revision (immutable commit SHA).
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ${{ env.SQLITE_PATH }}
+            ${{ env.MEDIA_ARTIFACTS_DIR }}
+            ${{ env.ASSET_DOWNLOAD_DIR }}
+          # UNVERIFIED provenance: key taken from the Owner's gh cache list output.
+          key: media-engine-sqlite-40185575692-1
+          fail-on-cache-miss: true
+
+      - name: Summarize ASSET_PROVISIONING failures (aggregates only)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import re
+          import sqlite3
+          import sys
+
+          STAGE = "ASSET_PROVISIONING"
+          FAILURE_DECISIONS = ("NO_ASSET_ACQUIRED", "INVALID_PROVIDER_RESULT", "STRUCTURAL_FAILURE")
+          KNOWN_DECISIONS = (
+              "NO_ASSET_ACQUIRED", "INVALID_PROVIDER_RESULT", "STRUCTURAL_FAILURE",
+              "NOT_YET_PRODUCED", "ALREADY_PROVISIONED", "NO_VISUAL_CONTEXT",
+              "PROVISIONED", "QUARANTINE_REFUSED", "SCENE_PROVISIONING_SUMMARY",
+              "QUARANTINED", "QUARANTINE_REACTIVATED", "SCENE_ASSET_SKIPPED",
+          )
+          KNOWN_KINDS = (
+              "EMPTY_RESULT", "BAD_REQUEST", "MISSING_API_KEY", "AUTH_FAILURE",
+              "RATE_LIMIT", "PROVIDER_SERVER_FAILURE", "NETWORK_FAILURE",
+              "MALFORMED_RESPONSE", "DOWNLOAD_FAILURE", "UNSUPPORTED_ASSET_TYPE",
+              "PROVIDER_NOT_CONFIGURED", "PROVIDER_THREW",
+              "PROVIDER_RETURNED_NULL", "INVALID_PROVIDER_RESULT",
+          )
+          KNOWN_NATURES = ("TRANSIENT", "DETERMINISTIC", "INFRASTRUCTURE", "UNESTABLISHED")
+          TS_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z")
+
+          REQUIRED = {
+              "decision_log": {"id", "subject_type", "subject_id", "decision", "config_snapshot", "created_at", "stage"},
+              "stage_retry_state": {"id", "subject_id", "stage", "attempt_count", "quarantined_at", "provider"},
+          }
+
+          lines = []
+
+          def out(text=""):
+              lines.append(text)
+
+          def finish(code):
+              text = "\n".join(lines)
+              print(text)
+              path = os.environ.get("GITHUB_STEP_SUMMARY")
+              if path:
+                  with open(path, "a", encoding="utf-8") as fh:
+                      fh.write(text + "\n")
+              sys.exit(code)
+
+          def abort(message):
+              out("ABORT: " + message)
+              finish(1)
+
+          def label(value, allowed):
+              return value if (isinstance(value, str) and value in allowed) else "unrecognized"
+
+          def valid_date(value):
+              """Return YYYY-MM-DD only for a strictly valid ISO-8601 UTC timestamp, else None."""
+              if not isinstance(value, str) or TS_RE.fullmatch(value) is None:
+                  return None
+              try:
+                  datetime.date(int(value[0:4]), int(value[5:7]), int(value[8:10]))
+                  datetime.datetime(int(value[0:4]), int(value[5:7]), int(value[8:10]),
+                                    int(value[11:13]), int(value[14:16]), int(value[17:19]))
+              except ValueError:
+                  return None
+              return value[0:10]
+
+          db_path = os.environ.get("SQLITE_PATH", "")
+          if not db_path or not os.path.isfile(db_path):
+              abort("database file not found after restore")
+
+          # Immutable mode ignores any WAL. The cache stores only the main file,
+          # so a non-empty sidecar here is unexpected: fail closed.
+          for suffix in ("-wal", "-shm"):
+              side = db_path + suffix
+              if os.path.exists(side) and os.path.getsize(side) > 0:
+                  abort("unexpected non-empty SQLite sidecar file after restore")
+
+          try:
+              uri = "file:" + db_path.replace("?", "%3F").replace("#", "%23") + "?mode=ro&immutable=1"
+              con = sqlite3.connect(uri, uri=True)
+              con.execute("PRAGMA query_only = ON")
+
+              out("## Asset provisioning failure diagnostic (aggregate only)")
+              out("")
+
+              # 1. Integrity (fixed message on failure).
+              row = con.execute("PRAGMA integrity_check(1)").fetchone()
+              if not row or row[0] != "ok":
+                  abort("database integrity check failed")
+              out("Integrity check: ok")
+
+              # 2. Schema validation. Names are checked, never printed.
+              for table, cols in REQUIRED.items():
+                  found = {r[1] for r in con.execute("PRAGMA table_info(" + table + ")")}
+                  if not found:
+                      abort("a required table is missing")
+                  if not cols.issubset(found):
+                      abort("a required column is missing")
+
+              # 2b. Retry-state identity must be a unique, non-partial index on
+              # exactly (stage, subject_id, provider), so retry rows cannot
+              # inflate or duplicate counts.
+              unique_ok = False
+              for idx in con.execute("PRAGMA index_list(stage_retry_state)").fetchall():
+                  # (seq, name, unique, origin, partial)
+                  if idx[2] == 1 and idx[4] == 0:
+                      cols = [c[2] for c in con.execute('PRAGMA index_info("' + idx[1].replace('"', '""') + '")')]
+                      if cols == ["stage", "subject_id", "provider"]:
+                          unique_ok = True
+              if not unique_ok:
+                  abort("retry-state identity index not as expected")
+              leaked = con.execute(
+                  "SELECT COUNT(*) FROM stage_retry_state WHERE stage = ? AND provider <> ''", (STAGE,)
+              ).fetchone()[0]
+              if leaked:
+                  abort("provider-scoped retry rows exist for the asset stage")
+
+              # 3. Decision counts: one SELECT on decision_log (id is the primary key).
+              out("")
+              out("### Decisions recorded for the asset stage")
+              out("| Decision | Rows |")
+              out("|---|---|")
+              totals = {}
+              for decision, n in con.execute(
+                  "SELECT decision, COUNT(*) FROM decision_log WHERE stage = ? GROUP BY decision", (STAGE,)
+              ):
+                  key = label(decision, KNOWN_DECISIONS)
+                  totals[key] = totals.get(key, 0) + int(n)
+              for key in sorted(totals):
+                  out("| " + key + " | " + str(totals[key]) + " |")
+              if not totals:
+                  out("| (none) | 0 |")
+
+              # 4. Failure breakdown from structured evidence. Only allow-listed
+              # labels leave this loop; malformed JSON is counted, not shown.
+              groups = {}
+              malformed = 0
+              bad_dates = 0
+              placeholders = ",".join("?" for _ in FAILURE_DECISIONS)
+              cursor = con.execute(
+                  "SELECT subject_type, subject_id, decision, config_snapshot, created_at "
+                  "FROM decision_log WHERE stage = ? AND decision IN (" + placeholders + ")",
+                  (STAGE,) + FAILURE_DECISIONS,
+              )
+              for subject_type, subject_id, decision, snapshot, created_at in cursor:
+                  kind = "none_recorded"
+                  nature = "none_recorded"
+                  if snapshot is not None:
+                      try:
+                          data = json.loads(snapshot)
+                      except (ValueError, TypeError):
+                          data = None
+                          malformed += 1
+                      if isinstance(data, dict):
+                          raw_kind = data.get("failureKind")
+                          if raw_kind is not None:
+                              kind = label(raw_kind, KNOWN_KINDS)
+                          ev = data.get("evidence")
+                          if isinstance(ev, dict) and ev.get("nature") is not None:
+                              nature = label(ev.get("nature"), KNOWN_NATURES)
+                      elif data is not None:
+                          malformed += 1
+                  gkey = (label(decision, FAILURE_DECISIONS), kind, nature)
+                  g = groups.setdefault(gkey, {"rows": 0, "items": set(), "first": None, "last": None})
+                  g["rows"] += 1
+                  g["items"].add((str(subject_type), str(subject_id)))
+                  d = valid_date(created_at)
+                  if d is None:
+                      bad_dates += 1
+                  else:
+                      if g["first"] is None or d < g["first"]:
+                          g["first"] = d
+                      if g["last"] is None or d > g["last"]:
+                          g["last"] = d
+
+              out("")
+              out("### Failure breakdown (labels from fixed allow-lists)")
+              out("| Decision | Failure kind | Nature | Rows | Distinct items | First date | Last date |")
+              out("|---|---|---|---|---|---|---|")
+              for gkey in sorted(groups):
+                  g = groups[gkey]
+                  out("| " + " | ".join([
+                      gkey[0], gkey[1], gkey[2], str(g["rows"]), str(len(g["items"])),
+                      g["first"] or "n/a", g["last"] or "n/a",
+                  ]) + " |")
+              if not groups:
+                  out("| (none) | | | 0 | 0 | n/a | n/a |")
+              out("")
+              out("Rows with unreadable evidence JSON: " + str(malformed))
+              out("Rows with invalid dates: " + str(bad_dates))
+              out("Note: for STRUCTURAL_FAILURE, distinct items can mix content-brief and content-version ids.")
+
+              # 5. Retry state for the asset stage (integers only).
+              out("")
+              out("### Retry state (asset stage)")
+              out("| Attempts in cycle | Quarantined | Rows |")
+              out("|---|---|---|")
+              invalid_rows = 0
+              shown = False
+              for attempts, quarantined, n in con.execute(
+                  "SELECT attempt_count, quarantined_at IS NOT NULL, COUNT(*) FROM stage_retry_state "
+                  "WHERE stage = ? AND provider = '' GROUP BY 1, 2 ORDER BY 1, 2", (STAGE,)
+              ):
+                  if not isinstance(attempts, int) or attempts < 0 or attempts > 1000:
+                      invalid_rows += int(n)
+                      continue
+                  shown = True
+                  out("| " + str(attempts) + " | " + ("yes" if quarantined else "no") + " | " + str(int(n)) + " |")
+              if not shown:
+                  out("| (none) | | 0 |")
+              out("Rows with invalid attempt counts: " + str(invalid_rows))
+
+              con.close()
+              finish(0)
+          except SystemExit:
+              raise
+          except Exception as exc:  # fixed output only: the type name, never the message
+              out("ABORT: diagnostic failed (" + type(exc).__name__ + ")")
+              finish(1)
+          PY
