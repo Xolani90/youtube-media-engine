@@ -19,6 +19,7 @@ import { selectMusicAsset, resolveMusicMixEnabled, resolveMixParams, probeMusicF
 import { resolveMotionEnabled, annotateTimingWithMotion, prepareMotionClips } from './motion.js';
 import { validateMediaArtifact } from './validate.js';
 import { analyzeMediaQa, resolveMediaQaEnabled, writeQaReportArtifact } from './qaWorker.js';
+import { resolveFinishProfile, resolveRenderSize, finishRenderedVideo, FINISH_PROFILE } from './finish.js';
 import { mediaDir, finalizeArtifact, sha256File } from './artifactStore.js';
 import { selectShortFormSegment, trimVisualTiming, trimCaptionTiming } from './shortFormSelection.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
@@ -467,7 +468,9 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   }
 
   // --- Render spec ---
-  const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, narrationProvider, music: musicMix, visualTiming, captions: captionTiming });
+  // RENDER_RESOLUTION=720 (default) | 1080. Short-form keeps its own portrait frame.
+  const renderSize = resolveRenderSize();
+  const renderSpec = buildRenderSpec({ contentVersion, narrationPath, narrationDurationSeconds, narrationProvider, music: musicMix, visualTiming, captions: captionTiming, width: renderSize.width, height: renderSize.height });
   const { json: renderSpecJson, checksum: renderSpecChecksumValue } = renderSpecChecksum(renderSpec);
 
   // --- Render (temporary paths; only promoted to final paths after validation) ---
@@ -480,6 +483,8 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     ? path.join(dir, `.captions.tmp-${process.pid}-${Date.now()}.srt`)
     : null;
 
+  const finishProfile = resolveFinishProfile();
+  const finishedVideoTmpPath = `${finalVideoTmpPath}.finish.mp4`;
   let motionClips = null;
   try {
     if (captionsSrtTmpPath) {
@@ -491,8 +496,8 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     // silently degraded artifact.
     motionClips = traceSync('child.ffmpeg.motion', { segments: visualTiming?.length }, () => prepareMotionClips({
       visualTiming,
-      width: RENDER_DEFAULTS.WIDTH,
-      height: RENDER_DEFAULTS.HEIGHT,
+      width: renderSize.width,
+      height: renderSize.height,
       fps: RENDER_DEFAULTS.FPS,
       dir,
       tag: `${process.pid}-${Date.now()}`,
@@ -500,8 +505,8 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
     }));
     traceSync('child.ffmpeg.render', { segments: visualTiming?.length }, () => renderSilentVideo({
       visualTiming: motionClips.timing,
-      width: RENDER_DEFAULTS.WIDTH,
-      height: RENDER_DEFAULTS.HEIGHT,
+      width: renderSize.width,
+      height: renderSize.height,
       fps: RENDER_DEFAULTS.FPS,
       videoEncoder: RENDER_DEFAULTS.VIDEO_ENCODER,
       listPath: concatListTmpPath,
@@ -515,23 +520,31 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
       outputPath: finalVideoTmpPath,
       music: musicMix ? { path: musicAsset.location, narrationDurationSeconds, params: musicMix.params } : null
     }));
+    // Cinematic finishing (finish.js): grade, BT.709 tags, fades, 2-pass loudness + true-peak limiter.
+    // A failure is a render failure: the artifact is never silently left unfinished.
+    if (finishProfile === FINISH_PROFILE.CINEMATIC) {
+      traceSync('child.ffmpeg.finish', {}, () => finishRenderedVideo({ inputPath: finalVideoTmpPath, outputPath: finishedVideoTmpPath }));
+      fs.renameSync(finishedVideoTmpPath, finalVideoTmpPath);
+    }
   } catch (err) {
     fs.rmSync(silentVideoTmpPath, { force: true });
     fs.rmSync(finalVideoTmpPath, { force: true });
+    fs.rmSync(finishedVideoTmpPath, { force: true });
     return failWith(
       OUTCOME.RENDER_FAILED, DECISION_LOG_DECISION.RENDER_FAILED,
       `render_failed_${err.message}`, err.message
     );
   } finally {
     motionClips?.cleanup();
+    fs.rmSync(finishedVideoTmpPath, { force: true });
     fs.rmSync(silentVideoTmpPath, { force: true });
     if (captionsSrtTmpPath) fs.rmSync(captionsSrtTmpPath, { force: true });
   }
 
   // --- Validate BEFORE persisting anything or promoting the tmp path ---
   const validation = traceSync('child.ffprobe.validate', {}, () => validateMediaArtifact(finalVideoTmpPath, {
-    width: RENDER_DEFAULTS.WIDTH,
-    height: RENDER_DEFAULTS.HEIGHT,
+    width: renderSize.width,
+    height: renderSize.height,
     videoCodecName: RENDER_DEFAULTS.VIDEO_CODEC_NAME,
     audioCodecName: RENDER_DEFAULTS.AUDIO_CODEC_NAME
   }));

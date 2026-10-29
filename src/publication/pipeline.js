@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PUBLICATION_STAGE, PUBLICATION_STATUS, PUBLICATION_RESULT_STATUS, OUTCOME, DECISION_LOG_DECISION, THUMBNAIL_STATUS, publicationActionId, VISIBILITY_MISMATCH_FAILURE_REASON, REQUESTED_VISIBILITY_PUBLIC, publicationTargetForProvider } from './constants.js';
 import { generateThumbnail } from '../media/thumbnail.js';
+import { resolveThumbnailStyle, pickThumbnailImage, generateThumbnailFromImage } from '../media/thumbnailPhoto.js';
 import { finalizeArtifact, sha256File } from '../media/artifactStore.js';
 import { resolveMediaForPublication } from './eligibility.js';
 import { buildPublicationRequest } from './PublicationRequest.js';
@@ -72,7 +73,14 @@ function ensureThumbnailArtifact(storage, { mediaArtifact, title, runId, nowISO 
   const finalPath = path.join(dir, 'thumbnail.png');
   const tmpPath = path.join(dir, `.thumbnail-${process.pid}-${Date.now()}.png`);
   try {
-    generateThumbnail(title, tmpPath);
+    // Photo thumbnail from the video's own first (already rights-checked) image;
+    // any problem falls back to the typography-only canvas thumbnail.
+    let madePhoto = false;
+    try {
+      const img = resolveThumbnailStyle() === 'photo' ? pickThumbnailImage(mediaArtifact.render_spec_json) : null;
+      if (img) { generateThumbnailFromImage({ title, imagePath: img, outputPath: tmpPath }); madePhoto = true; }
+    } catch { fs.rmSync(tmpPath, { force: true }); }
+    if (!madePhoto) generateThumbnail(title, tmpPath);
     finalizeArtifact(tmpPath, finalPath);
     const checksum = sha256File(finalPath);
     storage.run(

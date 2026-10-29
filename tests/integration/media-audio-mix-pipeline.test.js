@@ -113,12 +113,12 @@ function withLiveAuthorized(actions, fn) {
   });
 }
 
-test('A/H. narration-only regression through the real pipeline: no music asset -> RENDERED, no music in render_spec, mono narration track as before', async () => {
+test('A/H. narration-only regression through the real pipeline: no music asset -> RENDERED, no music in render_spec, stereo finished narration track', async () => {
   const ctx = await setup();
   const res = run(ctx);
   assert.equal(res.outcome, 'RENDERED');
   assert.ok(!('music' in JSON.parse(res.mediaArtifact.render_spec_json)));
-  assert.equal(audioOf(res.mediaArtifact.artifact_path).channels, 1);
+  assert.equal(audioOf(res.mediaArtifact.artifact_path).channels, 2, "finishing (FINISH_PROFILE default) delivers stereo");
   assert.equal(decisions(ctx, 'MUSIC_UNAVAILABLE').length, 0);
   ctx.cleanup();
 });
@@ -165,7 +165,7 @@ test('H. missing music file or MUSIC_DUCKING=off -> unchanged narration-only ren
   const r1 = run(missing);
   assert.equal(r1.outcome, 'RENDERED');
   assert.ok(!('music' in JSON.parse(r1.mediaArtifact.render_spec_json)));
-  assert.equal(audioOf(r1.mediaArtifact.artifact_path).channels, 1);
+  assert.equal(audioOf(r1.mediaArtifact.artifact_path).channels, 2, "finishing delivers stereo");
   assert.match(decisions(missing, 'MUSIC_UNAVAILABLE')[0].reason, /file_missing/);
   missing.cleanup();
 
