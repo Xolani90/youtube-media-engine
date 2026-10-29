@@ -2,7 +2,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { runFfmpeg, FfmpegExecError } from './ffmpegFailure.js';
 
-// Cinematic finishing pass (worker capability, long-form only).
+// Cinematic finishing pass (worker capability, long-form and short-form).
 //
 // SCOPE: pure signal processing on an ALREADY RENDERED and muxed file: colour
 // grade, BT.709 tagging, fades, two-pass loudness normalisation and a

@@ -73,11 +73,17 @@ function ensureThumbnailArtifact(storage, { mediaArtifact, title, runId, nowISO 
   const finalPath = path.join(dir, 'thumbnail.png');
   const tmpPath = path.join(dir, `.thumbnail-${process.pid}-${Date.now()}.png`);
   try {
-    // Photo thumbnail from the video's own first (already rights-checked) image;
+    // Photo thumbnail from the video's own (already rights-checked) image whose search tags best match the title;
+    // no image sharing a word with the title -> typography-only thumbnail instead of an off-topic photo;
     // any problem falls back to the typography-only canvas thumbnail.
     let madePhoto = false;
     try {
-      const img = resolveThumbnailStyle() === 'photo' ? pickThumbnailImage(mediaArtifact.render_spec_json) : null;
+      const img = resolveThumbnailStyle() === 'photo'
+        ? pickThumbnailImage(mediaArtifact.render_spec_json, {
+          title,
+          notesFor: (assetId) => (assetId ? storage.get('SELECT provenance_notes FROM assets WHERE id = ?', [assetId])?.provenance_notes : null)
+        })
+        : null;
       if (img) { generateThumbnailFromImage({ title, imagePath: img, outputPath: tmpPath }); madePhoto = true; }
     } catch { fs.rmSync(tmpPath, { force: true }); }
     if (!madePhoto) generateThumbnail(title, tmpPath);

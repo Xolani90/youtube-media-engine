@@ -64,17 +64,42 @@ export function layoutTitle(title) {
 }
 
 /**
- * The first still image of a persisted render_spec that exists on disk, or null.
+ * A still image of a persisted render_spec that exists on disk, or null.
  * Pre-rendered motion clips are never in the persisted spec (only source images are).
+ *
+ * Without options it is the first image (unchanged). With { title, notesFor } it is the image whose search
+ * evidence (notesFor(assetId): the tags/query recorded at acquisition) shares the most words with the title, and
+ * null when NO image shares any word: a typography thumbnail is better than a photo that promises the wrong
+ * subject. Ties keep timeline order.
  */
-export function pickThumbnailImage(renderSpecJson) {
+export function pickThumbnailImage(renderSpecJson, { title = null, notesFor = null } = {}) {
   let spec;
   try { spec = typeof renderSpecJson === 'string' ? JSON.parse(renderSpecJson) : renderSpecJson; } catch { return null; }
+  const images = [];
   for (const seg of spec?.visual_timing ?? []) {
     const loc = seg?.location;
-    if (typeof loc === 'string' && IMAGE_EXT.test(loc) && fs.existsSync(loc)) return loc;
+    if (typeof loc === 'string' && IMAGE_EXT.test(loc) && fs.existsSync(loc) && !images.some((i) => i.loc === loc)) {
+      images.push({ loc, assetId: seg.asset_id ?? null });
+    }
   }
-  return null;
+  if (images.length === 0) return null;
+  if (!title || typeof notesFor !== 'function') return images[0].loc;
+  const titleWords = new Set(wordsOf(title));
+  let best = null;
+  let bestScore = 0;
+  for (const img of images) {
+    let notes = '';
+    try { notes = String(notesFor(img.assetId) ?? ''); } catch { notes = ''; }
+    const evidence = notes.split(';').filter((p) => /^\s*(tags|query)=/.test(p)).join(' ');
+    const score = new Set(wordsOf(evidence).filter((w) => titleWords.has(w))).size;
+    if (score > bestScore) { best = img; bestScore = score; }
+  }
+  return best ? best.loc : null;
+}
+
+const TITLE_STOP = new Set(['why', 'how', 'what', 'are', 'the', 'and', 'for', 'with', 'from', 'that', 'this', 'your', 'you', 'now', 'new', 'is', 'to', 'of', 'in', 'on']);
+function wordsOf(text) {
+  return String(text ?? '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !TITLE_STOP.has(w)).map((w) => (w.length > 4 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w));
 }
 
 function probeImage(file) {

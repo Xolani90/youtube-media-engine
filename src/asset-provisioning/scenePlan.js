@@ -230,7 +230,9 @@ const ABSTRACT_WORDS = new Set(('access beyond initial baseline baselines artifi
   'structured specialized specific direct continued ongoing approximately several various varying combining ensure ' +
   'effectively safely increasingly major designed support plans planned established receive provide help gain ' +
   'capabilities capability participation participants initiatives initiative rollout pilot sector well complete furthermore ' +
-  'aiming national technological navigate lean organizations across within').split(/\s+/));
+  'aiming national technological navigate lean organizations across within performance model models delivers delivered speed ' +
+  'fast faster fastest ultrafast powerful advanced leading latest innovative seamless seamlessly integration integrated impact ' +
+  'next-generation position positions adoption widespread effectively manage').split(/\s+/));
 
 /**
  * Scene concept lexicon: narration patterns -> concrete, photographable stock queries. Generic business/tech
@@ -240,7 +242,7 @@ const ABSTRACT_WORDS = new Set(('access beyond initial baseline baselines artifi
 const CONCEPTS = Object.freeze([
   { id: 'training', re: /\b(train(?:ing|ers?|ed|s)?|workshops?|advisors?|coach(?:ing|es)?|mentor(?:ing|s)?|seminars?|classroom|lessons?|curriculum|academy|learning)\b/, queries: ['business training workshop', 'people attending seminar'] },
   { id: 'partnership', re: /\b(partnerships?|partner(?:s|ed)?|collaborat\w*|alliance|agreements?|co-?develop\w*|joint)\b/, queries: ['business handshake partnership', 'two people shaking hands'] },
-  { id: 'ai', re: /\b(ai|artificial intelligence|machine learning|automation|chatgpt|technolog\w*|digital tools?)\b/, queries: ['artificial intelligence technology', 'person using laptop computer'] },
+  { id: 'ai', re: /\b(ai|artificial intelligence|machine learning|automation|chatgpt|technolog\w*|digital tools?)\b/, queries: ['software developer coding laptop', 'data center server room'] },
   { id: 'tools', re: /\b(tools?|software|platforms?|subscriptions?|free access|hands-on|capabilit\w*)\b/, queries: ['person using laptop computer', 'typing on laptop keyboard'] },
   { id: 'resources', re: /\b(playbooks?|resources?|guides?|toolkits?|templates?|handbooks?|guidelines?)\b/, queries: ['business planning notebook', 'open notebook pen desk'] },
   { id: 'growth', re: /\b(long-term|scale|scaling|expand\w*|growth|grow\w*|rollout|roll out)\b/, queries: ['business growth chart', 'growing plant seedling'] },
@@ -249,7 +251,15 @@ const CONCEPTS = Object.freeze([
   { id: 'hurdles', re: /\b(hurdles?|challenges?|limited time|obstacles?|barriers?|struggl\w*|risks?|pressure)\b/, queries: ['busy business owner desk', 'stressed worker office'] },
   { id: 'security', re: /\b(privacy|security|secure|reliab\w*|protect\w*|confidential\w*)\b/, queries: ['data security padlock', 'cyber security shield'] },
   { id: 'team', re: /\b(employees?|staff|teams?|workers?|workforce)\b/, queries: ['small business team office', 'colleagues working together'] },
-  { id: 'local', re: /\b(local|neighbou?rhood|main street)\b/, queries: ['local shop owner', 'main street shops'] }
+  { id: 'local', re: /\b(local|neighbou?rhood|main street)\b/, queries: ['local shop owner', 'main street shops'] },
+  // Concrete photographable subjects for common explainer topics. Photos of real people and places, never
+  // "technology" abstractions (those return AI art, robots and toys).
+  { id: 'restaurant', re: /\b(restaurants?|franchis\w*|caf[eé]s?|bakery|bakeries|menus?|kitchens?|diner|fast food|food service|takeaway|drive-?thru)\b/, queries: ['restaurant kitchen staff', 'cafe counter barista'] },
+  { id: 'cash', re: /\b(cash|cashiers?|registers?|point of sale|checkout|payments?|reconcil\w*|invoices?|accounting|bookkeeping)\b/, queries: ['cashier at checkout counter', 'accountant calculator desk'] },
+  { id: 'models', re: /\b(models?|llms?|gpt\S*|apis?|tokens?|inference|benchmarks?|parameters)\b/, queries: ['data center server room', 'software code on monitor'] },
+  { id: 'speed', re: /\b(faster|fastest|speed\w*|ultrafast|latency|real-?time|instant\w*)\b/, queries: ['stopwatch timer close up', 'fast moving light trails'] },
+  { id: 'developers', re: /\b(developers?|engineers?|programmers?|coding|software)\b/, queries: ['software developer coding laptop', 'programmer working at desk'] },
+  { id: 'savings', re: /\b(save[sd]?|savings|costs?|budgets?|revenue|profits?|margins?)\b/, queries: ['business budget planning desk', 'financial documents calculator'] }
 ]);
 
 function countMatches(re, text) {

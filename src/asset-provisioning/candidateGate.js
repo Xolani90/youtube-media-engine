@@ -15,6 +15,10 @@
  *  2b. child_subject_tag:W        - its tags name a child subject (baby, infant, toddler, kid, child; explicit plurals
  *     folded) and the scene text / query does not AFFIRMATIVELY call for children. A child word that
  *     is negated ("not intended for children") is not evidence. Keyword heuristic, not semantics.
+ *  2c. off_style_tag:T            - its tags mark a toy, figurine, cartoon/clip-art or AI-generated image (see
+ *     OFF_STYLE_WORDS / OFF_STYLE_PHRASES), unless the scene text / query itself asks for that subject. These are the
+ *     images that read as fake or off-topic in a documentary-style explainer (a toy cash register, Lego stormtroopers,
+ *     a generated robot face). Keyword heuristic on tags, not semantics.
  *  3. no_tag_overlap_with_scene    - it has tags, and none shares a word with the query or the
  *     scene narration. (Weak by design: the provider already matched the query; this only removes
  *     hits that matched on something other than their subject.)
@@ -27,6 +31,18 @@ export const BRANDED_UI_CAPTURE_TAGS = Object.freeze([
   'browser', 'web browser', 'website', 'web page', 'webpage', 'homepage', 'home page', 'search engine',
   'google', 'chrome', 'google chrome', 'facebook', 'twitter', 'instagram', 'youtube', 'tiktok',
   'microsoft', 'windows', 'apple', 'iphone', 'android', 'app icon', 'icon', 'icons', 'social media icons'
+]);
+
+// Off-style vocabulary. A tag WORD (exact surface form) or a tag PHRASE (substring) here marks an image whose
+// subject is a toy, a figurine, a drawing or an AI-generated picture. The rule is skipped for any term the scene
+// text or query itself contains, so a script ABOUT toys or AI art can still use them.
+export const OFF_STYLE_WORDS = Object.freeze([
+  'toy', 'toys', 'lego', 'legos', 'figurine', 'figurines', 'doll', 'dolls', 'puppet', 'puppets', 'plush', 'playmobil',
+  'cartoon', 'cartoons', 'clipart', 'illustration', 'illustrations', 'vector', 'doodle', 'sketch', 'midjourney', 'dall-e', 'dalle'
+]);
+export const OFF_STYLE_PHRASES = Object.freeze([
+  'ai generated', 'ai-generated', 'ai art', 'ai image', 'ai created', 'generative ai', 'generative art', 'stable diffusion',
+  'digital art', 'digital painting', 'clip art', '3d render', '3d rendering', 'computer generated', 'toy figure', 'action figure'
 ]);
 
 /*
@@ -168,11 +184,18 @@ export function buildHitScreen({ sceneText = '', query = '', excludeOrigins = []
   const contextText = `${sceneText} ${query}`.toLowerCase();
   const deny = new Set(BRANDED_UI_CAPTURE_TAGS);
   const childrenWanted = mentionsChildrenAffirmatively(sceneText) || mentionsChildrenAffirmatively(query);
-  return (hit) => {
+  const screen = (hit) => {
     if (hit?.pageURL && exclude.has(hit.pageURL)) return { accept: false, reason: 'duplicate_of_attached_asset' };
     const tags = parseTags(hit?.tags);
     for (const tag of tags) {
       if (deny.has(tag) && !contextText.includes(tag)) return { accept: false, reason: `branded_or_ui_capture_tag:${tag}` };
+    }
+    for (const tag of tags) {
+      const phrase = OFF_STYLE_PHRASES.find((ph) => tag.includes(ph));
+      if (phrase && !contextText.includes(phrase)) return { accept: false, reason: `off_style_tag:${phrase}` };
+      for (const w of tag.match(/[a-z0-9-]+/g) ?? []) {
+        if (OFF_STYLE_WORDS.includes(w) && !contextText.includes(w)) return { accept: false, reason: `off_style_tag:${w}` };
+      }
     }
     if (!childrenWanted) {
       for (const tag of tags) {
@@ -187,4 +210,18 @@ export function buildHitScreen({ sceneText = '', query = '', excludeOrigins = []
     }
     return { accept: true, reason: null };
   };
+  // Relevance signal for choosing AMONG hits that passed: how many distinct query words and scene words the hit's
+  // tags share (query words count double: the query is what the scene's visual intent was reduced to). Higher is
+  // better; 0 means "no evidence either way". Used only to order accepted hits, never to accept one.
+  const queryTokens = new Set(tokens(query));
+  screen.score = (hit) => {
+    const tagTokens = new Set(parseTags(hit?.tags).flatMap((t) => tokens(t)));
+    let score = 0;
+    for (const w of tagTokens) {
+      if (queryTokens.has(w)) score += 2;
+      else if (context.has(w)) score += 1;
+    }
+    return score;
+  };
+  return screen;
 }

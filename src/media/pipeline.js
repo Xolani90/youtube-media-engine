@@ -753,6 +753,7 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
     : null;
 
   let shortMotionClips = null;
+  const shortFinishedTmpPath = `${finalVideoTmpPath}.finish.mp4`;
   try {
     if (captionsSrtTmpPath) {
       writeSrtFile(shortCaptionTiming, captionsSrtTmpPath);
@@ -790,9 +791,16 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
       audioEncoder: RENDER_DEFAULTS.AUDIO_ENCODER,
       outputPath: finalVideoTmpPath
     }));
+    // Same finishing pass as long-form (grade, BT.709 tags, fades, 2-pass -14 LUFS + true-peak
+    // limiter), so a short never ships quieter or differently tagged than its long-form.
+    if (resolveFinishProfile() === FINISH_PROFILE.CINEMATIC) {
+      traceSync('child.ffmpeg.finish.short', {}, () => finishRenderedVideo({ inputPath: finalVideoTmpPath, outputPath: shortFinishedTmpPath }));
+      fs.renameSync(shortFinishedTmpPath, finalVideoTmpPath);
+    }
   } catch (err) {
     fs.rmSync(silentVideoTmpPath, { force: true });
     fs.rmSync(finalVideoTmpPath, { force: true });
+    fs.rmSync(shortFinishedTmpPath, { force: true });
     logDecision(storage, {
       runId, subjectType: 'content_version', subjectId: contentVersion.id,
       decision: DECISION_LOG_DECISION.RENDER_FAILED, reason: `short_form_render_failed_${err.message}`
@@ -800,6 +808,7 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
     return { outcome: OUTCOME.RENDER_FAILED, reason: err.message, mediaArtifact: null };
   } finally {
     shortMotionClips?.cleanup();
+    fs.rmSync(shortFinishedTmpPath, { force: true });
     fs.rmSync(silentVideoTmpPath, { force: true });
     if (captionsSrtTmpPath) fs.rmSync(captionsSrtTmpPath, { force: true });
   }

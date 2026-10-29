@@ -9,6 +9,8 @@ import { AssetSourceProvider, ASSET_FAILURE_KIND, assetAcquisitionFailure } from
 // null on any non-OK response, so an over-long query would otherwise surface
 // only as a silent "no asset" (it is now reported as a BAD_REQUEST failure).
 export const PIXABAY_MAX_QUERY_LENGTH = 100;
+// With a candidate screen the provider asks for a wider pool and picks the best-matching accepted hit; without one it keeps the minimal request.
+const SCREENED_PER_PAGE = 20;
 
 /**
  * Collapses whitespace and bounds the query to PIXABAY_MAX_QUERY_LENGTH,
@@ -153,15 +155,15 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
 
     const searchUrl =
       assetType === 'image'
-        ? this._buildImageSearchUrl(apiKey, boundedQuery)
-        : this._buildVideoSearchUrl(apiKey, boundedQuery);
+        ? this._buildImageSearchUrl(apiKey, boundedQuery, screenHit ? SCREENED_PER_PAGE : 3)
+        : this._buildVideoSearchUrl(apiKey, boundedQuery, screenHit ? SCREENED_PER_PAGE : 3);
 
     let res;
     try {
       res = await this._fetch(searchUrl);
     } catch (err) {
       // Transport-level failure reaching Pixabay (timeout, DNS, connection).
-      return fail(ASSET_FAILURE_KIND.NETWORK_FAILURE, { cause: `${err?.name ?? 'Error'}: ${err?.message ?? String(err)}` });
+      return fail(ASSET_FAILURE_KIND.NETWORK_FAILURE, { cause: `${err?.name ?? 'Error'}: ${err?.message ?? String(err)}${err?.cause ? ` (cause: ${err.cause.code ?? err.cause.message ?? String(err.cause)})` : ''}` });
     }
 
     if (!res.ok) {
@@ -201,6 +203,10 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
     let hit = null;
     let candidate = null;
     const pool = screen ? data.hits : data.hits.slice(0, 1);
+    // With a screen that can score, take the best-matching accepted hit (ties keep Pixabay's own order);
+    // without one, the first accepted hit as before.
+    const scoreHit = screen && typeof screen.score === 'function' ? screen.score : null;
+    let bestScore = -Infinity;
     for (const h of pool) {
       const c = assetType === 'image' ? this._selectImageCandidate(h) : this._selectVideoCandidate(h);
       if (!c) { rejected.push({ id: h?.id ?? null, reason: 'no_usable_download_url' }); continue; }
@@ -213,7 +219,10 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
         }
         if (!verdict || verdict.accept !== true) { rejected.push({ id: h.id ?? null, reason: verdict?.reason ?? 'rejected' }); continue; }
       }
-      hit = h; candidate = c; break;
+      if (!scoreHit) { hit = h; candidate = c; break; }
+      let sc = 0;
+      try { sc = Number(scoreHit({ tags: h.tags ?? '' })) || 0; } catch { sc = 0; }
+      if (sc > bestScore) { bestScore = sc; hit = h; candidate = c; }
     }
     if (!candidate) {
       return fail(ASSET_FAILURE_KIND.EMPTY_RESULT, {
@@ -262,23 +271,23 @@ export class PixabayAssetSourceProvider extends AssetSourceProvider {
     return null;
   }
 
-  _buildImageSearchUrl(apiKey, query) {
+  _buildImageSearchUrl(apiKey, query, perPage = 3) {
     const params = new URLSearchParams({
       key: apiKey,
       q: query,
       image_type: 'photo',
       safesearch: 'true',
-      per_page: '3'
+      per_page: String(perPage)
     });
     return `https://pixabay.com/api/?${params.toString()}`;
   }
 
-  _buildVideoSearchUrl(apiKey, query) {
+  _buildVideoSearchUrl(apiKey, query, perPage = 3) {
     const params = new URLSearchParams({
       key: apiKey,
       q: query,
       safesearch: 'true',
-      per_page: '3'
+      per_page: String(perPage)
     });
     return `https://pixabay.com/api/videos/?${params.toString()}`;
   }
