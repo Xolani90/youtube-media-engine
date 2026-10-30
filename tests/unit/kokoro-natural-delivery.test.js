@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  normalizeForSpeech, splitParagraphs, looksLikeHeading, pauseAfter, assembleNarration,
+  normalizeForSpeech, trimSilence, splitParagraphs, looksLikeHeading, pauseAfter, assembleNarration,
   resolveKokoroSpeed, resolvePauses, loadLexicon, DEFAULT_PAUSES, DEFAULT_KOKORO_SPEED
 } from '../../src/media/kokoroSupport.js';
 
@@ -80,4 +80,28 @@ test('assembleNarration: no audio is an error; mixed sampling rates are an error
     n++;
   }());
   await assert.rejects(assembleNarration({ paragraphs: ['a. b.'], streamFor: mixed }), /inconsistent sampling rate/);
+});
+
+test('trimSilence: strips model padding but keeps a small margin; all-silent input is unchanged', () => {
+  const SR = 1000;
+  const a = new Float32Array(1000);
+  a.fill(0.5, 400, 600); // speech 400..599, padding either side
+  const out = trimSilence(a, SR, { marginSeconds: 0.04 });
+  assert.equal(out.length, 200 + 40 + 40);
+  assert.equal(out[40], 0.5);
+  const quiet = new Float32Array(50);
+  assert.equal(trimSilence(quiet, SR), quiet);
+  assert.equal(trimSilence(new Float32Array(0), SR).length, 0);
+});
+
+test('assembleNarration: model edge padding is trimmed so the configured pause is the real pause', async () => {
+  const SR = 1000;
+  const padded = () => { const a = new Float32Array(500); a.fill(0.5, 200, 300); return a; };
+  const streamFor = () => (async function* () {
+    yield { text: 'One.', audio: { audio: padded(), sampling_rate: SR } };
+    yield { text: 'Two.', audio: { audio: padded(), sampling_rate: SR } };
+  }());
+  const pauses = { LEAD: 0, SENTENCE: 0.3, QUESTION: 0.4, HEADING: 0.6, PARAGRAPH: 0.8, TAIL: 0 };
+  const { samples } = await assembleNarration({ paragraphs: ['One. Two.'], streamFor, pauses });
+  assert.equal(samples.length, 180 + 300 + 180); // 100 speech + 2x40 margin each, one 0.3s pause
 });

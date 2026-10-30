@@ -156,6 +156,25 @@ export function pauseAfter(utterance, { isLastInParagraph, pauses = DEFAULT_PAUS
   return pauses.SENTENCE;
 }
 
+/** Samples at or below this absolute amplitude (about -48 dBFS) count as silence when trimming. */
+export const TRIM_THRESHOLD = 0.004;
+/** Silence kept on each side of the speech after trimming, in seconds, so word onsets and tails are not clipped. */
+export const TRIM_MARGIN_SECONDS = 0.04;
+
+/**
+ * Removes the model's own leading and trailing near-silence from one utterance so that the configured
+ * pauses are the actual pauses. An all-silent utterance is returned unchanged.
+ */
+export function trimSilence(samples, sampleRate, { threshold = TRIM_THRESHOLD, marginSeconds = TRIM_MARGIN_SECONDS } = {}) {
+  let first = 0;
+  while (first < samples.length && Math.abs(samples[first]) <= threshold) first++;
+  if (first === samples.length) return samples;
+  let last = samples.length - 1;
+  while (last > first && Math.abs(samples[last]) <= threshold) last--;
+  const margin = Math.round(marginSeconds * sampleRate);
+  return samples.subarray(Math.max(0, first - margin), Math.min(samples.length, last + 1 + margin));
+}
+
 export function silence(seconds, sampleRate) {
   return new Float32Array(Math.max(0, Math.round(seconds * sampleRate)));
 }
@@ -179,7 +198,7 @@ export async function assembleNarration({ paragraphs, streamFor, pauses = DEFAUL
       utterances.push({ text: item.text ?? '', samples: audio.audio });
     }
     utterances.forEach((u, ui) => {
-      parts.push(u.samples);
+      parts.push(trimSilence(u.samples, sampleRate));
       const last = ui === utterances.length - 1;
       if (last && pi === paragraphs.length - 1) return;
       parts.push(silence(pauseAfter(u.text, { isLastInParagraph: last, pauses }), sampleRate));
