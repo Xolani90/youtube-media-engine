@@ -1,6 +1,7 @@
 {
   "authoritativeDomains": [
-    "blog.google"
+    "blog.google",
+    "openai.com"
   ],
   "syndicatedDomains": [],
   "socialDomains": [

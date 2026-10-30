@@ -13,9 +13,9 @@ const CFG = { authoritativeDomains: classificationConfig.authoritativeDomains, s
 const FB = 'https://www.facebook.com/JamoraquaiPage/posts/google-announced-gemini-4-argon/1736821805117004';
 const mk = (id, url, role, quality_tier, content = 'x') => ({ id, url, role, quality_tier, content, retrieval_status: 'SUCCESS', retrieved_at: recent });
 
-test('1. config: facebook.com is social, blog.google stays authoritative', () => {
+test('1. config: facebook.com is social; configured first-party RSS publishers stay authoritative', () => {
   assert.ok(classificationConfig.socialDomains.includes('facebook.com'));
-  assert.deepEqual(classificationConfig.authoritativeDomains, ['blog.google']);
+  assert.deepEqual(classificationConfig.authoritativeDomains, ['blog.google', 'openai.com']);
 });
 
 test('1. classification: facebook URL -> social_media', () => {
@@ -29,6 +29,12 @@ test('2. unknown domains remain independent_reporting', () => {
 
 test('3. blog.google -> primary_authoritative / HIGH', () => {
   const r = classifySourceRole('https://blog.google/technology/ai/gemini-4/', CFG);
+  assert.equal(r.role, 'primary_authoritative');
+  assert.equal(classifySourceQuality('SUCCESS', r.role), 'HIGH');
+});
+
+test('3b. www.openai.com is normalized to the confirmed openai.com first-party host', () => {
+  const r = classifySourceRole('https://www.openai.com/index/example', CFG);
   assert.equal(r.role, 'primary_authoritative');
   assert.equal(classifySourceQuality('SUCCESS', r.role), 'HIGH');
 });
