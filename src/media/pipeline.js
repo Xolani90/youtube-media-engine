@@ -15,6 +15,7 @@ import { buildCaptionsFromAsr } from './asrCaptions.js';
 import { resolveAsrMode, transcribeAudio, writeTranscriptArtifact } from './asrWorker.js';
 import { scriptBodyToNarrationText, ScriptBodyContractError } from './scriptText.js';
 import { renderSilentVideo, muxNarration, writeSrtFile } from './render.js';
+import { resolveShortFormMusic } from './shortMusic.js';
 import { selectMusicAsset, resolveMusicMixEnabled, resolveMixParams, probeMusicFile } from './audioMix.js';
 import { resolveMotionEnabled, annotateTimingWithMotion, prepareMotionClips } from './motion.js';
 import { validateMediaArtifact } from './validate.js';
@@ -47,7 +48,9 @@ function logDecision(storage, { runId = null, subjectType, subjectId, decision, 
 function runDiagnosticQa(videoPath, context) {
   if (!resolveMediaQaEnabled()) return null;
   try {
-    return { report: analyzeMediaQa(videoPath, { context }) };
+    // The finished file is normalised to FINISH_AUDIO_TARGETS (-14 LUFS), so QA must judge it against that target.
+    const finished = resolveFinishProfile() === FINISH_PROFILE.CINEMATIC;
+    return { report: analyzeMediaQa(videoPath, { context: { ...context, finished_audio_target: finished } }) };
   } catch (err) {
     return { error: String(err?.message ?? err).split('\n')[0].slice(0, 200) };
   }
@@ -557,7 +560,7 @@ export function runMediaProduction({ storage, contentBriefId, artifactsDir = con
   }
 
   // Diagnostic QA on the validated, not-yet-promoted bytes (evidence only).
-  const qa = runDiagnosticQa(finalVideoTmpPath, { stage: 'long_form', kenBurnsMotion: resolveMotionEnabled() });
+  const qa = runDiagnosticQa(finalVideoTmpPath, { stage: 'long_form', kenBurnsMotion: resolveMotionEnabled(), music_attached: musicMix !== null });
 
   // Validated -> promote to the final deterministic path (atomic rename).
   finalizeArtifact(finalVideoTmpPath, finalVideoPath);
@@ -718,6 +721,17 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
   const shortVisualTiming = trimVisualTiming(sourceRenderSpec.visual_timing, endSeconds);
   const shortCaptionTiming = trimCaptionTiming(sourceRenderSpec.captions, endSeconds);
 
+  // Background music: the short carries the same bed as its long-form source, re-verified (rights status,
+  // checksum, file) from the source render spec. Any failure leaves the short narration-only, with the reason logged.
+  const shortMusicDecision = resolveShortFormMusic({ storage, sourceRenderSpec });
+  if (shortMusicDecision.reason) {
+    logDecision(storage, {
+      runId, subjectType: 'content_version', subjectId: contentVersion.id,
+      decision: DECISION_LOG_DECISION.MUSIC_UNAVAILABLE, reason: `short_music_${shortMusicDecision.assetId}_${shortMusicDecision.reason}`
+    }, nowISO);
+  }
+  const shortMusic = shortMusicDecision.music;
+
   // v1 always trims from 0 -- see shortFormSelection.js's module docstring
   // for why an arbitrary start offset is out of scope. The FULL narration
   // audio file is reused unchanged (never re-synthesized, never re-cut):
@@ -729,6 +743,7 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
     narrationPath: longFormArtifact.narration_path,
     narrationDurationSeconds: endSeconds,
     narrationProvider: sourceRenderSpec.narration?.provider ?? null,
+    music: shortMusic ? sourceRenderSpec.music : null,
     visualTiming: shortVisualTiming,
     captions: shortCaptionTiming,
     width: SHORT_FORM_RENDER_DEFAULTS.WIDTH,
@@ -789,7 +804,8 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
       silentVideoPath: silentVideoTmpPath,
       narrationPath: longFormArtifact.narration_path,
       audioEncoder: RENDER_DEFAULTS.AUDIO_ENCODER,
-      outputPath: finalVideoTmpPath
+      outputPath: finalVideoTmpPath,
+      music: shortMusic
     }));
     // Same finishing pass as long-form (grade, BT.709 tags, fades, 2-pass -14 LUFS + true-peak
     // limiter), so a short never ships quieter or differently tagged than its long-form.
@@ -828,7 +844,7 @@ export function runShortFormProduction({ storage, contentBriefId, artifactsDir =
     return { outcome: OUTCOME.VALIDATION_FAILED, reason: validation.reason, mediaArtifact: null };
   }
 
-  const qa = runDiagnosticQa(finalVideoTmpPath, { stage: 'short_form', kenBurnsMotion: resolveMotionEnabled() });
+  const qa = runDiagnosticQa(finalVideoTmpPath, { stage: 'short_form', kenBurnsMotion: resolveMotionEnabled(), music_attached: shortMusic !== null });
   finalizeArtifact(finalVideoTmpPath, finalVideoPath);
   const artifactChecksum = sha256File(finalVideoPath);
 
