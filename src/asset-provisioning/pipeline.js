@@ -5,6 +5,8 @@ import { deriveVisualQuery } from './visualQuery.js';
 import { validateAcquiredAsset } from './validate.js';
 import { planScenes, resolveMultiSceneEnabled, formatSceneUsageContext } from './scenePlan.js';
 import { buildHitScreen, resolveCandidateGateEnabled } from './candidateGate.js';
+import { resolveSceneRelevance, assessAssetRelevance, withRelevanceNote, discardRejectedFile, RELEVANCE_REASON } from './sceneRelevanceCheck.js';
+import { rankSceneImages } from '../media/sceneRelevance.js';
 import { scriptBodyToNarrationText } from '../media/scriptText.js';
 import { VISUAL_ASSET_TYPES } from '../media/constants.js';
 import { AssetProvenanceRepository } from '../state/AssetProvenance.js';
@@ -69,11 +71,12 @@ function assetFingerprints(asset) {
   return [asset.checksum && `c:${asset.checksum}`, asset.location && `l:${asset.location}`, asset.origin && `o:${asset.origin}`].filter(Boolean);
 }
 
-async function provisionAdditionalScenes({ storage, repo, provider, contentVersionId, scenePlan, firstAsset, runId, nowISO, gate = resolveCandidateGateEnabled() }) {
+async function provisionAdditionalScenes({ storage, repo, provider, contentVersionId, scenePlan, firstAsset, runId, nowISO, gate = resolveCandidateGateEnabled(), relevance = { enabled: false }, relevanceRanker = rankSceneImages }) {
   const seen = new Set(assetFingerprints(firstAsset));
   const attachedOrigins = new Set([firstAsset.origin].filter(Boolean));
   const added = [];
   const skipped = [];
+  let stopReason = 'not_attempted_rate_limited';
   for (const scene of scenePlan.slice(1)) {
     // The last query is the unchanged whole-video query, which would only re-find scene 1's asset.
     const queries = scene.queries.slice(0, -1).slice(0, MAX_EXTRA_QUERY_ATTEMPTS);
@@ -97,12 +100,21 @@ async function provisionAdditionalScenes({ storage, repo, provider, contentVersi
       if (!result) continue;
       if (!validateAcquiredAsset(result).valid) { skipReason = 'invalid_provider_result'; continue; }
       if (assetFingerprints(result).some((f) => seen.has(f))) { skipReason = 'duplicate_of_attached_asset'; continue; }
+      // Optional reject-only pixel check (SCENE_RELEVANCE=on). Runs before anything is recorded.
+      const verdict = assessAssetRelevance({ sceneText: scene.text, query: q, asset: result, relevance, ranker: relevanceRanker });
+      if (!verdict.accept) {
+        skipReason = verdict.reason;
+        if (result.origin) attachedOrigins.add(result.origin);
+        discardRejectedFile(result, (a) => assetFingerprints(a).some((f) => seen.has(f)));
+        if (verdict.reason === RELEVANCE_REASON.UNAVAILABLE) { stop = true; stopReason = 'not_attempted_relevance_unavailable'; break; }
+        continue;
+      }
       const assetId = storage.transaction(() => {
         const id = repo.recordAsset({
           assetType: result.assetType, location: result.location, checksum: result.checksum ?? null,
           origin: result.origin ?? null, license: result.license ?? null,
           attributionRequired: result.attributionRequired ?? false, attributionText: result.attributionText ?? null,
-          usageRestrictions: result.usageRestrictions ?? null, provenanceNotes: result.provenanceNotes ?? null,
+          usageRestrictions: result.usageRestrictions ?? null, provenanceNotes: withRelevanceNote(result.provenanceNotes, verdict, relevance),
           verificationStatus: result.verificationStatus ?? 'UNVERIFIED'
         });
         repo.recordUsage({
@@ -130,7 +142,7 @@ async function provisionAdditionalScenes({ storage, repo, provider, contentVersi
     }
     if (stop) {
       // Scenes never attempted because the provider rate-limited are still on the record.
-      for (const rest of scenePlan.slice(scene.index + 1)) skipped.push({ scene: rest.index + 1, reason: 'not_attempted_rate_limited' });
+      for (const rest of scenePlan.slice(scene.index + 1)) skipped.push({ scene: rest.index + 1, reason: stopReason });
       break;
     }
   }
@@ -180,7 +192,7 @@ function recordSceneSummary(storage, { runId, contentVersionId, report }, nowISO
  * @param {import('../providers/asset/AssetSourceProvider.js').AssetSourceProvider} deps.provider
  * @param {string} [deps.runId]
  */
-export async function runAssetProvisioning({ storage, contentBriefId, provider, runId = null, multiScene = resolveMultiSceneEnabled() }) {
+export async function runAssetProvisioning({ storage, contentBriefId, provider, runId = null, multiScene = resolveMultiSceneEnabled(), relevance = resolveSceneRelevance(), relevanceRanker = rankSceneImages }) {
   const nowISO = () => new Date().toISOString();
 
   const eligibility = resolveProducedContentForProvisioning(storage, contentBriefId);
@@ -344,6 +356,44 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
     );
   }
 
+  // Optional reject-only pixel check on scene 1 (SCENE_RELEVANCE=on). A rejected candidate is never recorded;
+  // the scene's other queries are tried with the rejected origins excluded. Scene 1 is the stage's contract, so
+  // if nothing passes the stage fails closed (NO_ASSET_ACQUIRED) instead of attaching an irrelevant picture.
+  if (relevance.enabled) {
+    const sceneText = scenePlan[0]?.text ?? '';
+    const queries = [primaryQuery, ...(scenePlan[0]?.queries ?? []).filter((q) => q !== primaryQuery)].slice(0, MAX_EXTRA_QUERY_ATTEMPTS + 1);
+    const rejectedOrigins = new Set();
+    let verdict = assessAssetRelevance({ sceneText, query: primaryQuery, asset: result, relevance, ranker: relevanceRanker });
+    let lastReason = verdict.reason;
+    let next = 1;
+    while (!verdict.accept && verdict.reason !== RELEVANCE_REASON.UNAVAILABLE && next < queries.length) {
+      if (result.origin) rejectedOrigins.add(result.origin);
+      discardRejectedFile(result, () => false);
+      const q = queries[next++];
+      let again;
+      try {
+        again = await provider.acquireVisualAsset({
+          query: q, assetTypes: [...VISUAL_ASSET_TYPES],
+          ...(resolveCandidateGateEnabled() ? { screenHit: buildHitScreen({ sceneText, query: q, excludeOrigins: rejectedOrigins }) } : {})
+        });
+      } catch { continue; }
+      if (!again || isAssetAcquisitionFailure(again) || !validateAcquiredAsset(again).valid) continue;
+      result = again;
+      verdict = assessAssetRelevance({ sceneText, query: q, asset: result, relevance, ranker: relevanceRanker });
+      lastReason = verdict.reason;
+    }
+    if (!verdict.accept) {
+      discardRejectedFile(result, () => false);
+      const transient = lastReason === RELEVANCE_REASON.UNAVAILABLE;
+      return failWith(
+        OUTCOME.NO_ASSET_ACQUIRED, DECISION_LOG_DECISION.NO_ASSET_ACQUIRED, `scene_1_${lastReason}`, lastReason,
+        { nature: transient ? FAILURE_NATURE.INFRASTRUCTURE : FAILURE_NATURE.TRANSIENT, basis: transient ? 'scene_relevance_check_unavailable' : 'scene_relevance_rejected_all_candidates' },
+        { failureKind: 'SCENE_RELEVANCE_REJECTED' }
+      );
+    }
+    result = { ...result, provenanceNotes: withRelevanceNote(result.provenanceNotes, verdict, relevance) };
+  }
+
   // Persist the provider's provenance fields unaltered -- in particular
   // verificationStatus is never promoted/reinterpreted here (see this
   // milestone's rights rule; PixabayAssetSourceProvider always returns
@@ -425,7 +475,7 @@ export async function runAssetProvisioning({ storage, contentBriefId, provider, 
   let skipped = [];
   if (scenePlan.length > 1) {
     ({ added: additionalAssets, skipped } = await provisionAdditionalScenes({
-      storage, repo, provider, contentVersionId: contentVersion.id, scenePlan, firstAsset: asset, runId, nowISO
+      storage, repo, provider, contentVersionId: contentVersion.id, scenePlan, firstAsset: asset, runId, nowISO, relevance, relevanceRanker
     }));
   }
   const sceneReport = buildSceneReport({
