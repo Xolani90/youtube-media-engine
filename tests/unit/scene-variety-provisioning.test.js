@@ -115,9 +115,14 @@ function poolProvider(dir) {
   const provider = new FakeProvider((p) => {
     calls.push(p.query);
     const n = calls.length;
+    // The candidate gate now requires an accepted hit to overlap the scene's
+    // visual query. Keep this fixture focused on its actual contract
+    // (duplicate rejection followed by an eligible alternative), rather than
+    // accidentally relying on generic words shared only with narration.
+    const queryTags = String(p.query).replace(/[^a-z0-9]+/gi, ',');
     const pool = [
-      { id: 'shared', pageURL: 'https://x/shared', tags: 'business, owner, laptop, office' },
-      { id: `own-${n}`, pageURL: `https://x/own-${n}`, tags: 'business, owner, laptop, office, desk' }
+      { id: 'shared', pageURL: 'https://x/shared', tags: `business, owner, laptop, office, ${queryTags}` },
+      { id: `own-${n}`, pageURL: `https://x/own-${n}`, tags: `business, owner, laptop, office, desk, ${queryTags}` }
     ];
     const chosen = p.screenHit ? pool.find((h) => p.screenHit(h).accept) : pool[0];
     if (!chosen) return { failure: { kind: 'EMPTY_RESULT', provider: 'fake', query: p.query, hitCount: pool.length, retryable: false } };

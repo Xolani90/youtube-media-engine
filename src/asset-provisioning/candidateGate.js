@@ -181,6 +181,7 @@ export function parseTags(tags) {
 export function buildHitScreen({ sceneText = '', query = '', excludeOrigins = [] } = {}) {
   const exclude = new Set(excludeOrigins);
   const context = new Set([...tokens(sceneText), ...tokens(query)]);
+  const queryTokenSet = new Set(tokens(query));
   const contextText = `${sceneText} ${query}`.toLowerCase();
   const deny = new Set(BRANDED_UI_CAPTURE_TAGS);
   const childrenWanted = mentionsChildrenAffirmatively(sceneText) || mentionsChildrenAffirmatively(query);
@@ -206,7 +207,11 @@ export function buildHitScreen({ sceneText = '', query = '', excludeOrigins = []
     }
     if (tags.length > 0 && context.size > 0) {
       const tagTokens = new Set(tags.flatMap((t) => tokens(t)));
-      if (![...context].some((w) => tagTokens.has(w))) return { accept: false, reason: 'no_tag_overlap_with_scene' };
+      // The query is the scene's visual intent; scene-text words alone ("products", "engagement", "higher") are
+      // too generic to vouch for a picture (a moon-phase image passed on them). When the query has content words
+      // the hit must share one; with no query the scene text is the only evidence there is.
+      const required = queryTokenSet.size > 0 ? queryTokenSet : context;
+      if (![...required].some((w) => tagTokens.has(w))) return { accept: false, reason: 'no_tag_overlap_with_scene' };
     }
     return { accept: true, reason: null };
   };
