@@ -15,7 +15,9 @@ const MIN_CAPTION_DURATION_SECONDS = 0.001;
 export function segmentCaptions(text, maxLength = DEFAULT_MAX_LENGTH) {
   if (!text || !text.trim()) return [];
 
-  const normalized = text.trim().replace(/\s+/g, ' ');
+  // A dash glued between two words ("restaurants—unless") is one unbreakable-looking token that libass can
+  // wrap badly and that defeats the word-boundary splitter below. Spacing it keeps every word whole.
+  const normalized = text.trim().replace(/\s+/g, ' ').replace(/(\S)\s*[\u2014\u2013]\s*(?=\S)/g, '$1 \u2014 ');
   const sentenceMatches = normalized.split(SENTENCE_BOUNDARY);
   const sentences = (sentenceMatches ?? [normalized]).map((s) => s.trim()).filter(Boolean);
 

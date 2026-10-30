@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { canonicalStringify } from '../production/manifest.js';
 import { LOUDNORM_TARGETS } from './render.js';
+import { FINISH_AUDIO_TARGETS } from './finish.js';
 
 // Automated final-video QA (FFmpeg/FFprobe only, no new dependency).
 //
@@ -104,7 +105,7 @@ function streamDuration(stream, formatDuration) {
 /** Parses the info-level lines FFmpeg's detector filters print. Tolerant of version differences; never assumes an event is terminated. */
 export function parseAnalysisOutput(stderr, { videoDuration, audioDuration }) {
   const lines = String(stderr).split(/\r?\n/);
-  const out = { black: [], freeze: [], silence: [], loudness: null, truePeak: null, summaryFound: false };
+  const out = { black: [], freeze: [], silence: [], loudness: null, loudnessRange: null, truePeak: null, summaryFound: false };
 
   let openFreezeStart = null;
   let openSilenceStart = null;
@@ -131,8 +132,10 @@ export function parseAnalysisOutput(stderr, { videoDuration, audioDuration }) {
     if (inSummary) {
       if (/Integrated loudness:/.test(line)) { section = 'I'; continue; }
       if (/True peak:/.test(line)) { section = 'TP'; continue; }
-      if (/Loudness range:|Sample peak:/.test(line)) { section = null; continue; }
+      if (/Loudness range:/.test(line)) { section = 'LRA'; continue; }
+      if (/Sample peak:/.test(line)) { section = null; continue; }
       if (section === 'I' && (m = /^\s*I:\s*(-?[\d.]+|-inf)\s*LUFS/.exec(line))) { out.loudness = m[1] === '-inf' ? -Infinity : Number(m[1]); continue; }
+      if (section === 'LRA' && (m = /^\s*LRA:\s*(-?[\d.]+|-inf)\s*LU/.exec(line))) { out.loudnessRange = m[1] === '-inf' ? -Infinity : Number(m[1]); continue; }
       if (section === 'TP' && (m = /^\s*Peak:\s*(-?[\d.]+|-inf)\s*dBFS/.exec(line))) { out.truePeak = m[1] === '-inf' ? -Infinity : Number(m[1]); continue; }
     }
   }
@@ -166,6 +169,20 @@ function maxDuration(segs) { return segs.reduce((a, s) => Math.max(a, s.duration
  * Analyses one media file. Never throws. `context` is caller-supplied, recorded verbatim
  * (e.g. { kenBurnsMotion: true }) so a report can state whether stillness was expected.
  */
+/**
+ * Thresholds for one analysis. A file that went through the cinematic finish pass is normalised to
+ * FINISH_AUDIO_TARGETS (-14 LUFS / -2 dBTP), so it is judged against that; an unfinished render is judged
+ * against the render-stage LOUDNORM_TARGETS. Only the target values change, never the tolerances.
+ */
+export function resolveQaThresholds(context = {}) {
+  if (context?.finished_audio_target !== true) return QA_THRESHOLDS;
+  return Object.freeze({
+    ...QA_THRESHOLDS,
+    loudness: Object.freeze({ ...QA_THRESHOLDS.loudness, target_lufs: FINISH_AUDIO_TARGETS.I }),
+    true_peak: Object.freeze({ ...QA_THRESHOLDS.true_peak, target_dbtp: FINISH_AUDIO_TARGETS.TP })
+  });
+}
+
 export function analyzeMediaQa(filePath, {
   runner = defaultRunner, ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe',
   timeoutMs = {}, context = {}, now = () => Date.now()
@@ -189,8 +206,8 @@ export function analyzeMediaQa(filePath, {
     black: { ran: false, segments: [], black_seconds: null, ratio: null },
     freeze: { ran: false, segments: [], frozen_seconds: null, ratio: null },
     silence: { ran: false, segments: [], silent_seconds: null, ratio: null },
-    loudness: { ran: false, integrated_lufs: null, true_peak_dbfs: null, target_lufs: LOUDNORM_TARGETS.I, deviation_lu: null },
-    thresholds: QA_THRESHOLDS,
+    loudness: { ran: false, integrated_lufs: null, loudness_range_lu: null, true_peak_dbfs: null, target_lufs: resolveQaThresholds(context).loudness.target_lufs, deviation_lu: null },
+    thresholds: resolveQaThresholds(context),
     methods: {},
     findings, unavailable
   };
@@ -266,7 +283,7 @@ export function analyzeMediaQa(filePath, {
     }
 
     // --- pass 2: black / freeze / loudness / silence (one decode of the file) ---
-    const th = QA_THRESHOLDS;
+    const th = resolveQaThresholds(context);
     const vf = vs ? `blackdetect=d=${th.black.min_segment_seconds}:pic_th=${th.black.pic_th}:pix_th=${th.black.pix_th},freezedetect=n=${th.freeze.noise_db}dB:d=${th.freeze.min_segment_seconds}` : null;
     const af = as ? `ebur128=peak=true:framelog=quiet,silencedetect=n=${th.silence.noise_floor_db}dB:d=${th.silence.min_segment_seconds}` : null;
     if (vf || af) {
@@ -294,6 +311,7 @@ export function analyzeMediaQa(filePath, {
             noteUnavailable('loudness', 'EBUR128_SUMMARY_MISSING_OR_UNPARSEABLE');
           } else {
             report.loudness.ran = true; report.loudness.integrated_lufs = Number.isFinite(parsed.loudness) ? round(parsed.loudness, 1) : -Infinity;
+            report.loudness.loudness_range_lu = parsed.loudnessRange === null ? null : (Number.isFinite(parsed.loudnessRange) ? round(parsed.loudnessRange, 1) : -Infinity);
             report.loudness.true_peak_dbfs = parsed.truePeak === null ? null : (Number.isFinite(parsed.truePeak) ? round(parsed.truePeak, 1) : -Infinity);
             report.loudness.deviation_lu = Number.isFinite(parsed.loudness) ? round(parsed.loudness - th.loudness.target_lufs, 1) : null;
             if (parsed.truePeak === null) noteUnavailable('true_peak', 'EBUR128_TRUE_PEAK_MISSING');
@@ -338,6 +356,9 @@ export function analyzeMediaQa(filePath, {
       }
       const tp = report.loudness.true_peak_dbfs;
       if (tp !== null && tp > th.true_peak.warn_above_dbtp) add('true_peak_overshoot', QA_SEVERITY.WARN, { true_peak_dbfs: tp, target_dbtp: th.true_peak.target_dbtp });
+      if (context.music_attached !== true && report.loudness.loudness_range_lu !== null && report.loudness.loudness_range_lu < 3) {
+        add('low_loudness_range_without_music', QA_SEVERITY.WARN, { loudness_range_lu: report.loudness.loudness_range_lu, threshold_lu: 3 });
+      }
     } else if (report.silence.ran && report.silence.ratio !== null && report.silence.ratio >= th.silence.silent_ratio_fail_candidate_min) {
       add('effectively_silent_audio', QA_SEVERITY.FAIL_CANDIDATE, { integrated_lufs: null, silent_ratio: report.silence.ratio });
     }

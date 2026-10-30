@@ -310,3 +310,8 @@ test('MEDIA_QA switch: on by default, off only for an explicit off value, unknow
   assert.equal(resolveMediaQaEnabled({ MEDIA_QA: 'off' }), false);
   assert.equal(resolveMediaQaEnabled({ MEDIA_QA: 'banana' }), true);
 });
+
+test('ebur128 parser records LRA for the evidence-only no-music warning', () => {
+  const parsed = parseAnalysisOutput(`[Parsed_ebur128_0 @ x] Summary:\n  Integrated loudness:\n    I:         -14.0 LUFS\n  Loudness range:\n    LRA:         2.0 LU\n  True peak:\n    Peak:        -2.0 dBFS`, { videoDuration: 1, audioDuration: 1 });
+  assert.equal(parsed.loudnessRange, 2);
+});
