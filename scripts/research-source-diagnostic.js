@@ -28,6 +28,7 @@
  *   node scripts/research-source-diagnostic.js
  */
 import { createStorage } from '../src/storage/index.js';
+import { readFeedAnnotations, formatFailureLines, formatAnnotationBlock } from '../src/publisherFeeds/report.js';
 
 /**
  * Splits a source URL into a hostname and a path (+ query string), the
@@ -53,7 +54,7 @@ export function parseSourceUrl(url) {
  * row (already joined to its research_projects.id). Pure/testable in
  * isolation from the database.
  */
-export function formatSourceDiagnostic({ projectId, sourceId, url, retrievalStatus, content }) {
+export function formatSourceDiagnostic({ projectId, sourceId, url, retrievalStatus, content, notes }) {
   const { host, path } = parseSourceUrl(url);
   const contentLength = typeof content === 'string' ? content.length : 0;
   return [
@@ -63,7 +64,9 @@ export function formatSourceDiagnostic({ projectId, sourceId, url, retrievalStat
     `url_host=${host}`,
     `url_path=${path}`,
     `retrieval_status=${retrievalStatus ?? 'UNKNOWN'}`,
-    `content_length=${contentLength}`
+    `content_length=${contentLength}`,
+    // Additive: only for FAILED rows that supply provenance notes, so existing blocks are byte-identical.
+    ...(retrievalStatus === 'FAILED' && notes !== undefined ? formatFailureLines(notes) : [])
   ].join('\n');
 }
 
@@ -77,14 +80,16 @@ export function formatSourceDiagnostic({ projectId, sourceId, url, retrievalStat
  */
 export function runDiagnostic(storage = createStorage()) {
   let rows;
+  let annotations = [];
   try {
     rows = storage.all(`
       SELECT rp.id AS project_id, s.id AS source_id, s.url AS url,
-             s.retrieval_status AS retrieval_status, s.content AS content
+             s.retrieval_status AS retrieval_status, s.content AS content, s.notes AS notes
       FROM sources s
       JOIN research_projects rp ON s.research_project_id = rp.id
       ORDER BY rp.created_at, s.retrieved_at
     `);
+    annotations = readFeedAnnotations((sql, params) => storage.all(sql, params));
   } catch (err) {
     console.log(`[research-source-diagnostic] unavailable: ${err.message}`);
     return;
@@ -103,9 +108,12 @@ export function runDiagnostic(storage = createStorage()) {
       sourceId: row.source_id,
       url: row.url,
       retrievalStatus: row.retrieval_status,
-      content: row.content
+      content: row.content,
+      notes: row.notes
     }));
   }
+  // Separate, clearly labelled, non-evidentiary block; never mixed into source counts.
+  for (const a of annotations) console.log(formatAnnotationBlock(a));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
