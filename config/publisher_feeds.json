@@ -1,0 +1,11 @@
+{
+  "version": "0.1",
+  "purpose": "Non-evidentiary publisher RSS metadata for annotating blocked-source audit rows. Never an evidence source. Phase 1, Owner-approved 2026-10-31.",
+  "feeds": [
+    {
+      "id": "openai-news",
+      "feedUrl": "https://openai.com/news/rss.xml",
+      "hosts": ["openai.com"]
+    }
+  ]
+}

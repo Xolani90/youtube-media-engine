@@ -11,8 +11,15 @@ export class SqliteStorageDriver extends StorageDriver {
     super();
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
+    try {
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('foreign_keys = ON');
+    } catch (e) {
+      // A failed constructor never yields an object the caller can close(); without this the handle stays
+      // open until GC (e.g. "file is not a database"), which blocks deleting the file on Windows (EBUSY).
+      try { this.db.close(); } catch { /* keep the original error */ }
+      throw e;
+    }
   }
 
   async migrate() {

@@ -72,7 +72,7 @@ test('Pass 46.1: reader fallback behaviour is unchanged for a login wall (one at
 
 test('Pass 46.1: the loaded production config marks blog.google authoritative and leaves unknown domains independent', () => {
   const c = config.researchSourceClassification;
-  assert.deepEqual(c.authoritativeDomains, ['blog.google']);
+  assert.deepEqual(c.authoritativeDomains, ['blog.google', 'openai.com']);
   assert.equal(classifySourceRole('https://blog.google/innovation-and-ai/x', c).role, 'primary_authoritative');
   assert.equal(classifySourceRole('https://www.cnbc.com/2026/09/30/x.html', c).role, 'independent_reporting');
   assert.equal(classifySourceRole('https://news.example/a', { ...c, syndicatedDomains: ['news.example'] }).role, 'syndicated');
@@ -110,7 +110,7 @@ test('Pass 46.1: the autonomous entrypoint hands the research stage the configur
       stageFns: { research: ({ classification }) => { captured = classification; return { count: 0 }; } }
     });
     assert.ok(captured, 'research stage received a classification object (not undefined/{})');
-    assert.deepEqual(captured.authoritativeDomains, ['blog.google']);
+    assert.deepEqual(captured.authoritativeDomains, ['blog.google', 'openai.com']);
 
     // Feed exactly that object to the real pipeline.
     const opportunityId = crypto.randomUUID();
