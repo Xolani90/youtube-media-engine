@@ -1,5 +1,7 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -8,7 +10,16 @@ import { isCliEntry } from '../../src/publisherFeeds/cliEntry.js';
 const root = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const LIVE = path.join(root, 'scripts/check-publisher-feed-live.js');
 const ANN = path.join(root, 'scripts/annotate-blocked-sources.js');
-const run = (args, env = {}) => spawnSync(process.execPath, args, { cwd: root, encoding: 'utf8', env: { PATH: process.env.PATH, ...env }, timeout: 30000 });
+// Isolation from the developer's local .env: src/config/index.js calls process.loadEnvFile(<repo>/.env) when it is
+// imported, which would inject e.g. SQLITE_PATH into the child. The child therefore gets only PATH plus a --import
+// shim (written to a private temp dir) that turns loadEnvFile into a no-op. The real .env is never read, moved,
+// renamed or modified by this test, and no database path is supplied.
+const isolationDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ame-cli-test-'));
+const noEnvShim = path.join(isolationDir, 'no-env-file.mjs');
+fs.writeFileSync(noEnvShim, 'process.loadEnvFile = () => {};\n');
+after(() => { fs.rmSync(isolationDir, { recursive: true, force: true }); });
+const ISOLATED_ENV = { PATH: process.env.PATH, NODE_OPTIONS: `--import ${pathToFileURL(noEnvShim).href}` };
+const run = (args, env = {}) => spawnSync(process.execPath, args, { cwd: root, encoding: 'utf8', env: { ...ISOLATED_ENV, ...env }, timeout: 30000 });
 
 test('live-check script, launched by Node, runs main(): usage error, exit 1, no request', () => {
   const r = run([LIVE, '--bogus']);
@@ -57,4 +68,23 @@ test('isCliEntry with POSIX semantics is case-sensitive and rejects other files'
   assert.equal(isCliEntry('file:///a/b/x.js', '/a/B/x.js', p), false);
   assert.equal(isCliEntry('file:///a/b/x.js', '/a/b/y.js', p), false);
   assert.equal(isCliEntry('not a url', '/a/b/x.js', p), false);
+});
+
+test('isolation: the child never loads the repository .env (a local SQLITE_PATH cannot leak into it)', () => {
+  const cfg = pathToFileURL(path.join(root, 'src', 'config', 'index.js')).href;
+  const r = run(['--input-type=module', '-e', `await import(${JSON.stringify(cfg)}); process.stdout.write(process.env.SQLITE_PATH === undefined ? 'unset' : 'LEAKED');`]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'unset');
+});
+
+test('isolation: the no-database usage path neither creates nor touches the real application database', () => {
+  const dataDir = path.join(root, 'data');
+  const realDb = path.join(dataDir, 'media-engine.db');
+  const snap = () => ({ dir: fs.existsSync(dataDir), db: fs.existsSync(realDb) ? fs.statSync(realDb).mtimeMs : null });
+  const before = snap();
+  const r = run([ANN]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /usage: node scripts\/annotate-blocked-sources\.js/);
+  assert.doesNotMatch(r.stdout, /DATABASE_ERROR|database not found/);
+  assert.deepEqual(snap(), before);
 });
