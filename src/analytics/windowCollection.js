@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { collectAnalytics } from './collector.js';
+import { collectAudienceAnalytics, planAudienceCollection } from './audienceCollection.js';
 import { loadEvidence, collectMeasurements, windowPeriods, DATA_LATENCY_DAYS } from './recommendations.js';
 
 /**
@@ -20,6 +21,13 @@ import { loadEvidence, collectMeasurements, windowPeriods, DATA_LATENCY_DAYS } f
  * but is not SUCCESS (retried at most once per retryAfterHours). A SUCCESS
  * snapshot is never re-collected or overwritten. Nothing here touches
  * publications, content state, discovery, generation or publishing.
+ *
+ * Audience reports (retention curve, traffic sources) ride the same run, the
+ * same lock and the same window arithmetic: after the scalar collection, any
+ * due audience reports are collected through ./audienceCollection.js. That
+ * step runs only when the adapter implements both audience methods (an
+ * adapter with just collect() behaves exactly as before) and is skipped when
+ * the scalar collection aborted on an account-level failure.
  */
 
 export const DEFAULT_RETRY_AFTER_HOURS = 6;
@@ -95,7 +103,7 @@ export const DEFAULT_LOCK_PATH = path.join(os.tmpdir(), 'ame-analytics-window-co
  */
 export async function runWindowCollection({
   storage, adapter, provider = 'youtube', now = () => new Date().toISOString(), execute = true,
-  retryAfterHours = DEFAULT_RETRY_AFTER_HOURS, lockPath = DEFAULT_LOCK_PATH, collect = collectAnalytics
+  retryAfterHours = DEFAULT_RETRY_AFTER_HOURS, lockPath = DEFAULT_LOCK_PATH, collect = collectAnalytics, collectAudience = collectAudienceAnalytics
 }) {
   if (!storage) throw new Error('runWindowCollection requires storage');
   if (execute && (!adapter || typeof adapter.collect !== 'function')) throw new Error('runWindowCollection requires an adapter to execute');
@@ -103,8 +111,13 @@ export async function runWindowCollection({
   const release = acquireLock(lockPath);
   if (!release) return { status: 'LOCKED', plan: null, groups: [] };
   try {
-    const plan = planWindowCollection(loadEvidence(storage, { provider }), { now: now(), retryAfterHours });
-    if (!execute) return { status: 'PLANNED', plan, groups: [] };
+    const evidence = loadEvidence(storage, { provider });
+    // One planning instant per invocation, shared by both planners. The `now` callback itself
+    // is still passed unchanged to the collectors for their actual collection timestamps.
+    const planNow = now();
+    const plan = planWindowCollection(evidence, { now: planNow, retryAfterHours });
+    const audiencePlan = planAudienceCollection(evidence, { now: planNow, retryAfterHours });
+    if (!execute) return { status: 'PLANNED', plan, groups: [], audience: { plan: audiencePlan, result: null } };
 
     const groups = [];
     let aborted = false;
@@ -119,10 +132,51 @@ export async function runWindowCollection({
         break;
       }
     }
-    const bad = groups.some((g) => g.error || g.aborted || g.failed > 0);
-    const anyOk = groups.some((g) => !g.error && g.collected > 0);
-    const status = !bad ? 'OK' : anyOk ? 'PARTIAL' : 'FAILED';
-    return { status, plan, groups, aborted };
+
+    // Scalar outcome: computed exactly as before audience reports existed, and
+    // fixed BEFORE any audience work so nothing audience-related can change it.
+    const scalarBad = groups.some((g) => g.error || g.aborted || g.failed > 0);
+    const scalarOk = groups.some((g) => !g.error && g.collected > 0);
+    const scalarStatus = !scalarBad ? 'OK' : scalarOk ? 'PARTIAL' : 'FAILED';
+    const scalarAborted = aborted;
+
+    // Audience reports: only with an adapter that supports them, and not after an account-level abort.
+    let audienceResult = null;
+    if (!scalarAborted && audiencePlan.targets.length > 0) {
+      const missing = ['collectRetentionCurve', 'collectTrafficSources'].filter((m) => typeof adapter[m] !== 'function');
+      if (missing.length > 0) {
+        // Audience work is DUE but this adapter cannot do it: an explicit configuration failure,
+        // never a silent skip. No snapshot rows are written (nothing was attempted or observed).
+        // Counts are individual requested reports (sum of kinds across targets), not targets.
+        const reportCount = audiencePlan.targets.reduce((n, t) => n + t.kinds.length, 0);
+        audienceResult = {
+          error: `AUDIENCE_ADAPTER_UNSUPPORTED: adapter lacks ${missing.join(', ')}`, unsupported: true, missingMethods: missing,
+          requested: reportCount, alreadyCollected: 0, collected: 0, unavailable: 0, failed: reportCount, aborted: false
+        };
+      } else {
+        try {
+          audienceResult = await collectAudience({ storage, adapter, provider, targets: audiencePlan.targets, nowISO: now });
+        } catch (err) {
+          audienceResult = { error: String(err?.message ?? err), requested: 0, collected: 0, unavailable: 0, failed: 0, aborted: true };
+        }
+      }
+    }
+    const audienceBad = Boolean(audienceResult && (audienceResult.error || audienceResult.aborted || audienceResult.failed > 0));
+    const audienceOk = Boolean(audienceResult && !audienceResult.error && audienceResult.collected > 0);
+    // DEFERRED: due audience work exists but nothing was attempted because an earlier failure is
+    // still cooling down. Not a new failure (it was reported when it happened) and not success.
+    const audienceDeferred = !audienceResult && audiencePlan.targets.length === 0 && (Boolean(audiencePlan.holdReason) || audiencePlan.deferred.length > 0);
+    const audienceStatus = audienceDeferred ? 'DEFERRED' : !audienceResult ? null : !audienceBad ? 'OK' : audienceOk ? 'PARTIAL' : 'FAILED';
+
+    // `status` and `aborted` describe the SCALAR run only, as they always have: an audience
+    // success can never lift a failed scalar run, and an audience failure can never fail or
+    // abort a clean one. `overallStatus` is the combined view for operators and exit codes.
+    const overallBad = scalarBad || audienceBad;
+    const overallOk = scalarOk || audienceOk;
+    const overallStatus = !overallBad ? 'OK' : overallOk ? 'PARTIAL' : 'FAILED';
+    return { status: scalarStatus, overallStatus, plan, groups, aborted: scalarAborted, audience: { plan: audiencePlan, result: audienceResult, status: audienceStatus, holdReason: audiencePlan.holdReason ?? null,
+      // Explicit machine-readable reason for every DEFERRED run (account-level hold, else per-report cool-down).
+      deferredReason: audienceStatus === 'DEFERRED' ? (audiencePlan.holdReason ?? 'retry_cool_down') : null } };
   } finally {
     release();
   }

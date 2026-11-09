@@ -21,7 +21,8 @@ test('runner applies 0032 on a fresh database without an FK-toggle entry', async
   try {
     const ids = storage.all('SELECT id FROM schema_migrations ORDER BY id').map((r) => r.id);
     assert.ok(ids.includes('0032_publisher_feed_items.sql'));
-    assert.equal(ids[ids.length - 1], '0032_publisher_feed_items.sql');
+    // 0032 is no longer the newest migration (0033 follows); it must be applied, in order.
+    assert.ok(ids.indexOf('0032_publisher_feed_items.sql') > ids.indexOf('0031_analytics_recommendations.sql'));
     assert.equal(storage.all("SELECT name FROM sqlite_master WHERE name = 'publisher_feed_items'").length, 1);
     assert.equal(storage.all('PRAGMA foreign_key_list(publisher_feed_items)').length, 0, 'no FK out of the feed table');
     for (const t of storage.all("SELECT name, sql FROM sqlite_master WHERE type='table' AND name != 'publisher_feed_items'")) {

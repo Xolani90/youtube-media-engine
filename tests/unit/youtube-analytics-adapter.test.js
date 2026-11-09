@@ -140,3 +140,31 @@ test('the adapter exposes only collect() -- no publish/publishThumbnail surface 
   assert.equal(adapter.publish, undefined);
   assert.equal(adapter.publishThumbnail, undefined);
 });
+test('request uses only documented metrics, sorts, and bounds maxResults (no impressions / CTR)', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('oauth2.googleapis.com')) return tokenResponse();
+    return { ok: true, status: 200, json: async () => ({ columnHeaders: [{ name: 'video' }, { name: 'views' }], rows: [['a', 1], ['b', 2]] }) };
+  };
+  const adapter = new YouTubeAnalyticsAdapter({ fetchImpl, credentialsProvider: fakeCredentials });
+  await adapter.collect({ videoIds: ['a', 'b'], periodStart: '2026-09-01', periodEnd: '2026-09-07' });
+  const q = new URL(calls[1]).searchParams;
+  assert.deepEqual(q.get('metrics').split(','), [
+    'views', 'likes', 'comments', 'shares', 'estimatedMinutesWatched', 'averageViewDuration', 'averageViewPercentage'
+  ]);
+  assert.equal(q.get('dimensions'), 'video');
+  assert.equal(q.get('sort'), '-views');
+  assert.equal(q.get('maxResults'), '2');
+  assert.equal(q.get('filters'), 'video==a,b');
+});
+
+test('undocumented impressions columns in a response are ignored, never copied', async () => {
+  const fetchImpl = async (url) => String(url).includes('oauth2') ? tokenResponse() : ({
+    ok: true, status: 200,
+    json: async () => ({ columnHeaders: [{ name: 'video' }, { name: 'views' }, { name: 'impressions' }], rows: [['a', 1, 999]] })
+  });
+  const adapter = new YouTubeAnalyticsAdapter({ fetchImpl, credentialsProvider: fakeCredentials });
+  const r = await adapter.collect({ videoIds: ['a'], periodStart: '2026-09-01', periodEnd: '2026-09-07' });
+  assert.deepEqual(r.byVideoId.a, { views: 1 });
+});

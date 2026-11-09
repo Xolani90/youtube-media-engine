@@ -65,12 +65,122 @@ const METRIC_COLUMN_MAP = Object.freeze({
   shares: 'shares',
   estimatedMinutesWatched: 'estimatedWatchTimeMinutes',
   averageViewDuration: 'averageViewDurationSeconds',
-  averageViewPercentage: 'averageViewPercentage',
-  impressions: 'impressions',
-  impressionsClickThroughRate: 'impressionsCtr'
+  averageViewPercentage: 'averageViewPercentage'
+  // NOT requested: `impressions` / `impressionsClickThroughRate` are not metrics of the YouTube Analytics API
+  // (metrics reference, updated 2026-09-10: `impressions` was renamed `adImpressions`, which is ad impressions, not
+  // thumbnail impressions; no thumbnail-CTR metric is listed). Requesting an undocumented metric risks a 400 that
+  // PERMANENT_FAILUREs the whole batch. The impressions columns stay NULL, so the CTR recommendation rule
+  // (needsImpressions) excludes itself rather than reading a fabricated value.
 });
 
 const REQUESTED_METRICS = Object.keys(METRIC_COLUMN_MAP);
+
+// --- Audience reports (retention curve, traffic sources) ---------------------
+//
+// Report shapes, verified against the YouTube Analytics API channel-report
+// documentation (developers.google.com/youtube/analytics/channel_reports) and
+// the field-type listings that mirror it, at implementation time:
+//   - Audience retention: dimensions=elapsedVideoTimeRatio, metrics
+//     audienceWatchRatio (float) and relativeRetentionPerformance (float, 0..1:
+//     Google's metrics page defines 0 = worse than every similar-length video,
+//     0.5 = median, 1 = better than every one; NO negative values are documented),
+//     filters=video==<ONE id> (the video filter is REQUIRED and takes a single
+//     video here). The API returns up to 100 points, ratios 0.01..1.0.
+//     elapsedVideoTimeRatio is typed STRING: rows arrive as ["0.01", 1, 0.42],
+//     not [0.01, 1, 0.42]. It is NOT assumed numeric. YouTube withholds
+//     retention for videos below a volume threshold: the report then has no
+//     rows, which is UNAVAILABLE here, never a flat curve.
+//     audienceWatchRatio may legitimately exceed 1 (re-watches).
+//   - Traffic sources: dimensions=insightTrafficSourceType, metrics
+//     views,estimatedMinutesWatched, optional video filter, sort=-views.
+//     A source with no views is simply absent from the rows.
+// Not verified live: no credentials were available. Fixtures in
+// tests/unit/youtube-analytics-retention.test.js are API-shaped, not recorded.
+const RETENTION_METRIC_COLUMNS = Object.freeze(['audienceWatchRatio', 'relativeRetentionPerformance']);
+const TRAFFIC_METRIC_COLUMNS = Object.freeze(['views', 'estimatedMinutesWatched']);
+// Per-column validity. A value outside its range is MALFORMED and becomes null
+// (unavailable); it is never clamped, defaulted or coerced to 0.
+const METRIC_RULES = Object.freeze({
+  audienceWatchRatio: { min: 0 },
+  relativeRetentionPerformance: { min: 0, max: 1 },
+  views: { min: 0 },
+  estimatedMinutesWatched: { min: 0 }
+});
+const RETENTION_SUMMARY_POINTS = Object.freeze({ at10: 0.1, at25: 0.25, at50: 0.5, at75: 0.75 });
+const RATIO_MATCH_EPSILON = 1e-6;
+// The API samples retention on a 0.01 grid; a drop is only attributed across
+// ADJACENT grid points, never across a gap left by a dropped/malformed row.
+const MAX_ADJACENT_RATIO_GAP = 0.011;
+const VIDEO_ID_RE = /^[A-Za-z0-9_-]{6,32}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * True only for a real calendar date written YYYY-MM-DD. Round-trips through
+ * Date.UTC so 2026-02-30, 2026-13-01, 2027-02-29 (not a leap year) and
+ * 2026-00-10 are rejected, while 2028-02-29 (a leap year) is accepted.
+ */
+export function isValidIsoDate(value) {
+  if (typeof value !== 'string' || !DATE_RE.test(value)) return false;
+  const [y, m, d] = value.split('-').map(Number);
+  if (y < 1970) return false;
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}
+const TRAFFIC_SOURCE_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/**
+ * Strict numeric parse for API values that may arrive as a number OR a numeric
+ * string. Returns a finite number or null. Rejects '', whitespace, 'NaN',
+ * 'Infinity', hex/octal forms, trailing junk, booleans, objects and arrays.
+ * null/undefined are unavailable (null), never 0.
+ */
+export function parseApiNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const s = value.trim();
+  if (s === '' || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseMetric(name, value) {
+  const n = parseApiNumber(value);
+  if (n === null) return null;
+  const rule = METRIC_RULES[name];
+  if (rule && ((rule.min !== undefined && n < rule.min) || (rule.max !== undefined && n > rule.max))) return null;
+  return n;
+}
+
+/**
+ * Reads a columnHeaders/rows report into dimension + metric values by COLUMN
+ * NAME (never by position). Returns { error } when the shape cannot be trusted,
+ * else { rows: [{ dimension, metrics: {name: number|null} }], dropped }.
+ * A row whose dimension fails parseDimension is dropped and counted; a metric
+ * that is missing, null or malformed is null in that row.
+ */
+function readTable(body, { dimension, metrics, parseDimension, requiredMetrics }) {
+  const headers = Array.isArray(body?.columnHeaders) ? body.columnHeaders : [];
+  if (headers.length === 0) return { error: 'NO_COLUMN_HEADERS' };
+  const col = (name) => headers.findIndex((h) => h?.name === name);
+  const dimCol = col(dimension);
+  if (dimCol === -1) return { error: `NO_${dimension}_DIMENSION_IN_RESPONSE` };
+  const metricCols = Object.fromEntries(metrics.map((m) => [m, col(m)]));
+  for (const m of requiredMetrics) {
+    if (metricCols[m] === -1) return { error: `METRIC_COLUMN_MISSING_${m}` };
+  }
+  if (body.rows !== undefined && body.rows !== null && !Array.isArray(body.rows)) return { error: 'ROWS_NOT_AN_ARRAY' };
+  const rows = [];
+  const dropped = { malformedRow: 0, badDimension: 0 };
+  for (const raw of body.rows ?? []) {
+    if (!Array.isArray(raw)) { dropped.malformedRow += 1; continue; }
+    const dim = parseDimension(raw[dimCol]);
+    if (dim === null) { dropped.badDimension += 1; continue; }
+    const values = {};
+    for (const m of metrics) values[m] = metricCols[m] === -1 ? null : parseMetric(m, raw[metricCols[m]]);
+    rows.push({ dimension: dim, metrics: values });
+  }
+  return { rows, dropped };
+}
 
 export class YouTubeAnalyticsAdapter {
   /**
@@ -140,6 +250,11 @@ export class YouTubeAnalyticsAdapter {
     url.searchParams.set('metrics', REQUESTED_METRICS.join(','));
     url.searchParams.set('dimensions', 'video');
     url.searchParams.set('filters', `video==${videoIds.join(',')}`);
+    // Docs (sample-requests) state that dimensions=video top-N reports require `sort` and maxResults (<=10 in those
+    // examples). Not verified live for filtered multi-id requests: maxResults is set to the batch size so no requested
+    // video is truncated (collector batches are <= 50).
+    url.searchParams.set('sort', '-views');
+    url.searchParams.set('maxResults', String(videoIds.length));
 
     let res;
     let attempt = 0;
@@ -210,6 +325,47 @@ export class YouTubeAnalyticsAdapter {
     return this._interpretReport(body, { videoIds });
   }
 
+  /**
+   * Audience-retention curve for ONE video over [periodStart, periodEnd].
+   * Same never-throws / six-status contract as collect(). On SUCCESS:
+   * { points: [{ ratio, audienceWatchRatio, relativeRetentionPerformance }]
+   *   (ascending by ratio, nulls preserved), summary: { at10, at25, at50,
+   *   at75, steepestDrop, pointCount, dropped } }. summary.atNN is the
+   * audienceWatchRatio at exactly NN% of the video, or null when that point
+   * is absent/unavailable -- never interpolated, never 0.
+   * No rows / no usable points => UNAVAILABLE (YouTube withholds retention
+   * for low-volume videos), never an empty or flat curve reported as SUCCESS.
+   */
+  async collectRetentionCurve({ videoId, periodStart, periodEnd }) {
+    const invalid = this._validateAudienceArgs({ videoId, periodStart, periodEnd });
+    if (invalid) return invalid;
+    const q = await this._runQuery({
+      ids: 'channel==MINE', startDate: periodStart, endDate: periodEnd,
+      metrics: RETENTION_METRIC_COLUMNS.join(','), dimensions: 'elapsedVideoTimeRatio', filters: `video==${videoId}`
+    });
+    if (!q.ok) return q.result;
+    return this._interpretRetention(q.body, { videoId });
+  }
+
+  /**
+   * Traffic-source breakdown for ONE video over [periodStart, periodEnd].
+   * On SUCCESS: { sources: [{ source, views, estimatedMinutesWatched,
+   * viewsShare }] (descending by views), totalViews, totalViewsComplete,
+   * zeroViews }. viewsShare is a 0..1 fraction of totalViews, or null when
+   * it cannot be computed honestly (zero total views, or any source's views
+   * unavailable) -- never NaN, never a fabricated 0. No rows => UNAVAILABLE.
+   */
+  async collectTrafficSources({ videoId, periodStart, periodEnd }) {
+    const invalid = this._validateAudienceArgs({ videoId, periodStart, periodEnd });
+    if (invalid) return invalid;
+    const q = await this._runQuery({
+      ids: 'channel==MINE', startDate: periodStart, endDate: periodEnd,
+      metrics: TRAFFIC_METRIC_COLUMNS.join(','), dimensions: 'insightTrafficSourceType', filters: `video==${videoId}`, sort: '-views'
+    });
+    if (!q.ok) return q.result;
+    return this._interpretTraffic(q.body, { videoId });
+  }
+
   // --- Internal helpers (all YouTube-Analytics-specific) ---
 
   async _getAccessToken() {
@@ -235,6 +391,136 @@ export class YouTubeAnalyticsAdapter {
       throw new Error('token_refresh_missing_access_token');
     }
     return body.access_token;
+  }
+
+  _validateAudienceArgs({ videoId, periodStart, periodEnd }) {
+    const bad = (errorClass) => ({ status: ANALYTICS_RESULT_STATUS.PERMANENT_FAILURE, provider: this.id, errorClass });
+    if (typeof videoId !== 'string' || !VIDEO_ID_RE.test(videoId)) return bad('INVALID_VIDEO_ID');
+    if (!isValidIsoDate(periodStart) || !isValidIsoDate(periodEnd)) return bad('INVALID_PERIOD');
+    // YYYY-MM-DD compares chronologically as a string; a single-day period (start == end) is allowed.
+    if (periodStart > periodEnd) return bad('INVALID_PERIOD');
+    return null;
+  }
+
+  /**
+   * One authenticated, bounded-retry report request (same token exchange,
+   * same MAX_RETRIES/RETRY_DELAY_MS and the same status classification as
+   * collect()). Returns { ok: true, body } or { ok: false, result }.
+   * Deliberately a parallel of collect()'s request loop rather than a
+   * refactor of it: collect()'s behaviour and tests are left untouched.
+   */
+  async _runQuery(params) {
+    let accessToken;
+    try {
+      accessToken = await this._getAccessToken();
+    } catch (err) {
+      return { ok: false, result: { status: ANALYTICS_RESULT_STATUS.AUTH_FAILURE, provider: this.id, errorClass: err.message } };
+    }
+    const url = new URL(ANALYTICS_ENDPOINT);
+    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+
+    let res;
+    let attempt = 0;
+    const fail = (status, errorClass, extra = {}) => ({ ok: false, result: { status, provider: this.id, errorClass, ...extra } });
+    for (;;) {
+      try {
+        res = await this._fetch(url.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
+      } catch (err) {
+        if (attempt < MAX_RETRIES) { attempt += 1; await this._sleep(RETRY_DELAY_MS); continue; }
+        return fail(ANALYTICS_RESULT_STATUS.TRANSIENT_FAILURE, `network_error_${err.message}`);
+      }
+      if (res.status === 429) {
+        if (attempt < MAX_RETRIES) { attempt += 1; await this._sleep(RETRY_DELAY_MS); continue; }
+        return fail(ANALYTICS_RESULT_STATUS.RATE_LIMITED, 'RATE_LIMIT_RETRIES_EXHAUSTED');
+      }
+      if (res.status >= 500) {
+        if (attempt < MAX_RETRIES) { attempt += 1; await this._sleep(RETRY_DELAY_MS); continue; }
+        return fail(ANALYTICS_RESULT_STATUS.TRANSIENT_FAILURE, `server_error_${res.status}`);
+      }
+      break;
+    }
+    if (res.status === 401 || res.status === 403) {
+      let raw = null;
+      try { raw = await res.text(); } catch { /* ignore unparseable error body */ }
+      return fail(ANALYTICS_RESULT_STATUS.AUTH_FAILURE, `http_${res.status}`, { raw });
+    }
+    if (!res.ok) {
+      let raw = null;
+      try { raw = await res.text(); } catch { /* ignore unparseable error body */ }
+      return fail(ANALYTICS_RESULT_STATUS.PERMANENT_FAILURE, `http_${res.status}`, { raw });
+    }
+    try {
+      return { ok: true, body: await res.json() };
+    } catch (err) {
+      return fail(ANALYTICS_RESULT_STATUS.TRANSIENT_FAILURE, `unparseable_response_${err.message}`);
+    }
+  }
+
+  _interpretRetention(body, { videoId }) {
+    const table = readTable(body, {
+      dimension: 'elapsedVideoTimeRatio', metrics: RETENTION_METRIC_COLUMNS, requiredMetrics: ['audienceWatchRatio'],
+      parseDimension: (v) => { const n = parseApiNumber(v); return n !== null && n > 0 && n <= 1 ? n : null; }
+    });
+    if (table.error) return { status: ANALYTICS_RESULT_STATUS.UNAVAILABLE, provider: this.id, videoId, errorClass: table.error };
+
+    const byRatio = new Map();
+    let duplicates = 0;
+    for (const r of table.rows) {
+      if (byRatio.has(r.dimension)) { duplicates += 1; continue; } // first occurrence wins; never averaged or summed
+      byRatio.set(r.dimension, { ratio: r.dimension, audienceWatchRatio: r.metrics.audienceWatchRatio, relativeRetentionPerformance: r.metrics.relativeRetentionPerformance });
+    }
+    const points = [...byRatio.values()].sort((a, b) => a.ratio - b.ratio);
+    const dropped = { ...table.dropped, duplicateRatio: duplicates };
+    if (!points.some((p) => p.audienceWatchRatio !== null)) {
+      return { status: ANALYTICS_RESULT_STATUS.UNAVAILABLE, provider: this.id, videoId, errorClass: 'NO_USABLE_RETENTION_POINTS', dropped };
+    }
+
+    const summary = { pointCount: points.length, dropped };
+    for (const [key, target] of Object.entries(RETENTION_SUMMARY_POINTS)) {
+      const hit = points.find((p) => Math.abs(p.ratio - target) < RATIO_MATCH_EPSILON);
+      summary[key] = hit ? hit.audienceWatchRatio : null;
+    }
+    let steepest = null;
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1];
+      const b = points[i];
+      if (a.audienceWatchRatio === null || b.audienceWatchRatio === null) continue;
+      if (b.ratio - a.ratio > MAX_ADJACENT_RATIO_GAP) continue;
+      const drop = a.audienceWatchRatio - b.audienceWatchRatio;
+      if (drop > 0 && (steepest === null || drop > steepest.drop)) steepest = { fromRatio: a.ratio, toRatio: b.ratio, drop };
+    }
+    summary.steepestDrop = steepest; // null = no measurable drop, not "0"
+    return { status: ANALYTICS_RESULT_STATUS.SUCCESS, provider: this.id, videoId, points, summary };
+  }
+
+  _interpretTraffic(body, { videoId }) {
+    const table = readTable(body, {
+      dimension: 'insightTrafficSourceType', metrics: TRAFFIC_METRIC_COLUMNS, requiredMetrics: ['views'],
+      parseDimension: (v) => (typeof v === 'string' && TRAFFIC_SOURCE_RE.test(v) ? v : null)
+    });
+    if (table.error) return { status: ANALYTICS_RESULT_STATUS.UNAVAILABLE, provider: this.id, videoId, errorClass: table.error };
+
+    const seen = new Set();
+    const sources = [];
+    let duplicates = 0;
+    for (const r of table.rows) {
+      if (seen.has(r.dimension)) { duplicates += 1; continue; }
+      seen.add(r.dimension);
+      sources.push({ source: r.dimension, views: r.metrics.views, estimatedMinutesWatched: r.metrics.estimatedMinutesWatched, viewsShare: null });
+    }
+    const dropped = { ...table.dropped, duplicateSource: duplicates };
+    if (sources.length === 0) {
+      return { status: ANALYTICS_RESULT_STATUS.UNAVAILABLE, provider: this.id, videoId, errorClass: 'NO_TRAFFIC_ROWS', dropped };
+    }
+    const complete = sources.every((s) => s.views !== null);
+    const totalViews = sources.reduce((sum, s) => sum + (s.views ?? 0), 0);
+    if (complete && totalViews > 0) for (const s of sources) s.viewsShare = s.views / totalViews;
+    sources.sort((a, b) => (b.views ?? -1) - (a.views ?? -1) || a.source.localeCompare(b.source));
+    return {
+      status: ANALYTICS_RESULT_STATUS.SUCCESS, provider: this.id, videoId, sources,
+      totalViews: complete ? totalViews : null, totalViewsComplete: complete,
+      zeroViews: complete && totalViews === 0, dropped
+    };
   }
 
   /**

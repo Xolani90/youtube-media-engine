@@ -39,9 +39,29 @@ try {
     console.log(`Due now: ${plan.due.length} period(s); deferred ${plan.deferred.length}; not yet usable ${plan.notDue.length}; skipped publications ${plan.skipped.length}.`);
     for (const g of plan.due) console.log(`  ${g.periodStart}..${g.periodEnd} [${g.windows.join(',')}] ${g.publicationIds.length} publication(s)`);
     for (const s of plan.skipped) console.log(`  skipped ${s.publicationId}: ${s.reason}`);
+    const ap = res.audience?.plan;
+    if (ap) {
+      console.log(`Audience (retention + traffic sources): ${ap.targets.length} publication-period(s) due; deferred ${ap.deferred.length}; final-unavailable/rejected ${ap.final.length}.`);
+      for (const t of ap.targets) console.log(`  ${t.publicationId} ${t.periodStart}..${t.periodEnd} [${t.kinds.join(',')}]`);
+    }
     if (!opts.run) console.log('Plan only. Re-run with --run to collect.');
+    const ar = res.audience?.result;
+    if (ar) console.log(ar.error ? `  audience ERROR ${ar.error}` : `  audience: ${ar.requested} requested, ${ar.alreadyCollected} already collected, ${ar.collected} collected, ${ar.unavailable} unavailable, ${ar.failed} failed${ar.aborted ? ' (aborted)' : ''}`);
+    if (res.audience?.status === 'DEFERRED') console.log(`  audience DEFERRED: ${res.audience.deferredReason} (nothing attempted; the earlier failure was already reported)`);
     for (const g of res.groups) console.log(g.error ? `  ${g.periodStart}..${g.periodEnd} ERROR ${g.error}` : `  ${g.periodStart}..${g.periodEnd}: ${g.collected} collected, ${g.unavailable} unavailable, ${g.failed} failed${g.aborted ? ' (aborted)' : ''}`);
-    if (opts.run) { console.log(`Result: ${res.status}`); if (res.status !== 'OK') process.exitCode = 1; }
+    if (opts.run) {
+      console.log(`Result: ${res.status}${res.audience?.status ? ` (scalar); audience ${res.audience.status}; overall ${res.overallStatus}` : ''}`);
+      if (res.overallStatus !== 'OK') process.exitCode = 1;
+      // Machine-readable outcome (one line, stable prefix). DEFERRED is reported explicitly and is never
+      // a successful collection: collectionAttempted=false, exit code 0 (a normal cool-down).
+      const aud = res.audience;
+      console.log('RESULT_JSON ' + JSON.stringify({
+        scalarStatus: res.status, audienceStatus: aud?.status ?? null, overallStatus: res.overallStatus,
+        audienceDeferred: aud?.status === 'DEFERRED', audienceReason: aud?.status === 'DEFERRED' ? aud.deferredReason : (aud?.result?.unsupported ? 'AUDIENCE_ADAPTER_UNSUPPORTED' : null),
+        audienceCollectionAttempted: Boolean(aud?.result && !aud.result.unsupported),
+        exitCode: process.exitCode ?? 0
+      }));
+    }
   }
 } catch (err) {
   console.error(`Failed: ${err.message}`);

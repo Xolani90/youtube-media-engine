@@ -21,6 +21,7 @@ try {
     console.log(`status=${r.status} created=${r.created} existing=${r.existing}`);
     for (const reason of r.reasons) console.log(`  reason: ${reason}`);
     for (const c of r.collectionNeeded) console.log(`  collect: node scripts/collect-youtube-analytics.js --start ${c.periodStart} --end ${c.periodEnd}   # ${c.window} for ${c.providerItemId}`);
+    if (r.audienceCollectionNeeded?.length) console.log(`  audience reports still to collect: ${r.audienceCollectionNeeded.length} (run: node scripts/collect-analytics-windows.js --run)`);
     const counts = {};
     for (const e of r.exclusions) counts[e.reason] = (counts[e.reason] ?? 0) + 1;
     for (const [reason, n] of Object.entries(counts)) console.log(`  excluded x${n}: ${reason}`);

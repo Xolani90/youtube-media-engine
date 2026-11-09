@@ -26,6 +26,14 @@ import crypto from 'node:crypto';
  *    window (so at least 3 valid measurements). Otherwise: INSUFFICIENT_DATA.
  * Findings are descriptive (relative to the channel's own median), not
  * statistical tests and not causal claims.
+ *
+ * Audience metrics (retention curve points, traffic-source shares) follow the
+ * SAME rules, read from analytics_audience_snapshots: exact fixed window, same
+ * publication gate, SUCCESS only, collected after the data settled. Anything
+ * else is an explicit exclusion whose reason names the snapshot status
+ * (e.g. audience_retention_unavailable): UNAVAILABLE is never turned into a
+ * zero, and a traffic source that the report did not list is never assumed to
+ * be 0%.
  */
 
 export const WINDOWS = Object.freeze({
@@ -40,6 +48,17 @@ export const METRICS = Object.freeze({
   impressions_ctr: { needsImpressions: true },
   average_view_percentage: { needsImpressions: false, max: 100 }
 });
+// Audience metrics. `read` pulls one number from the stored summary_json;
+// undefined/null => not reported => excluded, never zero.
+export const MIN_TRAFFIC_VIEWS_FOR_SHARE = 100;
+export const AUDIENCE_METRICS = Object.freeze({
+  retention_at_25: { kind: 'RETENTION', read: (s) => s.at25 },
+  retention_at_50: { kind: 'RETENTION', read: (s) => s.at50 },
+  traffic_share_yt_search: { kind: 'TRAFFIC_SOURCES', needsViews: true, max: 1, read: (s) => s.shares?.YT_SEARCH },
+  traffic_share_related_video: { kind: 'TRAFFIC_SOURCES', needsViews: true, max: 1, read: (s) => s.shares?.RELATED_VIDEO },
+  traffic_share_shorts: { kind: 'TRAFFIC_SOURCES', needsViews: true, max: 1, read: (s) => s.shares?.SHORTS }
+});
+export const AUDIENCE_KIND_LIST = Object.freeze([...new Set(Object.values(AUDIENCE_METRICS).map((m) => m.kind))]);
 export const RECOMMENDATION_STATUS = Object.freeze({ PENDING: 'PENDING', APPROVED: 'APPROVED', REJECTED: 'REJECTED' });
 export const RESULT_STATUS = Object.freeze({ OK: 'OK', INSUFFICIENT_DATA: 'INSUFFICIENT_DATA' });
 
@@ -78,53 +97,103 @@ export function loadEvidence(storage, { provider = 'youtube' } = {}) {
     `SELECT s.* FROM analytics_snapshots s JOIN publications p ON p.id = s.publication_id WHERE p.provider = ? AND s.provider = ?`,
     [provider, provider]
   );
-  return { provider, publications, snapshots };
+  const audienceSnapshots = storage.all(
+    `SELECT s.* FROM analytics_audience_snapshots s JOIN publications p ON p.id = s.publication_id WHERE p.provider = ? AND s.provider = ?`,
+    [provider, provider]
+  );
+  return { provider, publications, snapshots, audienceSnapshots };
+}
+
+/**
+ * The publication-level gate shared by recommendation generation and by every
+ * collection planner (so what is collected is exactly what can be used).
+ * Returns the exclusion reason, or null when the publication is eligible.
+ * Check order is part of the contract (first failing reason wins).
+ */
+export function publicationExclusionReason(p, provider) {
+  if (p.status !== 'PUBLISHED' || !p.provider_item_id || p.provider !== provider) return 'publication_not_confirmed_published';
+  const result = safeJson(p.result_json);
+  const request = safeJson(p.request_json);
+  if (result?.confirmedVisibility !== 'public') return 'visibility_not_confirmed_public';
+  if (request?.requestedPublishAt) return 'scheduled_publication';
+  if (!p.published_at) return 'no_persisted_published_decision';
+  if (p.run_mode !== 'LIVE') return p.run_mode ? 'run_mode_not_live' : 'publication_not_linked_to_a_run';
+  if (!windowPeriods(p.published_at)) return 'unparseable_published_at';
+  return null;
+}
+
+/** ms timestamp from which a window's data may be used (end + 1 day + latency). */
+export function windowUsableAtMs(period) {
+  return Date.parse(`${addDays(period.end, 1)}T00:00:00Z`) + DATA_LATENCY_DAYS * DAY_MS;
 }
 
 /** Pure: decides which publications/windows yield valid measurements. */
-export function collectMeasurements({ provider, publications, snapshots }, { now = new Date().toISOString() } = {}) {
+export function collectMeasurements({ provider, publications, snapshots, audienceSnapshots }, { now = new Date().toISOString() } = {}) {
   const nowMs = Date.parse(now);
   const exclusions = [];
   const collectionNeeded = [];
-  const measurements = []; // { publication, window, metric, value, snapshot }
+  const audienceCollectionNeeded = [];
+  const measurements = []; // { publication, window, metric, value, snapshot, context? }
   const byPub = new Map();
   for (const s of snapshots) { if (!byPub.has(s.publication_id)) byPub.set(s.publication_id, []); byPub.get(s.publication_id).push(s); }
+  // Audience evidence is only evaluated when the caller supplies it (loadEvidence always does).
+  const audienceEnabled = Array.isArray(audienceSnapshots);
+  const audByPub = new Map();
+  for (const s of audienceSnapshots ?? []) { if (!audByPub.has(s.publication_id)) audByPub.set(s.publication_id, []); audByPub.get(s.publication_id).push(s); }
 
   for (const p of publications) {
     const exclude = (reason, window = null) => exclusions.push({ publicationId: p.id, window, reason });
-    if (p.status !== 'PUBLISHED' || !p.provider_item_id || p.provider !== provider) { exclude('publication_not_confirmed_published'); continue; }
-    const result = safeJson(p.result_json);
-    const request = safeJson(p.request_json);
-    if (result?.confirmedVisibility !== 'public') { exclude('visibility_not_confirmed_public'); continue; }
-    if (request?.requestedPublishAt) { exclude('scheduled_publication'); continue; }
-    if (!p.published_at) { exclude('no_persisted_published_decision'); continue; }
-    if (p.run_mode !== 'LIVE') { exclude(p.run_mode ? 'run_mode_not_live' : 'publication_not_linked_to_a_run'); continue; }
+    const gate = publicationExclusionReason(p, provider);
+    if (gate) { exclude(gate); continue; }
     const periods = windowPeriods(p.published_at);
-    if (!periods) { exclude('unparseable_published_at'); continue; }
 
     for (const [window, period] of Object.entries(periods)) {
-      const usableAtMs = Date.parse(`${addDays(period.end, 1)}T00:00:00Z`) + DATA_LATENCY_DAYS * DAY_MS;
+      const usableAtMs = windowUsableAtMs(period);
       if (!(nowMs >= usableAtMs)) { exclude('window_not_yet_usable', window); continue; }
-      const snap = (byPub.get(p.id) ?? []).find((s) => s.period_start === period.start && s.period_end === period.end);
-      if (!snap) { exclude('no_snapshot_for_exact_window', window); collectionNeeded.push({ publicationId: p.id, providerItemId: p.provider_item_id, window, periodStart: period.start, periodEnd: period.end }); continue; }
-      if (snap.status !== 'SUCCESS') { exclude('snapshot_not_success', window); continue; }
-      if (snap.provider !== p.provider || snap.provider_item_id !== p.provider_item_id) { exclude('snapshot_identity_mismatch', window); continue; }
-      if (!DATE_RE.test(snap.period_start) || !DATE_RE.test(snap.period_end)) { exclude('snapshot_period_malformed', window); continue; }
-      if (!(Date.parse(snap.collected_at) >= usableAtMs)) { exclude('snapshot_collected_before_data_settled', window); continue; }
-      for (const [metric, rule] of Object.entries(METRICS)) {
-        const value = snap[metric];
-        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || (rule.max !== undefined && value > rule.max)) { exclude(`${metric}_missing_or_invalid`, window); continue; }
-        if (rule.needsImpressions && !(typeof snap.impressions === 'number' && snap.impressions >= MIN_IMPRESSIONS_FOR_CTR)) { exclude(`${metric}_impressions_below_minimum`, window); continue; }
-        measurements.push({ publication: p, window, metric, value, snapshot: snap });
+
+      base: {
+        const snap = (byPub.get(p.id) ?? []).find((s) => s.period_start === period.start && s.period_end === period.end);
+        if (!snap) { exclude('no_snapshot_for_exact_window', window); collectionNeeded.push({ publicationId: p.id, providerItemId: p.provider_item_id, window, periodStart: period.start, periodEnd: period.end }); break base; }
+        if (snap.status !== 'SUCCESS') { exclude('snapshot_not_success', window); break base; }
+        if (snap.provider !== p.provider || snap.provider_item_id !== p.provider_item_id) { exclude('snapshot_identity_mismatch', window); break base; }
+        if (!DATE_RE.test(snap.period_start) || !DATE_RE.test(snap.period_end)) { exclude('snapshot_period_malformed', window); break base; }
+        if (!(Date.parse(snap.collected_at) >= usableAtMs)) { exclude('snapshot_collected_before_data_settled', window); break base; }
+        for (const [metric, rule] of Object.entries(METRICS)) {
+          const value = snap[metric];
+          if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || (rule.max !== undefined && value > rule.max)) { exclude(`${metric}_missing_or_invalid`, window); continue; }
+          if (rule.needsImpressions && !(typeof snap.impressions === 'number' && snap.impressions >= MIN_IMPRESSIONS_FOR_CTR)) { exclude(`${metric}_impressions_below_minimum`, window); continue; }
+          measurements.push({ publication: p, window, metric, value, snapshot: snap });
+        }
+      }
+
+      if (!audienceEnabled) continue;
+      for (const kind of AUDIENCE_KIND_LIST) {
+        const tag = `audience_${kind === 'RETENTION' ? 'retention' : 'traffic'}`;
+        const snap = (audByPub.get(p.id) ?? []).find((s) => s.kind === kind && s.period_start === period.start && s.period_end === period.end);
+        if (!snap) { exclude(`${tag}_no_snapshot_for_exact_window`, window); audienceCollectionNeeded.push({ publicationId: p.id, providerItemId: p.provider_item_id, window, kind, periodStart: period.start, periodEnd: period.end }); continue; }
+        // The reason carries the status, so UNAVAILABLE (no data) is visibly not "zero performance".
+        if (snap.status !== 'SUCCESS') { exclude(`${tag}_${String(snap.status).toLowerCase()}`, window); continue; }
+        if (snap.provider !== p.provider || snap.provider_item_id !== p.provider_item_id) { exclude(`${tag}_snapshot_identity_mismatch`, window); continue; }
+        if (!DATE_RE.test(snap.period_start) || !DATE_RE.test(snap.period_end)) { exclude(`${tag}_snapshot_period_malformed`, window); continue; }
+        if (!(Date.parse(snap.collected_at) >= usableAtMs)) { exclude(`${tag}_snapshot_collected_before_data_settled`, window); continue; }
+        const summary = safeJson(snap.summary_json);
+        if (!summary || typeof summary !== 'object') { exclude(`${tag}_summary_missing`, window); continue; }
+        for (const [metric, rule] of Object.entries(AUDIENCE_METRICS)) {
+          if (rule.kind !== kind) continue;
+          const value = rule.read(summary);
+          if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || (rule.max !== undefined && value > rule.max)) { exclude(`${metric}_missing_or_invalid`, window); continue; }
+          if (rule.needsViews && !(summary.totalViewsComplete === true && typeof summary.totalViews === 'number' && summary.totalViews >= MIN_TRAFFIC_VIEWS_FOR_SHARE)) { exclude(`${metric}_views_below_minimum`, window); continue; }
+          measurements.push({ publication: p, window, metric, value, snapshot: snap, context: kind === 'RETENTION' ? { steepestDrop: summary.steepestDrop ?? null } : { totalViews: summary.totalViews } });
+        }
       }
     }
   }
-  return { measurements, exclusions, collectionNeeded };
+  return { measurements, exclusions, collectionNeeded, audienceCollectionNeeded };
 }
 
 /** Pure: builds candidate findings or an explicit INSUFFICIENT_DATA result. */
 export function buildRecommendations(evidence, { now = new Date().toISOString() } = {}) {
-  const { measurements, exclusions, collectionNeeded } = collectMeasurements(evidence, { now });
+  const { measurements, exclusions, collectionNeeded, audienceCollectionNeeded } = collectMeasurements(evidence, { now });
   const candidates = [];
   const reasons = [];
   const groups = new Map();
@@ -156,13 +225,13 @@ export function buildRecommendations(evidence, { now = new Date().toISOString() 
         baselineCount: baseline.length,
         relativeDifference: rel,
         summary: `${subject.metric} in the ${subject.window} window was ${pct}% ${direction === 'ABOVE_BASELINE' ? 'above' : 'below'} the median of ${baseline.length} other comparable videos (${subject.value} vs ${med}). Descriptive only; not a statistical test or a causal claim.`,
-        evidence: { snapshotId: subject.snapshot.id, periodStart: subject.snapshot.period_start, periodEnd: subject.snapshot.period_end, baselineSnapshotIds: baseline.map((m) => m.snapshot.id) }
+        evidence: { snapshotId: subject.snapshot.id, periodStart: subject.snapshot.period_start, periodEnd: subject.snapshot.period_end, baselineSnapshotIds: baseline.map((m) => m.snapshot.id), ...(AUDIENCE_METRICS[subject.metric] ? { snapshotTable: 'analytics_audience_snapshots', snapshotKind: AUDIENCE_METRICS[subject.metric].kind } : {}), ...(subject.context ? { context: subject.context } : {}) }
       });
     }
   }
   if (measurements.length === 0 && evidence.publications.length > 0) reasons.push('no_valid_measurements');
   const status = groups.size > 0 && [...groups.values()].some((g) => g.length >= MIN_BASELINE + 1) ? RESULT_STATUS.OK : RESULT_STATUS.INSUFFICIENT_DATA;
-  return { status, reasons: [...new Set(reasons)], candidates, exclusions, collectionNeeded };
+  return { status, reasons: [...new Set(reasons)], candidates, exclusions, collectionNeeded, audienceCollectionNeeded };
 }
 
 function fingerprint(c) {
@@ -190,7 +259,7 @@ export function generateRecommendations({ storage, provider = 'youtube', now = (
     );
     if (res?.changes > 0) created += 1; else existing += 1;
   }
-  return { status: built.status, reasons: built.reasons, created, existing, exclusions: built.exclusions, collectionNeeded: built.collectionNeeded };
+  return { status: built.status, reasons: built.reasons, created, existing, exclusions: built.exclusions, collectionNeeded: built.collectionNeeded, audienceCollectionNeeded: built.audienceCollectionNeeded };
 }
 
 export function listRecommendations(storage, { status = null } = {}) {
