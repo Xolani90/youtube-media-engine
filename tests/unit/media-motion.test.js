@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import {
   MOTION_MODE, MOTION_LIMITS, MOTION_PRESETS, MotionError,
   planMotion, validateMotion, motionWindowAt, motionFrameCount, buildMotionFilter,
-  renderMotionClip, describeFfmpegFailure, annotateTimingWithMotion, prepareMotionClips, resolveMotionEnabled
+  renderMotionClip, motionPrescale, describeFfmpegFailure, annotateTimingWithMotion, prepareMotionClips, resolveMotionEnabled
 } from '../../src/media/motion.js';
 import { RENDER_DEFAULTS } from '../../src/media/constants.js';
 import { computeVisualTiming } from '../../src/media/visualTiming.js';
@@ -283,4 +283,17 @@ test('F2c. a real FFmpeg failure message carries exit status and the encoder err
       (e) => e instanceof MotionError && /exit=\d+ signal=- code=-/.test(e.message)
     );
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('G. prescale: x4 on the proven 720p path, x2 on 1080x1920 so the Celeron render is not memory/time bound; filter uses it', () => {
+  assert.equal(motionPrescale(1280, 720), 4);
+  assert.equal(motionPrescale(1080, 1920), 2);
+  assert.equal(motionPrescale(1920, 1080), 2);
+  assert.equal(motionPrescale(7680, 4320), 2, 'never below x2');
+  const motion = planMotion({ assetId: 'asset-g', segmentIndex: 1 });
+  const portrait = buildMotionFilter({ motion, width: 1080, height: 1920, fps: 30, durationSeconds: 2 });
+  assert.match(portrait, /^scale=2160:3840:/);
+  assert.match(portrait, /crop=2160:3840,/);
+  const landscape = buildMotionFilter({ motion, width: 1280, height: 720, fps: 30, durationSeconds: 2 });
+  assert.match(landscape, /^scale=5120:2880:/);
 });

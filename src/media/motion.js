@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describeFfmpegFailure } from './ffmpegFailure.js';
+import { RENDER_DEFAULTS } from './constants.js';
 
 // Re-exported so existing importers of motion.js keep working.
 export { describeFfmpegFailure };
@@ -61,6 +62,12 @@ export const MOTION_LIMITS = Object.freeze({
   // zoompan so the integer crop-window rounding inside zoompan is a fraction
   // of an output pixel (this is what keeps slow zooms from visibly jittering).
   PRESCALE: 4,
+  // Measured on the Celeron N4020 (3.9 GB RAM): a 1080x1920 clip prescaled x4
+  // (4320x7680) took 430 s, x2 took 224 s, x1 took 234 s (all 1410 frames OK).
+  // So x2 is the sweet spot for large frames. The x4 prescale is kept whenever
+  // the prescaled canvas stays at or below this many pixels (1280x720 x4 =
+  // 14.7 MP, the proven path).
+  MAX_PRESCALED_PIXELS: 15_000_000,
   MAX_DIMENSION: 7680,
   MIN_SOURCE_DIMENSION: 16,
   MAX_FPS: 120,
@@ -204,12 +211,19 @@ export function motionFrameCount(durationSeconds, fps) {
 
 const num = (n) => Number(n.toFixed(6)).toString();
 
+/** Prescale factor: PRESCALE, halved (min 2) when the prescaled canvas would exceed MAX_PRESCALED_PIXELS. */
+export function motionPrescale(width, height) {
+  let S = MOTION_LIMITS.PRESCALE;
+  while (S > 2 && width * S * height * S > MOTION_LIMITS.MAX_PRESCALED_PIXELS) S /= 2;
+  return S;
+}
+
 /** The FFmpeg -vf chain for one motion clip. Pure string; fully determined by its arguments. */
 export function buildMotionFilter({ motion, width, height, fps, durationSeconds }) {
   validateMotion(motion);
   validateOutputParams({ width, height, fps, durationSeconds });
   const frames = motionFrameCount(durationSeconds, fps);
-  const S = MOTION_LIMITS.PRESCALE;
+  const S = motionPrescale(width, height);
   const pw = width * S;
   const ph = height * S;
   // progress per output frame; a 1-frame clip is pinned to progress 0.
@@ -270,7 +284,10 @@ export function renderMotionClip({ imagePath, outputPath, motion, width, height,
     execFileSync(
       'ffmpeg',
       ['-y', '-hide_banner', '-nostats', '-i', imagePath, '-vf', vf, '-frames:v', String(frames), '-r', String(fps), '-an',
-        '-c:v', videoEncoder, '-pix_fmt', 'yuv420p', path.resolve(outputPath)],
+        '-c:v', videoEncoder,
+        // Bounded lookahead + compensating CRF for libx264 (memory; see RENDER_DEFAULTS.X264_INTERMEDIATE_ARGS).
+        ...(videoEncoder === 'libx264' ? RENDER_DEFAULTS.X264_INTERMEDIATE_ARGS : []),
+        '-pix_fmt', 'yuv420p', path.resolve(outputPath)],
       { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: MOTION_FFMPEG_MAX_BUFFER }
     );
   } catch (err) {
