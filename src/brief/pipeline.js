@@ -40,6 +40,27 @@ function fieldsToRow(parsed) {
   };
 }
 
+const BRIEF_REGENERATION_REFUSED = 'BRIEF_REGENERATION_NOT_ALLOWED_AFTER_BRIEF_CREATED';
+
+// Thrown only by the in-transaction re-check, so the caller can convert exactly this condition (and nothing
+// else) into the same structured rejection the pre-generation guard returns. Throwing inside the SQLite
+// transaction also guarantees the rollback of every write made so far in it.
+const BRIEF_REGENERATION_TARGET_MISSING = 'BRIEF_NOT_FOUND_DURING_REGENERATION';
+
+class BriefRegenerationRefusedError extends Error {
+  constructor(reason = BRIEF_REGENERATION_REFUSED) {
+    super(reason);
+    this.name = 'BriefRegenerationRefusedError';
+    this.reason = reason;
+  }
+}
+
+function briefRegenerationAllowed(storage, contentBriefId) {
+  const cv = storage.get('SELECT state FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+  // Fail closed: a missing lifecycle record means overwriting the Brief cannot be shown to be permitted.
+  return Boolean(cv) && cv.state === 'BRIEF_CREATED';
+}
+
 /**
  * Creates (or, with `regenerate: true`, replaces) the canonical Brief for
  * a Research project (Brief Specification, D1-D16).
@@ -72,6 +93,17 @@ export async function createBrief({ storage, researchProjectId, llmRouter, polic
   // on direct invocation too (selection filtering is not the only guard).
   // Identity is (BRIEF, research_project_id): no content_version exists yet
   // and none is ever fabricated. Owner-only reactivation is the sole way out.
+  // Regeneration overwrites the Brief in place. Once the content_version has left BRIEF_CREATED, the Script,
+  // fact-check, originality and Quality Gate results were made against the old text (key_claims, visual_ideas),
+  // so overwriting it would let unreviewed content reach later stages. Refuse before any LLM call.
+  if (existing && regenerate && !briefRegenerationAllowed(storage, existing.id)) {
+    logDecision(storage, {
+      runId, stage: BRIEF_STAGE.ELIGIBILITY_CHECK, subjectType: 'research_project',
+      subjectId: researchProjectId, decision: 'REJECTED', reason: BRIEF_REGENERATION_REFUSED
+    });
+    return { rejected: true, reason: BRIEF_REGENERATION_REFUSED, created: false, regenerated: false };
+  }
+
   if (isQuarantined(storage, researchProjectId, RETRY_STAGE.BRIEF)) {
     logDecision(storage, {
       runId, stage: BRIEF_STAGE.ELIGIBILITY_CHECK, subjectType: 'research_project',
@@ -208,79 +240,97 @@ export async function createBrief({ storage, researchProjectId, llmRouter, polic
   // already complete above, so everything inside this closure is a plain
   // synchronous DB write and can be wrapped safely (§14/§16: no partial
   // Brief, no incorrect BRIEF_CREATED transition on any failure here).
-  const outcome = storage.transaction(() => {
-    if (existing) {
-      // D6: explicit regeneration replaces the canonical Brief in place —
-      // same id, same created_at, content replaced. Brief id is stable, so
-      // downstream FK references (Script, content_versions) remain valid;
-      // no new content_versions row or lifecycle transition is needed,
-      // since the pipeline was already at BRIEF_CREATED for this Research
-      // project.
+  let outcome;
+  try {
+    outcome = storage.transaction(() => {
+      if (existing) {
+        // The canonical Brief was read before the awaits above; confirm it still exists, otherwise the UPDATE below
+        // would match zero rows and regeneration would be reported as successful with no Brief behind it.
+        if (!storage.get('SELECT id FROM content_briefs WHERE id = ?', [existing.id])) {
+          throw new BriefRegenerationRefusedError(BRIEF_REGENERATION_TARGET_MISSING);
+        }
+        if (!briefRegenerationAllowed(storage, existing.id)) throw new BriefRegenerationRefusedError();
+        // D6: explicit regeneration replaces the canonical Brief in place —
+        // same id, same created_at, content replaced. Brief id is stable, so
+        // downstream FK references (Script, content_versions) remain valid;
+        // no new content_versions row or lifecycle transition is needed,
+        // since the pipeline was already at BRIEF_CREATED for this Research
+        // project.
+        storage.run(
+          `UPDATE content_briefs SET
+             working_title = ?, core_question = ?, target_audience = ?, viewer_promise = ?, hook = ?,
+             angle = ?, narrative_structure = ?, key_claims = ?, counterpoints = ?, original_insights = ?,
+             visual_ideas = ?, monetization_opportunities = ?, risk_assessment = ?
+           WHERE id = ?`,
+          [
+            row.working_title, coreQuestion, row.target_audience, row.viewer_promise, row.hook,
+            row.angle, row.narrative_structure, keyClaimsJson, row.counterpoints, row.original_insights,
+            row.visual_ideas, row.monetization_opportunities, row.risk_assessment, existing.id
+          ]
+        );
+        logDecision(storage, {
+          runId, stage: BRIEF_STAGE.PERSISTED, subjectType: 'content_brief', subjectId: existing.id,
+          decision: 'REPLACED', reason: 'explicit_regeneration'
+        }, () => nowISO);
+        return { briefId: existing.id, created: false, regenerated: true, contentVersionId: null };
+      }
+
+      const briefId = crypto.randomUUID();
       storage.run(
-        `UPDATE content_briefs SET
-           working_title = ?, core_question = ?, target_audience = ?, viewer_promise = ?, hook = ?,
-           angle = ?, narrative_structure = ?, key_claims = ?, counterpoints = ?, original_insights = ?,
-           visual_ideas = ?, monetization_opportunities = ?, risk_assessment = ?
-         WHERE id = ?`,
+        `INSERT INTO content_briefs
+          (id, opportunity_id, research_project_id, working_title, core_question, target_audience, viewer_promise,
+           hook, angle, narrative_structure, key_claims, counterpoints, original_insights, visual_ideas,
+           monetization_opportunities, risk_assessment, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          row.working_title, coreQuestion, row.target_audience, row.viewer_promise, row.hook,
-          row.angle, row.narrative_structure, keyClaimsJson, row.counterpoints, row.original_insights,
-          row.visual_ideas, row.monetization_opportunities, row.risk_assessment, existing.id
+          briefId, opportunity.id, researchProjectId, row.working_title, coreQuestion, row.target_audience,
+          row.viewer_promise, row.hook, row.angle, row.narrative_structure, keyClaimsJson,
+          row.counterpoints, row.original_insights, row.visual_ideas, row.monetization_opportunities,
+          row.risk_assessment, nowISO
         ]
       );
       logDecision(storage, {
-        runId, stage: BRIEF_STAGE.PERSISTED, subjectType: 'content_brief', subjectId: existing.id,
-        decision: 'REPLACED', reason: 'explicit_regeneration'
+        runId, stage: BRIEF_STAGE.PERSISTED, subjectType: 'content_brief', subjectId: briefId,
+        decision: 'CREATED', reason: 'brief_generation_accepted'
       }, () => nowISO);
-      return { briefId: existing.id, created: false, regenerated: true, contentVersionId: null };
-    }
 
-    const briefId = crypto.randomUUID();
-    storage.run(
-      `INSERT INTO content_briefs
-        (id, opportunity_id, research_project_id, working_title, core_question, target_audience, viewer_promise,
-         hook, angle, narrative_structure, key_claims, counterpoints, original_insights, visual_ideas,
-         monetization_opportunities, risk_assessment, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        briefId, opportunity.id, researchProjectId, row.working_title, coreQuestion, row.target_audience,
-        row.viewer_promise, row.hook, row.angle, row.narrative_structure, keyClaimsJson,
-        row.counterpoints, row.original_insights, row.visual_ideas, row.monetization_opportunities,
-        row.risk_assessment, nowISO
-      ]
-    );
+      // D7/D15: RESEARCH_COMPLETE -> BRIEF_CREATED, only after successful
+      // persistence, and only on first creation (regeneration does not move
+      // the lifecycle state — it is already at BRIEF_CREATED). No content
+      // version row exists yet for this piece of content (content_versions
+      // requires a non-null content_brief_id, so this is necessarily its
+      // first row) — that row is where the lifecycle state actually lives.
+      if (!canTransition('RESEARCH_COMPLETE', 'BRIEF_CREATED')) {
+        // Defensive: the state machine itself already guarantees this, but
+        // Brief must not silently persist a Brief the lifecycle model would
+        // reject.
+        throw new InvalidTransitionError('RESEARCH_COMPLETE -> BRIEF_CREATED is not a valid transition');
+      }
+      const newState = transition('RESEARCH_COMPLETE', 'BRIEF_CREATED');
+
+      const contentVersionId = crypto.randomUUID();
+      storage.run(
+        `INSERT INTO content_versions (id, content_brief_id, script_id, state, created_at)
+         VALUES (?, ?, NULL, ?, ?)`,
+        [contentVersionId, briefId, newState, nowISO]
+      );
+      logDecision(storage, {
+        runId, stage: BRIEF_STAGE.LIFECYCLE_TRANSITION, subjectType: 'content_version', subjectId: contentVersionId,
+        decision: 'BRIEF_CREATED', reason: 'brief_persisted', resultingState: newState
+      }, () => nowISO);
+
+      return { briefId, created: true, regenerated: false, contentVersionId };
+    });
+  } catch (err) {
+    // Only the specific regeneration-refused error is converted; any other error propagates unchanged.
+    // The transaction has already rolled back, so the original Brief and content_version are untouched.
+    if (!(err instanceof BriefRegenerationRefusedError)) throw err;
     logDecision(storage, {
-      runId, stage: BRIEF_STAGE.PERSISTED, subjectType: 'content_brief', subjectId: briefId,
-      decision: 'CREATED', reason: 'brief_generation_accepted'
-    }, () => nowISO);
-
-    // D7/D15: RESEARCH_COMPLETE -> BRIEF_CREATED, only after successful
-    // persistence, and only on first creation (regeneration does not move
-    // the lifecycle state — it is already at BRIEF_CREATED). No content
-    // version row exists yet for this piece of content (content_versions
-    // requires a non-null content_brief_id, so this is necessarily its
-    // first row) — that row is where the lifecycle state actually lives.
-    if (!canTransition('RESEARCH_COMPLETE', 'BRIEF_CREATED')) {
-      // Defensive: the state machine itself already guarantees this, but
-      // Brief must not silently persist a Brief the lifecycle model would
-      // reject.
-      throw new InvalidTransitionError('RESEARCH_COMPLETE -> BRIEF_CREATED is not a valid transition');
-    }
-    const newState = transition('RESEARCH_COMPLETE', 'BRIEF_CREATED');
-
-    const contentVersionId = crypto.randomUUID();
-    storage.run(
-      `INSERT INTO content_versions (id, content_brief_id, script_id, state, created_at)
-       VALUES (?, ?, NULL, ?, ?)`,
-      [contentVersionId, briefId, newState, nowISO]
-    );
-    logDecision(storage, {
-      runId, stage: BRIEF_STAGE.LIFECYCLE_TRANSITION, subjectType: 'content_version', subjectId: contentVersionId,
-      decision: 'BRIEF_CREATED', reason: 'brief_persisted', resultingState: newState
-    }, () => nowISO);
-
-    return { briefId, created: true, regenerated: false, contentVersionId };
-  });
+      runId, stage: BRIEF_STAGE.ELIGIBILITY_CHECK, subjectType: 'research_project',
+      subjectId: researchProjectId, decision: 'REJECTED', reason: err.reason
+    });
+    return { rejected: true, reason: err.reason, created: false, regenerated: false };
+  }
 
   const brief = storage.get('SELECT * FROM content_briefs WHERE id = ?', [outcome.briefId]);
   return {

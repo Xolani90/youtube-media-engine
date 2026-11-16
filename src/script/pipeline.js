@@ -29,6 +29,24 @@ function currentScript(storage, contentBriefId) {
   );
 }
 
+const REGENERATION_REFUSED = 'REGENERATION_NOT_ALLOWED_AFTER_SCRIPT_DRAFT';
+
+// Thrown only by the in-transaction re-check, so the caller can convert exactly this condition (and nothing
+// else) into the same structured rejection the pre-generation guard returns. Throwing inside the SQLite
+// transaction also guarantees the rollback of every write made so far in it.
+class ScriptRegenerationRefusedError extends Error {
+  constructor() {
+    super(REGENERATION_REFUSED);
+    this.name = 'ScriptRegenerationRefusedError';
+    this.reason = REGENERATION_REFUSED;
+  }
+}
+
+function regenerationAllowed(storage, contentBriefId) {
+  const cv = storage.get('SELECT state FROM content_versions WHERE content_brief_id = ?', [contentBriefId]);
+  return Boolean(cv) && cv.state === 'SCRIPT_DRAFT';
+}
+
 /**
  * Creates (or, with `regenerate: true`, appends a new version of) the
  * Script for a Brief (Script Specification, §3/§6).
@@ -64,6 +82,17 @@ export async function createScript({ storage, contentBriefId, llmRouter, policy,
   // --- A4 bounded-retry governance: a quarantined brief is refused on direct
   // invocation too. Identity is (SCRIPT, content_brief_id) - NOT the content
   // version id. Owner-only reactivation is the sole way out.
+  // Regeneration swaps content_versions.script_id. Fact-check, originality and Quality Gate results are bound
+  // to the previous script_id, so once the content_version has left SCRIPT_DRAFT a replacement would reach
+  // later stages unchecked. Refuse before any LLM call is spent.
+  if (existingBeforeGeneration && regenerate && !regenerationAllowed(storage, contentBriefId)) {
+    logDecision(storage, {
+      runId, stage: SCRIPT_STAGE.ELIGIBILITY_CHECK, subjectType: 'content_brief',
+      subjectId: contentBriefId, decision: 'REJECTED', reason: REGENERATION_REFUSED
+    });
+    return { rejected: true, reason: REGENERATION_REFUSED, created: false, regenerated: false };
+  }
+
   if (isQuarantined(storage, contentBriefId, RETRY_STAGE.SCRIPT)) {
     logDecision(storage, {
       runId, stage: SCRIPT_STAGE.ELIGIBILITY_CHECK, subjectType: 'content_brief',
@@ -210,55 +239,73 @@ export async function createScript({ storage, contentBriefId, llmRouter, policy,
   // caller using a different connection/process against the same
   // database file would have any duplicate-version insert rejected by
   // SQLite itself rather than silently succeeding.
-  const outcome = storage.transaction(() => {
-    const existing = currentScript(storage, contentBriefId);
-    const nextVersion = existing ? existing.version + 1 : 1;
-
-    const scriptId = crypto.randomUUID();
-    storage.run(
-      `INSERT INTO scripts (id, content_brief_id, version, body, claim_links, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [scriptId, contentBriefId, nextVersion, body, claimLinksJson, nowISO]
-    );
-    logDecision(storage, {
-      runId, stage: SCRIPT_STAGE.PERSISTED, subjectType: 'script', subjectId: scriptId,
-      decision: existing ? 'REGENERATED' : 'CREATED', reason: existing ? 'explicit_regeneration' : 'script_generation_accepted'
-    }, () => nowISO);
-
-    if (!existing) {
-      // BRIEF_CREATED -> SCRIPT_DRAFT, only after successful persistence,
-      // and only on first version creation (regeneration does not move
-      // the lifecycle state — it is already at SCRIPT_DRAFT).
-      const contentVersion = storage.get(
-        'SELECT * FROM content_versions WHERE content_brief_id = ?',
-        [contentBriefId]
-      );
-      if (!contentVersion) {
-        throw new Error(`No content_versions row found for content_brief_id ${contentBriefId}; Brief must be persisted before Script.`);
+  let outcome;
+  try {
+    outcome = storage.transaction(() => {
+      const existing = currentScript(storage, contentBriefId);
+      // Guard whenever this call is (or turned out to be) a regeneration: a Script exists now, OR the caller asked
+      // to regenerate a Script that existed at the first check but has since become unavailable. A first creation
+      // that merely passes `regenerate: true` (no Script before or now) is not a regeneration and stays allowed.
+      if ((existing || (regenerate && existingBeforeGeneration)) && !regenerationAllowed(storage, contentBriefId)) {
+        throw new ScriptRegenerationRefusedError();
       }
-      if (!canTransition(contentVersion.state, 'SCRIPT_DRAFT')) {
-        throw new InvalidTransitionError(`${contentVersion.state} -> SCRIPT_DRAFT is not a valid transition`);
-      }
-      const newState = transition(contentVersion.state, 'SCRIPT_DRAFT');
+      const nextVersion = existing ? existing.version + 1 : 1;
+
+      const scriptId = crypto.randomUUID();
       storage.run(
-        'UPDATE content_versions SET script_id = ?, state = ? WHERE id = ?',
-        [scriptId, newState, contentVersion.id]
+        `INSERT INTO scripts (id, content_brief_id, version, body, claim_links, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [scriptId, contentBriefId, nextVersion, body, claimLinksJson, nowISO]
       );
       logDecision(storage, {
-        runId, stage: SCRIPT_STAGE.LIFECYCLE_TRANSITION, subjectType: 'content_version', subjectId: contentVersion.id,
-        decision: 'SCRIPT_DRAFT', reason: 'script_persisted', resultingState: newState
+        runId, stage: SCRIPT_STAGE.PERSISTED, subjectType: 'script', subjectId: scriptId,
+        decision: existing ? 'REGENERATED' : 'CREATED', reason: existing ? 'explicit_regeneration' : 'script_generation_accepted'
       }, () => nowISO);
-    } else {
-      // Regeneration: keep the lifecycle state as-is, just repoint the
-      // current-version pointer at the newest script row.
-      storage.run(
-        'UPDATE content_versions SET script_id = ? WHERE content_brief_id = ?',
-        [scriptId, contentBriefId]
-      );
-    }
 
-    return { scriptId, created: !existing, regenerated: Boolean(existing) };
-  });
+      if (!existing) {
+        // BRIEF_CREATED -> SCRIPT_DRAFT, only after successful persistence,
+        // and only on first version creation (regeneration does not move
+        // the lifecycle state — it is already at SCRIPT_DRAFT).
+        const contentVersion = storage.get(
+          'SELECT * FROM content_versions WHERE content_brief_id = ?',
+          [contentBriefId]
+        );
+        if (!contentVersion) {
+          throw new Error(`No content_versions row found for content_brief_id ${contentBriefId}; Brief must be persisted before Script.`);
+        }
+        if (!canTransition(contentVersion.state, 'SCRIPT_DRAFT')) {
+          throw new InvalidTransitionError(`${contentVersion.state} -> SCRIPT_DRAFT is not a valid transition`);
+        }
+        const newState = transition(contentVersion.state, 'SCRIPT_DRAFT');
+        storage.run(
+          'UPDATE content_versions SET script_id = ?, state = ? WHERE id = ?',
+          [scriptId, newState, contentVersion.id]
+        );
+        logDecision(storage, {
+          runId, stage: SCRIPT_STAGE.LIFECYCLE_TRANSITION, subjectType: 'content_version', subjectId: contentVersion.id,
+          decision: 'SCRIPT_DRAFT', reason: 'script_persisted', resultingState: newState
+        }, () => nowISO);
+      } else {
+        // Regeneration: keep the lifecycle state as-is, just repoint the
+        // current-version pointer at the newest script row.
+        storage.run(
+          'UPDATE content_versions SET script_id = ? WHERE content_brief_id = ?',
+          [scriptId, contentBriefId]
+        );
+      }
+
+      return { scriptId, created: !existing, regenerated: Boolean(existing) };
+    });
+  } catch (err) {
+    // Only the specific regeneration-refused error is converted; any other error propagates unchanged.
+    // The transaction has already rolled back, so no new script row and no script_id repoint persist.
+    if (!(err instanceof ScriptRegenerationRefusedError)) throw err;
+    logDecision(storage, {
+      runId, stage: SCRIPT_STAGE.ELIGIBILITY_CHECK, subjectType: 'content_brief',
+      subjectId: contentBriefId, decision: 'REJECTED', reason: REGENERATION_REFUSED
+    });
+    return { rejected: true, reason: REGENERATION_REFUSED, created: false, regenerated: false };
+  }
 
   const script = storage.get('SELECT * FROM scripts WHERE id = ?', [outcome.scriptId]);
   return {
